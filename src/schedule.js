@@ -229,6 +229,23 @@ function barItem(dateText, title, questionIds, latest) {
   return item;
 }
 
+// 連続する番号は「30〜38」のようにまとめ、飛んでいる箇所だけ区切る
+function compressRuns(nums) {
+  const parts = [];
+  let start = nums[0];
+  let prev = nums[0];
+  for (let i = 1; i <= nums.length; i++) {
+    const n = nums[i];
+    if (n === prev + 1) {
+      prev = n;
+      continue;
+    }
+    parts.push(start === prev ? `${start}` : `${start}〜${prev}`);
+    start = prev = n;
+  }
+  return parts;
+}
+
 function rangeLabel(questionIds) {
   const qs = questionIds.map(q).filter(Boolean);
   if (!qs.length) return `${questionIds.length}問`;
@@ -238,7 +255,7 @@ function rangeLabel(questionIds) {
   // 例題 / 基本例題 が混ざる場合は共通する「例題」でまとめる
   const prefix =
     types.size === 1 ? [...types][0] : qs.every((x) => x.type.endsWith('例題')) ? '例題' : '';
-  const list = nums.join(', ');
+  const list = compressRuns(nums).join('、');
   return prefix ? `${prefix} ${list}` : list;
 }
 

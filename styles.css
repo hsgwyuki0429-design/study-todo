@@ -414,13 +414,25 @@ input[type='text'] { width: 100%; }
 .bar-title { flex: 1; min-width: 0; font-size: 14px; overflow-wrap: anywhere; line-height: 1.4; }
 .bar-count { font-size: 11px; color: var(--fg-sub); font-variant-numeric: tabular-nums; }
 
-.bar { display: flex; gap: 2px; height: 12px; }
+.bar {
+  display: flex;
+  height: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  overflow: hidden;
+}
 
-.bar .seg { flex: 1; border: 1px solid var(--line-strong); border-radius: 2px; background: none; min-width: 3px; }
-.bar .seg.tone-success { background: var(--success); border-color: var(--success); }
-.bar .seg.tone-accent { background: var(--accent); border-color: var(--accent); }
-.bar .seg.tone-warning { background: var(--warning); border-color: var(--warning); }
-.bar .seg.tone-danger { background: var(--danger); border-color: var(--danger); }
+.bar .seg {
+  flex: 1;
+  min-width: 3px;
+  background: none;
+  border-right: 1px solid var(--line);
+}
+.bar .seg:last-child { border-right: none; }
+.bar .seg.tone-success { background: var(--success); border-right-color: var(--success); }
+.bar .seg.tone-accent { background: var(--accent); border-right-color: var(--accent); }
+.bar .seg.tone-warning { background: var(--warning); border-right-color: var(--warning); }
+.bar .seg.tone-danger { background: var(--danger); border-right-color: var(--danger); }
 
 /* ---------- 設定 ---------- */
 
