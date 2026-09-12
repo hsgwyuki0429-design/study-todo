@@ -4,6 +4,7 @@ import * as api from './api.js';
 import { state, render } from './state.js';
 import { el, row } from './ui.js';
 import { renderCloudCard } from './settings-cloud.js';
+import { countDemoStudyData, removeDemoStudyData, loadQuestionMaster } from './seed.js';
 
 async function update(patch) {
   state.settings = await api.saveSettings({ ...state.settings, ...patch });
@@ -79,20 +80,76 @@ export async function renderSettings(screen) {
   const info = await api.getAppInfo();
   list.append(
     row({
-      title: '目次（問題マスタ）',
-      sub: `${info.questionCount}問 ・ ${info.subjects.map((s) => s.subject).join('、') || '未登録'}`,
+      title: '問題マスタ',
+      sub: `${info.questionCount}問 ・ ${info.books.join('、') || '冊の情報なし'}`,
     })
   );
+  if (info.questionTypes.length) {
+    list.append(
+      row({
+        title: '種類ごとの問題数',
+        sub: info.questionTypes.map((t) => `${t.type} ${t.count}問`).join(' ・ '),
+        classes: ['row-indent'],
+      })
+    );
+  }
   for (const subject of info.subjects) {
+    list.append(el('div', 'section-head', subject.subject));
     for (const ch of subject.chapters) {
-      list.append(row({ title: ch.chapter, sub: ch.sections.join(' ・ '), classes: ['row-indent'] }));
+      const total = ch.sectionDetails.reduce((sum, sd) => sum + sd.questionCount, 0);
+      list.append(row({ title: ch.chapter, sub: `${total}問` }));
+      for (const sd of ch.sectionDetails) {
+        list.append(
+          row({
+            title: sd.section,
+            sub: `${sd.questionCount}問${sd.page ? ` ・ p.${sd.page}〜` : ''}`,
+            classes: ['row-indent'],
+          })
+        );
+      }
     }
   }
+
   const importBtn = el('button', 'btn', '問題をインポート');
   importBtn.onclick = () => document.querySelector('#dialog-import').showModal();
+  const reloadBtn = el('button', 'btn', '同梱の問題マスタを読み直す');
+  reloadBtn.onclick = async () => {
+    if (!confirm('data/questions.json の内容で問題マスタを置き換えます。学習記録・予定・目標は消えません。')) return;
+    try {
+      const master = await loadQuestionMaster();
+      const n = await api.importQuestions(master.questions, { replace: true });
+      alert(`${n}問を読み込みました`);
+      render();
+    } catch (err) {
+      alert(`読み込めませんでした: ${err.message}`);
+    }
+  };
   const importWrap = el('div', 'setting-actions');
-  importWrap.append(importBtn);
+  importWrap.append(importBtn, reloadBtn);
   list.append(importWrap);
+
+  // 以前の版が入れていた確認用のサンプル。本物の成績ではないので、明示的に消せるようにする。
+  const demo = await countDemoStudyData();
+  const demoTotal = demo.records + demo.tasks + demo.goals + demo.questions;
+  if (demoTotal > 0) {
+    list.append(el('div', 'section-head', 'サンプル（デモ）データ'));
+    list.append(
+      row({
+        title: '動作確認用のデータが残っています',
+        sub: `学習記録${demo.records}件 ・ 予定${demo.tasks}件 ・ 目標${demo.goals}件 ・ 問題${demo.questions}問。これは実際の学習の記録ではありません。`,
+      })
+    );
+    const purgeBtn = el('button', 'btn btn-danger', 'サンプルデータを削除');
+    purgeBtn.onclick = async () => {
+      if (!confirm('サンプルの学習記録・予定・目標・問題だけを削除します。本物の記録は残ります。よろしいですか？')) return;
+      const removed = await removeDemoStudyData();
+      alert(`削除しました（記録${removed.records} / 予定${removed.tasks} / 目標${removed.goals} / 問題${removed.questions}）`);
+      render();
+    };
+    const purgeWrap = el('div', 'setting-actions');
+    purgeWrap.append(purgeBtn);
+    list.append(purgeWrap);
+  }
 
   list.append(el('div', 'section-head', 'データのバックアップ'));
   const exportBtn = el('button', 'btn', 'JSONで書き出す');

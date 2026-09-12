@@ -496,3 +496,6 @@ input[type='password'] { width: 100%; }
   border-radius: 6px;
   box-sizing: border-box;
 }
+
+.dialog-check { display:flex; align-items:center; gap:8px; margin:8px 0; font-size:13px; color:var(--muted); }
+.dialog-check input { width:18px; height:18px; }

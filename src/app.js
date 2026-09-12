@@ -69,7 +69,12 @@ function bindImportDialog() {
   const dlg = $('#dialog-import');
   $('#import-run').onclick = async () => {
     try {
-      const n = await api.importQuestions(JSON.parse($('#import-text').value));
+      const parsed = JSON.parse($('#import-text').value);
+      // Question[] でも { questions: [...] }（data/questions.json の形）でも受け取る。
+      const list = Array.isArray(parsed) ? parsed : parsed?.questions;
+      if (!Array.isArray(list)) throw new Error('Question の配列か { questions: [...] } を貼り付けてください');
+      const replace = $('#import-replace')?.checked === true;
+      const n = await api.importQuestions(list, { replace });
       await loadQuestions();
       dlg.close();
       alert(`${n}問を取り込みました`);
@@ -86,7 +91,13 @@ async function loadQuestions() {
 }
 
 async function boot() {
-  await seedIfEmpty();
+  // 問題マスタの用意に失敗しても（初回オフラインなど）、
+  // 既に入っている学習データは使えるよう、起動そのものは止めない。
+  try {
+    await seedIfEmpty();
+  } catch (err) {
+    console.warn('問題マスタを用意できませんでした:', err.message);
+  }
   state.settings = await api.getSettings();
   applyTheme();
   await loadQuestions();

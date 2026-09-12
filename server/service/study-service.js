@@ -16,8 +16,9 @@ import {
 } from "../core/validate.js";
 import { dateKeyOf, isDateKey, normalizeOffset, startOfDayMs, todayKeyOf } from "../../src/datetime.js";
 import { EVALUATIONS, MISTAKE_EVALUATIONS, TASK_KINDS, computeStats } from "./merge.js";
+import { buildOutline, compareQuestions, questionHaystack } from "../../src/question-order.js";
 
-export const DATA_VERSION = "1.1.0";
+export const DATA_VERSION = "1.2.0";
 
 export const SERVICE_LIMITS = Object.freeze({
   listLimitDefault: 50,
@@ -146,11 +147,11 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         sync.status(),
       ]);
       const questions = questionsDoc.questions ?? [];
-      const structure = {};
+      const byType = {};
+      const books = new Set();
       for (const question of questions) {
-        structure[question.subject] ??= {};
-        structure[question.subject][question.chapter] ??= new Set();
-        structure[question.subject][question.chapter].add(question.section);
+        byType[question.type] = (byType[question.type] ?? 0) + 1;
+        if (question.book) books.add(question.book);
       }
       return {
         app: "study-todo（青チャート学習管理）",
@@ -159,15 +160,18 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         today: today(args),
         questionCount: questions.length,
         questionsVersion: questionsDoc.version,
+        books: [...books],
+        questionTypes: Object.entries(byType)
+          .map(([type, count]) => ({ type, count }))
+          .sort((left, right) => right.count - left.count),
+        difficultyScale: "1〜5（青チャートのコンパスの数）。小さいほどやさしい。",
         studyRecords: records.length,
         devices: status.devices,
         lastSyncedAt: status.lastSyncedAt,
         evaluations: EVALUATIONS.map((value) => ({ value, label: EVALUATION_LABELS[value] })),
         taskKinds: [...TASK_KINDS],
-        subjects: Object.entries(structure).map(([subject, chapters]) => ({
-          subject,
-          chapters: Object.entries(chapters).map(([chapter, sections]) => ({ chapter, sections: [...sections] })),
-        })),
+        // 教科 → 章 → 節 を、教科書の掲載順のまま返す（名前の文字列順ではない）。
+        subjects: buildOutline(questions),
         note: questions.length
           ? null
           : "問題マスタがまだ同期されていません。study-todo の設定画面から問題をインポートして同期してください。",
@@ -181,17 +185,44 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       const chapter = readString(args.chapter, "chapter", { max: 80 });
       const section = readString(args.section, "section", { max: 80 });
       const type = readString(args.type, "type", { max: 40 });
+      const book = readString(args.book, "book", { max: 80 });
       if (subject) list = list.filter((question) => question.subject === subject);
       if (chapter) list = list.filter((question) => question.chapter === chapter);
       if (section) list = list.filter((question) => question.section === section);
       if (type) list = list.filter((question) => question.type === type);
+      if (book) list = list.filter((question) => question.book === book);
+
+      // 「基本例題だけ」のように複数の種類をまとめて選べるようにする。
+      if (args.types !== undefined && args.types !== null) {
+        const types = readArray(args.types, "types", { max: 20 })
+          .map((value, index) => readString(value, `types[${index}]`, { required: true, max: 40 }));
+        if (types.length) list = list.filter((question) => types.includes(question.type));
+      }
+
       const numberFrom = readInteger(args.numberFrom, "numberFrom", { min: 0 });
       const numberTo = readInteger(args.numberTo, "numberTo", { min: 0 });
       if (numberFrom !== null) list = list.filter((question) => question.number >= numberFrom);
       if (numberTo !== null) list = list.filter((question) => question.number <= numberTo);
 
-      list = [...list].sort((left, right) =>
-        String(left.chapter).localeCompare(String(right.chapter)) || left.number - right.number);
+      // 「難しい問題を除く」を difficultyTo で表せるようにする。
+      const difficultyFrom = readInteger(args.difficultyFrom, "difficultyFrom", { min: 1, max: 5 });
+      const difficultyTo = readInteger(args.difficultyTo, "difficultyTo", { min: 1, max: 5 });
+      if (difficultyFrom !== null) {
+        list = list.filter((question) => Number.isInteger(question.difficulty) && question.difficulty >= difficultyFrom);
+      }
+      if (difficultyTo !== null) {
+        list = list.filter((question) => Number.isInteger(question.difficulty) && question.difficulty <= difficultyTo);
+      }
+
+      // ページで絞る。例題は掲載ページを持たないので、その節の開始ページで見る。
+      const pageOf = (question) => (Number.isInteger(question.page) ? question.page : question.sectionPage ?? null);
+      const pageFrom = readInteger(args.pageFrom, "pageFrom", { min: 0 });
+      const pageTo = readInteger(args.pageTo, "pageTo", { min: 0 });
+      if (pageFrom !== null) list = list.filter((question) => pageOf(question) !== null && pageOf(question) >= pageFrom);
+      if (pageTo !== null) list = list.filter((question) => pageOf(question) !== null && pageOf(question) <= pageTo);
+
+      // 並びは教科書の掲載順（教科→章→節→種類→番号）。章名の文字列順にはしない。
+      list = [...list].sort(compareQuestions);
       const offset = readInteger(args.offset, "offset", { min: 0, fallback: 0 });
       const limit = readInteger(args.limit, "limit", {
         min: 1, max: SERVICE_LIMITS.listLimitMax, fallback: SERVICE_LIMITS.listLimitDefault,
@@ -210,11 +241,12 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       const query = readString(args.query, "query", { required: true, max: 200 }).toLowerCase();
       const document = await sync.readQuestions();
       const terms = query.split(/\s+/).filter(Boolean);
-      const matched = (document.questions ?? []).filter((question) => {
-        const haystack = [question.label, question.chapter, question.section, question.subject, question.type, String(question.number)]
-          .join(" ").toLowerCase();
-        return terms.every((term) => haystack.includes(term));
-      });
+      const matched = (document.questions ?? [])
+        .filter((question) => {
+          const haystack = questionHaystack(question);
+          return terms.every((term) => haystack.includes(term));
+        })
+        .sort(compareQuestions);
       const limit = readInteger(args.limit, "limit", {
         min: 1, max: SERVICE_LIMITS.listLimitMax, fallback: SERVICE_LIMITS.listLimitDefault,
       });

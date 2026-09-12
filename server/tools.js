@@ -112,7 +112,7 @@ export function createTools() {
     defineTool({
       name: "getAppInfo",
       title: "study-todo の基本情報",
-      description: "study-todo の構成・問題数・章と単元の一覧・評価の5段階・今日の日付・同期している端末・データ形式の版を返す。最初にこれを呼ぶと、他のツールへ渡せる値（章名・単元名・評価の値）が分かる。",
+      description: "study-todo の構成・問題数・章と単元の一覧（教科書の掲載順、単元ごとの開始ページと問題数つき）・問題の種類と件数・難易度の意味・評価の5段階・今日の日付・同期している端末・データ形式の版を返す。最初にこれを呼ぶと、他のツールへ渡せる値（教科名・章名・単元名・種類・評価の値）が分かる。",
       scope: "read",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: { properties: { timezoneOffsetMinutes: TIMEZONE_PROPERTY } },
@@ -122,17 +122,28 @@ export function createTools() {
     defineTool({
       name: "listQuestions",
       title: "問題を一覧",
-      description: "青チャートの問題マスタを、教科・章・単元・種類・番号の範囲で一覧する。「例題80〜100」のように番号で範囲を取りたいときは numberFrom / numberTo を使う。返る件数に上限があるので、続きは nextOffset を offset に渡して読む。",
+      description: "青チャートの問題マスタを、教科・章・単元・種類・番号・難易度・ページで一覧する。返る問題は教科書の掲載順（教科→章→節→種類→番号）に並ぶ。「例題80〜100」は numberFrom / numberTo、「基本例題だけ」は types、「難しい問題を除く」は difficultyTo、「このページ付近」は pageFrom / pageTo を使う。返る件数に上限があるので、続きは nextOffset を offset に渡して読む。",
       scope: "read",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         properties: {
-          subject: { type: "string", description: "教科で絞る（例: 数学I+A）。getAppInfo で一覧が分かる。" },
-          chapter: { type: "string", description: "章で絞る（例: 数列）。" },
-          section: { type: "string", description: "単元で絞る（例: 漸化式）。" },
-          type: { type: "string", description: "問題の種類で絞る（例: 例題 / 練習 / EXERCISES）。" },
-          numberFrom: { type: "integer", minimum: 0, description: "この番号以上の問題だけに絞る。" },
+          subject: { type: "string", description: "教科で絞る（例: 数学I / 数学A）。getAppInfo で一覧が分かる。数学Iと数学Aは例題番号が別々に振られているので、番号で絞るときは教科も指定すること。" },
+          book: { type: "string", description: "冊で絞る（例: 青チャート数学I+A）。" },
+          chapter: { type: "string", description: "章で絞る（例: 2次関数）。" },
+          section: { type: "string", description: "単元で絞る（例: 2次関数の最大・最小と決定）。" },
+          type: { type: "string", description: "問題の種類をひとつだけで絞る（例: 基本例題 / 重要例題 / 演習例題 / EXERCISES）。複数まとめたいときは types。" },
+          types: {
+            type: "array",
+            items: { type: "string", maxLength: 40 },
+            maxItems: 20,
+            description: "問題の種類を複数まとめて絞る（例: [\"基本例題\",\"重要例題\"]）。getAppInfo の questionTypes に、この本にある種類と件数が入っている。",
+          },
+          numberFrom: { type: "integer", minimum: 0, description: "この番号以上の問題だけに絞る。番号は種類ごと（例題の通し番号 / EXERCISES の通し番号）。" },
           numberTo: { type: "integer", minimum: 0, description: "この番号以下の問題だけに絞る。" },
+          difficultyFrom: { type: "integer", minimum: 1, maximum: 5, description: "難易度（青チャートのコンパスの数、1〜5）の下限。" },
+          difficultyTo: { type: "integer", minimum: 1, maximum: 5, description: "難易度の上限。「難しい問題を抜きで」なら 3 などを渡す。難易度が不明な問題は除かれる。" },
+          pageFrom: { type: "integer", minimum: 0, description: "掲載ページの下限。例題はページを持たないため、その単元の開始ページで判定する。" },
+          pageTo: { type: "integer", minimum: 0, description: "掲載ページの上限。" },
           limit: { type: "integer", minimum: 1, maximum: SERVICE_LIMITS.listLimitMax, description: `返す件数（既定 ${SERVICE_LIMITS.listLimitDefault}、最大 ${SERVICE_LIMITS.listLimitMax}）。` },
           offset: { type: "integer", minimum: 0, description: "続きを読むときの開始位置。前回の nextOffset を渡す。" },
         },
@@ -143,7 +154,7 @@ export function createTools() {
     defineTool({
       name: "searchQuestions",
       title: "問題を検索",
-      description: "キーワードで問題を探す。問題名・章・単元・種類・番号が検索対象。空白で区切るとすべてを含む問題だけに絞られる。章の正確な名前が分からないときに使う。",
+      description: "キーワードで問題を探す。問題のタイトル（例:「2次関数の最大・最小」）・表示名・章・単元・教科・冊・種類・番号が検索対象。空白で区切るとすべてを含む問題だけに絞られる。章や単元の正確な名前が分からないときに使う。結果は掲載順に並ぶ。",
       scope: "read",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
@@ -160,7 +171,7 @@ export function createTools() {
     defineTool({
       name: "getQuestion",
       title: "問題の詳細と履歴",
-      description: "問題IDを指定して、その問題の情報と、これまでの学習履歴（日付・評価・所要時間）・平均所要時間・直近の評価を返す。「この問題は前どうだったか」を調べるときに使う。",
+      description: "問題IDを指定して、その問題の情報（冊・章・単元・種類・番号・タイトル・難易度・ページ）と、これまでの学習履歴（日付・評価・所要時間）・平均所要時間・直近の評価を返す。「この問題は前どうだったか」を調べるときに使う。",
       scope: "read",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
@@ -379,8 +390,14 @@ export const SERVER_INSTRUCTIONS = `study-todo は、青チャート（数学の
 このサーバーからは、学習状況を読み取り、これからの予定と目標を変更できます。
 
 使うときの目安:
-- まず getAppInfo を呼ぶと、章・単元の一覧、評価の5段階、今日の日付が分かります。
-  日付はすべて日本時間（UTC+9）で扱います。
+- まず getAppInfo を呼ぶと、教科・章・単元の一覧（教科書の掲載順）、問題の種類、
+  評価の5段階、今日の日付が分かります。日付はすべて日本時間（UTC+9）で扱います。
+- 問題マスタは青チャート数学I+A です。教科は「数学I」と「数学A」に分かれ、
+  例題の番号はそれぞれ別に 1 から振られています（数学I 例題1 と 数学A 例題1 は別の問題）。
+  番号で範囲を指定するときは、必ず subject も一緒に渡してください。
+- 種類は 基本例題 / 重要例題 / 演習例題 / EXERCISES です。「基本例題だけ」のような
+  条件は listQuestions の types で、「難しいものを除く」は difficultyTo で指定できます。
+  難易度は青チャートのコンパスの数（1〜5、小さいほどやさしい）です。
 - 「今日やる予定」は getTodayTasks、別の日や期間は getTasksInRange です。
 - 評価は5段階です。perfect(◯完璧) / better_solution(解もっと良い解法) /
   weak_writing(記記述が甘い) / calc_error(△計算ミス) / wrong_approach(✕方針が違った)。

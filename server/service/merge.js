@@ -213,18 +213,5 @@ export function computeStats(records, questions = [], { timezoneOffsetMinutes } 
 /** 問題マスタの指紋。PWA側と同じ計算を使う（src/hash.js）。 */
 export { hashQuestions };
 
-export function normalizeQuestion(raw) {
-  if (!isObject(raw)) return null;
-  const id = typeof raw.id === "string" ? raw.id.trim() : "";
-  if (!id) return null;
-  return {
-    id: id.slice(0, 120),
-    subject: String(raw.subject ?? "").slice(0, 60),
-    chapter: String(raw.chapter ?? "").slice(0, 80),
-    section: String(raw.section ?? "").slice(0, 80),
-    type: String(raw.type ?? "").slice(0, 40),
-    number: Number(raw.number) || 0,
-    label: String(raw.label ?? "").slice(0, 120),
-    difficulty: raw.difficulty ?? null,
-  };
-}
+// 問題マスタの整え方は PWA と共有する（経路の途中で項目が落ちないように）。
+export { normalizeQuestion } from "../../src/question-order.js";

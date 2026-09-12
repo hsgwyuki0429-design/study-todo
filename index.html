@@ -25,9 +25,13 @@
   <form method="dialog">
     <div class="view-title" style="margin-bottom:8px">問題マスタのインポート</div>
     <div class="dialog-note">
-      Question[] の JSON 配列を貼り付けてください（id / subject / chapter / section / type / number / label）。
+      Question[] の JSON 配列、または data/questions.json と同じ形
+      （{ "questions": [...] }）を貼り付けてください。
+      1問の項目は id / subject / book / chapter / chapterOrder / section / sectionOrder /
+      type / number / label / title / page / sectionPage / difficulty です。
     </div>
-    <textarea id="import-text" placeholder='[{"subject":"数学I+A","chapter":"数列","section":"漸化式","type":"例題","number":90}]'></textarea>
+    <textarea id="import-text" placeholder='[{"id":"aochart1a-m1-ex-001","subject":"数学I","book":"青チャート数学I+A","chapter":"数と式","chapterOrder":1,"section":"多項式の加法・減法・乗法","sectionOrder":1,"type":"基本例題","number":1,"label":"基本例題1","title":"同類項の整理と次数・定数項","sectionPage":12,"difficulty":1}]'></textarea>
+    <label class="dialog-check"><input type="checkbox" id="import-replace"> いまの問題マスタを置き換える（学習記録は消えません）</label>
     <div class="timer-actions">
       <button class="btn" value="cancel">キャンセル</button>
       <button class="btn btn-primary" id="import-run" value="ok" type="button">取り込む</button>

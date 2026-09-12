@@ -5,8 +5,10 @@
 
 import { idb, STORES } from './idb.js';
 import { dateKeyOf, todayKeyOf } from './datetime.js';
+import { buildOutline, compareQuestions, normalizeQuestion, questionHaystack } from './question-order.js';
 
-export const DATA_VERSION = '1.1.0';
+// 1.2.0 で問題マスタに book / chapterOrder / sectionOrder / title / page / sectionPage を足した。
+export const DATA_VERSION = '1.2.0';
 
 export const EVALUATIONS = [
   { value: 'perfect', symbol: '◯', label: '完璧にできた', tone: 'success' },
@@ -44,17 +46,11 @@ export const dayOf = (timestamp) => dateKeyOf(timestamp);
 /* 問題マスタ                                                          */
 /* ------------------------------------------------------------------ */
 
-export async function importQuestions(questions) {
-  const normalized = questions.map((q) => ({
-    id: q.id || `${q.subject}-${q.type}-${q.number}`,
-    subject: q.subject,
-    chapter: q.chapter,
-    section: q.section,
-    type: q.type,
-    number: Number(q.number),
-    label: q.label || `${q.type} ${q.number}`,
-    difficulty: q.difficulty ?? null,
-  }));
+export async function importQuestions(questions, { replace = false } = {}) {
+  const normalized = questions.map(normalizeQuestion).filter(Boolean);
+  // 問題マスタを丸ごと差し替えるときだけ、古い問題を消す。
+  // 学習記録・予定・目標には手を触れない（questionId は残るので履歴は失われない）。
+  if (replace) await idb.clear(STORES.questions);
   await idb.putAll(STORES.questions, normalized);
   return normalized.length;
 }
@@ -72,21 +68,21 @@ export async function listQuestions(filter = {}) {
     );
     all = all.filter((q) => ids.has(q.id));
   }
-  all.sort((a, b) => a.chapter.localeCompare(b.chapter) || a.number - b.number);
+  all.sort(compareQuestions);
   return filter.limit ? all.slice(0, filter.limit) : all;
 }
 
 export async function searchQuestions(keyword, limit = 50) {
   const k = String(keyword || '').trim().toLowerCase();
   if (!k) return [];
+  const terms = k.split(/\s+/).filter(Boolean);
   const all = await idb.all(STORES.questions);
   return all
-    .filter((q) =>
-      [q.label, q.chapter, q.section, q.subject, q.type, String(q.number)]
-        .join(' ')
-        .toLowerCase()
-        .includes(k)
-    )
+    .filter((q) => {
+      const haystack = questionHaystack(q);
+      return terms.every((term) => haystack.includes(term));
+    })
+    .sort(compareQuestions)
     .slice(0, limit);
 }
 
@@ -114,25 +110,22 @@ export async function getQuestion(questionId) {
 
 export async function getAppInfo() {
   const questions = await idb.all(STORES.questions);
-  const structure = {};
+  const byType = {};
+  const books = new Set();
   questions.forEach((q) => {
-    structure[q.subject] ??= {};
-    structure[q.subject][q.chapter] ??= new Set();
-    structure[q.subject][q.chapter].add(q.section);
+    byType[q.type] = (byType[q.type] ?? 0) + 1;
+    if (q.book) books.add(q.book);
   });
-  const subjects = Object.entries(structure).map(([subject, chapters]) => ({
-    subject,
-    chapters: Object.entries(chapters).map(([chapter, sections]) => ({
-      chapter,
-      sections: [...sections],
-    })),
-  }));
   return {
     dataVersion: DATA_VERSION,
     questionCount: questions.length,
+    books: [...books],
+    questionTypes: Object.entries(byType)
+      .map(([type, count]) => ({ type, count }))
+      .sort((a, b) => b.count - a.count),
     evaluations: EVALUATIONS.map(({ value, symbol, label }) => ({ value, symbol, label })),
     taskKinds: Object.keys(TASK_KINDS),
-    subjects,
+    subjects: buildOutline(questions),
   };
 }
 

@@ -11,7 +11,7 @@ python3 -m http.server 8000
 # → http://localhost:8000/ をスマホのブラウザで開き、ホーム画面に追加
 ```
 
-初回起動時にサンプルの問題マスタ・タスク・学習記録が投入される（`src/seed.js`）。
+初回起動時に `data/questions.json`（青チャート数学I+A の問題マスタ 591問）が投入される（`src/seed.js`）。
 
 ## タブ構成
 
@@ -36,6 +36,9 @@ python3 -m http.server 8000
 | `src/schedule.js` | スケジュールタブ（カレンダー・進捗バー） |
 | `src/settings.js` | 設定タブ |
 | `src/api.js` | データアクセス層（MCPツールと1:1対応） |
+| `src/question-order.js` | 問題マスタの項目と掲載順。PWAとサーバーで共有する |
+| `data/questions.json` | 問題マスタの実体（青チャート数学I+A 591問のメタデータ） |
+| `tools/build-questions.mjs` | 誌面から起こした表（`tools/source/`）から問題マスタを生成・検証する |
 | `src/idb.js` | IndexedDB ラッパー（保存先の差し替え点） |
 | `src/datetime.js` | 日付と時間帯（日本時間で「今日」を判断する） |
 | `src/cloud-sync.js` | クラウド同期のクライアント（任意機能） |
@@ -159,3 +162,24 @@ MCPのツールでは `timezoneOffsetMinutes` で別の時間帯も指定でき�
 
 `id` を省略すると `subject-type-number` から生成される。設定タブからは全データの JSON 書き出しもできる。
 書き出したJSONに、管理キー・端末キー・接続トークンなどの秘密は含まれない。
+
+## 問題マスタ
+
+`data/questions.json` は、数研出版「チャート式 基礎からの数学I+A（青チャート）」の
+目次・章トビラの例題一覧・EXERCISES ページから起こした**管理用メタデータ**である。
+問題文と解答は含まない。
+
+| | 数学I | 数学A | 計 |
+|---|---|---|---|
+| 例題（基本・重要・演習） | 194 | 156 | 350 |
+| EXERCISES | 134 | 107 | 241 |
+| 計 | 328 | 263 | 591 |
+
+1問 = 「1回解いて1回評価する単位」。例題の (1)(2)(3) は同じ1問として扱う。
+
+元になる表は `tools/source/math1.mjs` と `tools/source/matha.mjs` にあり、
+直したら次を実行して `data/questions.json` を作り直す（整合性チェックつき）。
+
+```sh
+npm run build:questions
+```
