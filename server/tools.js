@@ -144,6 +144,7 @@ export function createTools() {
           difficultyTo: { type: "integer", minimum: 1, maximum: 5, description: "難易度の上限。「難しい問題を抜きで」なら 3 などを渡す。難易度が不明な問題は除かれる。" },
           pageFrom: { type: "integer", minimum: 0, description: "掲載ページの下限。例題はページを持たないため、その単元の開始ページで判定する。" },
           pageTo: { type: "integer", minimum: 0, description: "掲載ページの上限。" },
+          course: { type: "string", description: "SELECT STUDY のコースで絞る（基本定着 / 精選速習 / 実力錬成）。「基礎を短期間で」なら精選速習、「入試に向けて」なら実力錬成。EXERCISES はどのコースにも入っていない。" },
           needsReview: { type: "boolean", description: "true なら確認待ちの問題だけ、false なら確認済みの問題だけに絞る。確認待ちの問題は難易度など一部の項目が未確定（番号・章・単元・ページは確認済み）。" },
           limit: { type: "integer", minimum: 1, maximum: SERVICE_LIMITS.listLimitMax, description: `返す件数（既定 ${SERVICE_LIMITS.listLimitDefault}、最大 ${SERVICE_LIMITS.listLimitMax}）。` },
           offset: { type: "integer", minimum: 0, description: "続きを読むときの開始位置。前回の nextOffset を渡す。" },
@@ -399,6 +400,8 @@ export const SERVER_INSTRUCTIONS = `study-todo は、青チャート（数学の
 - 種類は 基本例題 / 重要例題 / 演習例題 / EXERCISES です。「基本例題だけ」のような
   条件は listQuestions の types で、「難しいものを除く」は difficultyTo で指定できます。
   難易度は青チャートのコンパスの数（1〜5、小さいほどやさしい）です。
+- 各例題には SELECT STUDY のコース（基本定着 / 精選速習 / 実力錬成）が入っています。
+  「基礎を固めたい」「短期間で仕上げたい」といった相談には listQuestions の course が使えます。
   ただし EXERCISES の難易度は読み取りが未確認で、needsReview が true になっています。
   難易度で厳密に絞りたいときは例題を対象にしてください。
 - 「今日やる予定」は getTodayTasks、別の日や期間は getTasksInRange です。

@@ -84,6 +84,15 @@ export async function renderSettings(screen) {
       sub: `${info.questionCount}問 ・ ${info.books.join('、') || '冊の情報なし'}`,
     })
   );
+  if (info.courses?.length) {
+    list.append(
+      row({
+        title: 'SELECT STUDY',
+        sub: info.courses.join(' ・ '),
+        classes: ['row-indent'],
+      })
+    );
+  }
   if (info.questionTypes.length) {
     list.append(
       row({

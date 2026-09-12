@@ -7,8 +7,9 @@ import { idb, STORES } from './idb.js';
 import { dateKeyOf, todayKeyOf } from './datetime.js';
 import { buildOutline, compareQuestions, normalizeQuestion, questionHaystack } from './question-order.js';
 
-// 1.2.0 で問題マスタに book / chapterOrder / sectionOrder / title / page / sectionPage を足した。
-export const DATA_VERSION = '1.2.0';
+// 1.2.0 で問題マスタに book / chapterOrder / sectionOrder / title / page / sectionPage を、
+// 1.3.0 で courses（SELECT STUDY の3コース）と needsReview を足した。
+export const DATA_VERSION = '1.3.0';
 
 export const EVALUATIONS = [
   { value: 'perfect', symbol: '◯', label: '完璧にできた', tone: 'success' },
@@ -112,14 +113,18 @@ export async function getAppInfo() {
   const questions = await idb.all(STORES.questions);
   const byType = {};
   const books = new Set();
+  const courses = new Set();
   questions.forEach((q) => {
     byType[q.type] = (byType[q.type] ?? 0) + 1;
     if (q.book) books.add(q.book);
+    (q.courses ?? []).forEach((c) => courses.add(c));
   });
   return {
     dataVersion: DATA_VERSION,
     questionCount: questions.length,
     books: [...books],
+    courses: [...courses],
+    needsReviewCount: questions.filter((q) => q.needsReview === true).length,
     questionTypes: Object.entries(byType)
       .map(([type, count]) => ({ type, count }))
       .sort((a, b) => b.count - a.count),

@@ -66,14 +66,29 @@ test("資料に載っている種類だけを使っている", async () => {
   assert.deepEqual([...types].sort(), ["EXERCISES", "基本例題", "演習例題", "重要例題"].sort());
 });
 
-test("章ごと・種類ごとの問題数が誌面と一致する", async () => {
+test("章ごと・種類ごとの問題数が例題一覧と一致する", async () => {
   const { questions } = await master();
   const summary = summarize(questions);
-  // 数学I: 例題194 + EXERCISES134、数学A: 例題156 + EXERCISES107
+  // 数学I: 例題194 + EXERCISES134、数学A: 例題158 + EXERCISES107
   assert.equal(summary.bySubject["数学I"], 194 + 134);
-  assert.equal(summary.bySubject["数学A"], 156 + 107);
-  assert.equal(summary.total, 591);
+  assert.equal(summary.bySubject["数学A"], 158 + 107);
+  assert.equal(summary.total, 593);
   assert.equal(summary.byType.EXERCISES, 134 + 107);
+  assert.deepEqual(summary.byCourse, { 基本定着: 170, 精選速習: 174, 実力錬成: 135 });
+});
+
+test("SELECT STUDY のコースが例題にだけ入っている", async () => {
+  const { questions, courses } = await master();
+  assert.deepEqual(courses, ["基本定着", "精選速習", "実力錬成"]);
+  for (const q of questions) {
+    assert.ok(Array.isArray(q.courses), `courses が配列でない: ${q.id}`);
+    for (const c of q.courses) assert.ok(courses.includes(c), `知らないコース: ${q.id}`);
+    if (q.type === "EXERCISES") assert.equal(q.courses.length, 0, `EXERCISESにコース: ${q.id}`);
+  }
+  // どのコースにも入らない例題もある（難関向けなど）。
+  const examples = questions.filter((q) => q.type !== "EXERCISES");
+  assert.ok(examples.some((q) => q.courses.length === 0));
+  assert.ok(examples.some((q) => q.courses.length === 3));
 });
 
 test("掲載順に並べると、章・単元・ページが前へ戻らない", async () => {
@@ -131,9 +146,9 @@ test("推測で埋めた値が無い（難易度は1〜5、ページは整数）
   const { questions } = await master();
   for (const q of questions) {
     assert.ok(Number.isInteger(q.difficulty) && q.difficulty >= 1 && q.difficulty <= 5, `難易度: ${q.id}`);
-    // 例題の掲載ページは資料に無いので null のまま。埋めていないことを確かめる。
-    if (q.type === "EXERCISES") assert.ok(Number.isInteger(q.page), `EXERCISESのページ: ${q.id}`);
-    else assert.equal(q.page, null, `例題にページを補完してはいけない: ${q.id}`);
+    // EXERCISES の掲載ページは出典が違うので持たない。埋めていないことを確かめる。
+    if (q.type === "EXERCISES") assert.equal(q.page, null, `EXERCISESにページを補完してはいけない: ${q.id}`);
+    else assert.ok(Number.isInteger(q.page), `例題のページ: ${q.id}`);
   }
 });
 
@@ -191,7 +206,7 @@ test("目次は教科書の掲載順で、単元ごとのページと問題数�
   const first = outline[0].chapters[0];
   assert.equal(first.chapter, "数と式");
   assert.equal(first.sectionDetails[0].section, "多項式の加法・減法・乗法");
-  assert.equal(first.sectionDetails[0].page, 12);
+  assert.equal(first.sectionDetails[0].page, 15);
   assert.equal(first.sectionDetails[0].questionCount, 9 + 6);
 });
 
@@ -246,22 +261,25 @@ test("MCP から追加した情報を読める", async () => {
   const token = await enableAiLink(app, { write: false });
 
   const info = await callTool(app, token, "getAppInfo");
-  assert.equal(info.questionCount, 591);
-  assert.deepEqual(info.books, ["青チャート数学I+A"]);
+  assert.equal(info.questionCount, 593);
+  assert.deepEqual(info.books, ["改訂版 チャート式基礎からの数学I+A"]);
+  assert.deepEqual(info.courses, ["基本定着", "精選速習", "実力錬成"]);
   assert.deepEqual(info.subjects.map((s) => s.subject), ["数学I", "数学A"]);
   assert.deepEqual(
     info.subjects[0].chapters.map((c) => c.chapter),
     ["数と式", "集合と命題", "2次関数", "図形と計量", "データの分析"],
   );
-  assert.equal(info.subjects[0].chapters[0].sectionDetails[0].page, 12);
+  assert.equal(info.subjects[0].chapters[0].sectionDetails[0].page, 15);
   assert.ok(info.questionTypes.some((t) => t.type === "基本例題" && t.count === 269));
   assert.equal(info.needsReviewCount, 241);
 
   const one = await callTool(app, token, "getQuestion", { id: "aochart1a-m1-ex-001" });
   assert.equal(one.question.title, "同類項の整理と次数・定数項");
-  assert.equal(one.question.book, "青チャート数学I+A");
+  assert.equal(one.question.book, "改訂版 チャート式基礎からの数学I+A");
+  assert.equal(one.question.page, 15);
+  assert.deepEqual(one.question.courses, ["基本定着"]);
   assert.equal(one.question.chapterOrder, 1);
-  assert.equal(one.question.sectionPage, 12);
+  assert.equal(one.question.sectionPage, 15);
   assert.equal(one.question.difficulty, 1);
 });
 
@@ -273,10 +291,10 @@ test("『2次関数にはどんな例題がある？』に答えられる", asyn
   const token = await enableAiLink(app, { write: false });
 
   const listed = await callTool(app, token, "listQuestions", { chapter: "2次関数", limit: 200 });
-  assert.equal(listed.total, 113);
+  assert.equal(listed.total, 114);
   // 掲載順で返る（関数とグラフ → 2次関数のグラフとその移動 → …）。
   assert.equal(listed.questions[0].section, "関数とグラフ");
-  assert.equal(listed.questions[0].number, 64);
+  assert.equal(listed.questions[0].number, 63);
 });
 
 test("『基本例題だけ』『難しい問題を除く』で絞れる", async () => {
@@ -294,7 +312,7 @@ test("『基本例題だけ』『難しい問題を除く』で絞れる", async
   assert.ok(easy.total < basic.total);
 
   const both = await callTool(app, token, "listQuestions", { types: ["基本例題", "重要例題"], limit: 1 });
-  assert.equal(both.total, 269 + 68);
+  assert.equal(both.total, 269 + 70);
 });
 
 test("『例題50〜65』は教科を指定して取れる", async () => {
@@ -311,6 +329,20 @@ test("『例題50〜65』は教科を指定して取れる", async () => {
   assert.deepEqual(page.questions.map((q) => q.number), Array.from({ length: 16 }, (_, i) => i + 50));
 });
 
+test("SELECT STUDY のコースで絞れる", async () => {
+  const { app } = createTestApp();
+  const device = await joinDevice(app);
+  const { questions } = await master();
+  await pushMaster(app, device.deviceKey, questions);
+  const token = await enableAiLink(app, { write: false });
+
+  const basic = await callTool(app, token, "listQuestions", { course: "基本定着", limit: 1 });
+  assert.equal(basic.total, 170);
+  const quick = await callTool(app, token, "listQuestions", { course: "精選速習", subject: "数学A", limit: 200 });
+  assert.ok(quick.total > 0);
+  assert.ok(quick.questions.every((q) => q.courses.includes("精選速習") && q.subject === "数学A"));
+});
+
 test("ページで絞れる", async () => {
   const { app } = createTestApp();
   const device = await joinDevice(app);
@@ -318,7 +350,7 @@ test("ページで絞れる", async () => {
   await pushMaster(app, device.deviceKey, questions);
   const token = await enableAiLink(app, { write: false });
 
-  const near = await callTool(app, token, "listQuestions", { pageFrom: 12, pageTo: 25, limit: 100 });
+  const near = await callTool(app, token, "listQuestions", { pageFrom: 15, pageTo: 26, limit: 100 });
   assert.ok(near.total > 0);
   assert.ok(near.questions.every((q) => (q.page ?? q.sectionPage) >= 12 && (q.page ?? q.sectionPage) <= 25));
 });
@@ -356,15 +388,15 @@ test("既存の学習記録は、問題マスタを入れ替えても問題と�
   const token = await enableAiLink(app, { write: false });
 
   const history = await callTool(app, token, "getStudyHistory", { days: 30 });
-  assert.equal(history.records[0].label, "基本例題70");
-  assert.equal(history.records[0].chapter, "図形の性質");
+  assert.equal(history.records[0].label, "重要例題70");
+  assert.equal(history.records[0].chapter, "確率");
 
   const mistakes = await callTool(app, token, "getRecentMistakes", { days: 30 });
   assert.equal(mistakes.total ?? mistakes.records.length, 1);
 
   const detail = await callTool(app, token, "getQuestion", { id: "aochart1a-ma-ex-070" });
   assert.equal(detail.attempts, 1);
-  assert.equal(detail.question.title, "三角形の角の二等分線と比");
+  assert.equal(detail.question.title, "図形と期待値");
 });
 
 test("問題マスタを保存しても管理APIの状態と食い違わない", async () => {

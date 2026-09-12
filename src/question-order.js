@@ -19,6 +19,7 @@ export const QUESTION_FIELDS = Object.freeze([
   'page',
   'sectionPage',
   'difficulty',
+  'courses',
   'needsReview',
 ]);
 
@@ -86,6 +87,10 @@ export function normalizeQuestion(raw) {
   // タイトルと掲載ページは「資料に無い＝null」に意味があるので、常に持たせる。
   question.title = text(raw.title, 120);
   question.page = integer(raw.page);
+  // SELECT STUDY のコース。無いときも空配列にして、形を揃える。
+  question.courses = Array.isArray(raw.courses)
+    ? raw.courses.filter((c) => typeof c === 'string' && c).slice(0, 5).map((c) => c.slice(0, 20))
+    : [];
 
   // 並び順などは、値があるときだけ持たせる（古いデータをむやみに膨らませない）。
   const optional = {
@@ -113,6 +118,7 @@ export function questionHaystack(question) {
     question.book,
     question.type,
     String(question.number),
+    ...(question.courses ?? []),
   ]
     .filter(Boolean)
     .join(' ')

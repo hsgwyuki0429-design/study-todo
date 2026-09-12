@@ -18,7 +18,7 @@ import { dateKeyOf, isDateKey, normalizeOffset, startOfDayMs, todayKeyOf } from 
 import { EVALUATIONS, MISTAKE_EVALUATIONS, TASK_KINDS, computeStats } from "./merge.js";
 import { buildOutline, compareQuestions, questionHaystack } from "../../src/question-order.js";
 
-export const DATA_VERSION = "1.2.0";
+export const DATA_VERSION = "1.3.0";
 
 export const SERVICE_LIMITS = Object.freeze({
   listLimitDefault: 50,
@@ -164,6 +164,8 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         questionTypes: Object.entries(byType)
           .map(([type, count]) => ({ type, count }))
           .sort((left, right) => right.count - left.count),
+        courses: [...new Set(questions.flatMap((question) => question.courses ?? []))],
+        coursesNote: "SELECT STUDY の3コース。基本定着＝教科書の基本事項を確認したいとき / 精選速習＝入試の基礎を短期間で / 実力錬成＝入試に向け実力を高めたいとき。listQuestions の course で絞れる。",
         difficultyScale: "1〜5（青チャートのコンパスの数）。小さいほどやさしい。",
         // needsReview が付いた問題は、誌面からの読み取りが確定していない項目を含む。
         needsReviewCount: questions.filter((question) => question.needsReview === true).length,
@@ -223,6 +225,10 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       const pageTo = readInteger(args.pageTo, "pageTo", { min: 0 });
       if (pageFrom !== null) list = list.filter((question) => pageOf(question) !== null && pageOf(question) >= pageFrom);
       if (pageTo !== null) list = list.filter((question) => pageOf(question) !== null && pageOf(question) <= pageTo);
+
+      // SELECT STUDY のコースで絞る。
+      const course = readString(args.course, "course", { max: 20 });
+      if (course) list = list.filter((question) => (question.courses ?? []).includes(course));
 
       if (args.needsReview === true) list = list.filter((question) => question.needsReview === true);
       if (args.needsReview === false) list = list.filter((question) => question.needsReview !== true);
