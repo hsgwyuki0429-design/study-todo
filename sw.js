@@ -10,6 +10,12 @@ const SHELL = [
   './src/api.js',
   './src/idb.js',
   './src/seed.js',
+  './src/state.js',
+  './src/ui.js',
+  './src/home.js',
+  './src/records.js',
+  './src/schedule.js',
+  './src/settings.js',
   './icons/icon.svg',
 ];
 
