@@ -12,12 +12,46 @@ import { generateToken, hashToken } from "./auth/tokens.js";
 
 const OAUTH_KEY = "studytodo:oauth";
 const CODE_TTL_MS = 5 * 60 * 1000;
+/** アクセストークンの寿命。切れたら更新トークンで取り直す。 */
 const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const REFRESH_TTL_MS = 180 * 24 * 60 * 60 * 1000;
 
 function base64UrlOfBytes(bytes) {
   let binary = "";
   bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * RFC 8707 の resource（どのMCPサーバー向けのトークンか）を見比べられる形に直す。
+ * 末尾の / や大文字小文字、#以降の違いで弾かないようにする。
+ */
+export function canonicalResource(value) {
+  if (value === undefined || value === null || value === "") return null;
+  let url;
+  try {
+    url = new URL(String(value));
+  } catch {
+    return null;
+  }
+  url.hash = "";
+  url.search = "";
+  const path = url.pathname.replace(/\/+$/, "");
+  return `${url.protocol}//${url.host.toLowerCase()}${path}`;
+}
+
+/**
+ * クライアントが指定した resource が、このサーバーのMCPの入口を指しているか。
+ * 「/mcp そのもの」と「サーバーの入口（origin）」のどちらも認める。
+ * resource を送ってこないクライアント（Claude Code など）も従来どおり通す。
+ */
+export function resourceMatches(requested, mcpUrl) {
+  if (requested === null || requested === undefined || requested === "") return true;
+  const canonical = canonicalResource(requested);
+  if (!canonical) return false;
+  const target = canonicalResource(mcpUrl);
+  const origin = canonicalResource(new URL(mcpUrl).origin);
+  return canonical === target || canonical === origin;
 }
 
 /** PKCE の S256。code_verifier をSHA-256して base64url にしたものが code_challenge。 */
@@ -28,7 +62,8 @@ export async function pkceChallengeOf(verifier) {
 
 export function createOAuth({ storage, now = () => Date.now() }) {
   async function read() {
-    return (await storage.get(OAUTH_KEY)) ?? { clients: {}, codes: {}, tokens: {} };
+    const stored = (await storage.get(OAUTH_KEY)) ?? {};
+    return { clients: {}, codes: {}, tokens: {}, refreshTokens: {}, ...stored };
   }
 
   async function write(document) {
@@ -39,6 +74,9 @@ export function createOAuth({ storage, now = () => Date.now() }) {
     );
     document.tokens = Object.fromEntries(
       Object.entries(document.tokens).filter(([, token]) => token.expiresAt > at),
+    );
+    document.refreshTokens = Object.fromEntries(
+      Object.entries(document.refreshTokens ?? {}).filter(([, token]) => token.expiresAt > at),
     );
     await storage.put(OAUTH_KEY, document);
   }
@@ -70,7 +108,7 @@ export function createOAuth({ storage, now = () => Date.now() }) {
     },
 
     /** 利用者が接続トークンを貼って許可したときに、引き換え用の符号を作る。 */
-    async issueCode({ clientId, redirectUri, codeChallenge, scopes, tokenId }) {
+    async issueCode({ clientId, redirectUri, codeChallenge, scopes, tokenId, resource = null }) {
       const code = generateToken(24);
       const document = await read();
       document.codes[await hashToken(code)] = {
@@ -79,6 +117,8 @@ export function createOAuth({ storage, now = () => Date.now() }) {
         codeChallenge,
         scopes,
         tokenId,
+        // どのMCPサーバー向けの認可かを覚えておく（RFC 8707）。
+        resource: canonicalResource(resource),
         expiresAt: now() + CODE_TTL_MS,
       };
       await write(document);
@@ -86,7 +126,7 @@ export function createOAuth({ storage, now = () => Date.now() }) {
     },
 
     /** 符号をアクセストークンに引き換える。PKCE の確認もここで行う。 */
-    async exchangeCode({ code, clientId, redirectUri, codeVerifier }) {
+    async exchangeCode({ code, clientId, redirectUri, codeVerifier, resource = null }) {
       const document = await read();
       const key = await hashToken(String(code ?? ""));
       const entry = document.codes[key];
@@ -96,17 +136,80 @@ export function createOAuth({ storage, now = () => Date.now() }) {
       if (!codeVerifier || (await pkceChallengeOf(codeVerifier)) !== entry.codeChallenge) {
         throw new Error("code_verifier が一致しません。");
       }
+      // 認可のときと引き換えのときで、宛先（resource）が変わっていないか確かめる。
+      const requestedResource = canonicalResource(resource);
+      if (resource !== null && resource !== undefined && resource !== "" && !requestedResource) {
+        throw new Error("resource はURLで渡してください。");
+      }
+      if (requestedResource && entry.resource && requestedResource !== entry.resource) {
+        throw new Error("認可のときと resource が一致しません。");
+      }
       // 認可コードは一度きり。引き換えたらすぐ捨てる。
       delete document.codes[key];
       const accessToken = generateToken(32);
+      const boundResource = entry.resource ?? requestedResource ?? null;
+      const refreshToken = generateToken(32);
       document.tokens[await hashToken(accessToken)] = {
         clientId,
         scopes: entry.scopes,
         tokenId: entry.tokenId,
+        // このアクセストークンが使えるMCPサーバー。
+        resource: boundResource,
         expiresAt: now() + TOKEN_TTL_MS,
       };
+      document.refreshTokens[await hashToken(refreshToken)] = {
+        clientId,
+        scopes: entry.scopes,
+        tokenId: entry.tokenId,
+        resource: boundResource,
+        expiresAt: now() + REFRESH_TTL_MS,
+      };
       await write(document);
-      return { accessToken, expiresIn: Math.floor(TOKEN_TTL_MS / 1000), scopes: entry.scopes };
+      return {
+        accessToken,
+        refreshToken,
+        expiresIn: Math.floor(TOKEN_TTL_MS / 1000),
+        scopes: entry.scopes,
+        resource: boundResource,
+      };
+    },
+
+    /**
+     * 更新トークンでアクセストークンを取り直す。
+     * 使った更新トークンはその場で捨て、新しいものを渡す（使い回しを防ぐ）。
+     */
+    async refresh({ refreshToken, clientId, resource = null }) {
+      const document = await read();
+      const key = await hashToken(String(refreshToken ?? ""));
+      const entry = document.refreshTokens[key];
+      if (!entry || entry.expiresAt <= now()) throw new Error("更新トークンが無効か、期限切れです。");
+      if (clientId && entry.clientId !== clientId) throw new Error("client_id が一致しません。");
+      const requested = canonicalResource(resource);
+      if (requested && entry.resource && requested !== entry.resource) {
+        throw new Error("発行のときと resource が一致しません。");
+      }
+      delete document.refreshTokens[key];
+      const accessToken = generateToken(32);
+      const nextRefresh = generateToken(32);
+      document.tokens[await hashToken(accessToken)] = {
+        clientId: entry.clientId,
+        scopes: entry.scopes,
+        tokenId: entry.tokenId,
+        resource: entry.resource,
+        expiresAt: now() + TOKEN_TTL_MS,
+      };
+      document.refreshTokens[await hashToken(nextRefresh)] = {
+        ...entry,
+        expiresAt: now() + REFRESH_TTL_MS,
+      };
+      await write(document);
+      return {
+        accessToken,
+        refreshToken: nextRefresh,
+        expiresIn: Math.floor(TOKEN_TTL_MS / 1000),
+        scopes: entry.scopes,
+        resource: entry.resource,
+      };
     },
 
     /** アクセストークンから、もとの接続トークンの識別子を取り出す。 */
@@ -123,6 +226,7 @@ export function createOAuth({ storage, now = () => Date.now() }) {
 export function protectedResourceMetadata(origin) {
   return {
     resource: `${origin}/mcp`,
+    resource_name: "study-todo",
     authorization_servers: [origin],
     bearer_methods_supported: ["header"],
     scopes_supported: ["read", "write"],
@@ -138,11 +242,14 @@ export function authorizationServerMetadata(origin) {
     token_endpoint: `${origin}/oauth/token`,
     registration_endpoint: `${origin}/oauth/register`,
     response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
     scopes_supported: ["read", "write"],
     // RFC 9207: どの認可サーバーが応えたかを折り返しに含める。
     authorization_response_iss_parameter_supported: true,
+    // RFC 8707: resource（どのMCPサーバー向けか）の指定に対応している。
+    resource_indicators_supported: true,
+    service_documentation: `${origin}/`,
   };
 }

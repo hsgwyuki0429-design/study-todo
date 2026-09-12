@@ -14,8 +14,10 @@ import { ValidationError } from "./core/validate.js";
 import { SCOPES, SCOPE_LABELS, createAuth } from "./auth/tokens.js";
 import {
   authorizationServerMetadata,
+  canonicalResource,
   createOAuth,
   protectedResourceMetadata,
+  resourceMatches,
 } from "./oauth.js";
 import { SERVER_INSTRUCTIONS, createTools } from "./tools.js";
 import { createSyncService } from "./service/sync-service.js";
@@ -29,6 +31,13 @@ export const SERVER_INFO = Object.freeze({
 });
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
+
+/** MCPコネクタとして接続してくる相手のオリジン。 */
+const CONNECTOR_ORIGINS = Object.freeze([
+  "https://claude.ai",
+  "https://claude.com",
+  "https://www.claude.ai",
+]);
 
 function json(body, { status = 200, headers = {} } = {}) {
   return new Response(JSON.stringify(body), { status, headers: { ...JSON_HEADERS, ...headers } });
@@ -47,7 +56,7 @@ function corsHeaders(request, allowedOrigins) {
   return {
     "access-control-allow-origin": origin,
     "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
-    "access-control-allow-headers": "authorization, content-type, mcp-protocol-version, mcp-method, mcp-name, x-study-todo-owner-key",
+    "access-control-allow-headers": "authorization, content-type, mcp-protocol-version, mcp-method, mcp-name, mcp-session-id, last-event-id, x-study-todo-owner-key",
     "access-control-expose-headers": "www-authenticate",
     "access-control-max-age": "86400",
     "vary": "origin",
@@ -80,7 +89,9 @@ export function readConfig(env = {}) {
     ownerKey: env.STUDY_TODO_OWNER_KEY ?? "",
     siteOrigin,
     publicUrl: env.STUDY_TODO_PUBLIC_URL ? String(env.STUDY_TODO_PUBLIC_URL).replace(/\/+$/, "") : null,
-    allowedOrigins: [...new Set([siteOriginHost, ...extraOrigins])],
+    // study-todo 本体に加えて、MCPコネクタを登録する claude.ai / claude.com からの
+    // 呼び出しも受け付ける。* は使わず、ここに並べた相手だけに返す。
+    allowedOrigins: [...new Set([siteOriginHost, ...CONNECTOR_ORIGINS, ...extraOrigins])],
   };
 }
 
@@ -104,8 +115,15 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
     return config.publicUrl ?? new URL(request.url).origin;
   }
 
+  /** このサーバーのMCPの入口（resource の値）。 */
+  function mcpUrlOf(request) {
+    return `${originOf(request)}/mcp`;
+  }
+
   function unauthorized(request, message) {
-    const metadataUrl = `${originOf(request)}/.well-known/oauth-protected-resource`;
+    // RFC 9728: どこを見れば認証のやり方が分かるかを示す。
+    // MCPの入口に合わせた /mcp 付きの案内を返す。
+    const metadataUrl = `${originOf(request)}/.well-known/oauth-protected-resource/mcp`;
     return json({ error: "unauthorized", message }, {
       status: 401,
       headers: { "www-authenticate": `Bearer realm="study-todo", resource_metadata="${metadataUrl}"` },
@@ -141,6 +159,23 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
     }
   }
 
+  /**
+   * OAuthの入口は、フォーム（application/x-www-form-urlencoded）で送られることも、
+   * JSONで送られることもある。どちらでも同じ形にして受け取る。
+   */
+  async function readFormOrJson(request) {
+    const type = request.headers.get("content-type") ?? "";
+    if (type.includes("json")) return readJsonBody(request);
+    const form = await request.formData();
+    const values = {};
+    for (const [key, value] of form.entries()) {
+      if (values[key] === undefined) values[key] = typeof value === "string" ? value : String(value);
+      else if (Array.isArray(values[key])) values[key].push(String(value));
+      else values[key] = [values[key], String(value)];
+    }
+    return values;
+  }
+
   // ------------------------------------------------------------------
   // MCP
   // ------------------------------------------------------------------
@@ -164,6 +199,10 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
       const entry = (tokens.tokens ?? []).find((candidate) => candidate.id === oauthEntry.tokenId);
       if (!entry || !settings.enabled) {
         return unauthorized(request, "この接続は無効になりました。study-todo の設定画面から接続しなおしてください。");
+      }
+      // 別のサーバー向けに発行されたトークンでは、ここを使えないようにする。
+      if (oauthEntry.resource && !resourceMatches(oauthEntry.resource, mcpUrlOf(request))) {
+        return unauthorized(request, "このアクセストークンは別のサーバー向けに発行されています。接続しなおしてください。");
       }
       authenticated = {
         ok: true,
@@ -359,6 +398,7 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
   <input type="hidden" name="redirect_uri" value="${escapeHtml(query.redirectUri)}">
   <input type="hidden" name="code_challenge" value="${escapeHtml(query.codeChallenge)}">
   <input type="hidden" name="state" value="${escapeHtml(query.state)}">
+  <input type="hidden" name="resource" value="${escapeHtml(query.resource ?? "")}">
   <input name="connection_token" type="password" autocomplete="off" placeholder="接続トークン" required>
   <button type="submit">許可する</button>
  </form>
@@ -370,19 +410,24 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
     const origin = originOf(request);
 
     if (path === "/oauth/register" && request.method === "POST") {
-      const body = await readJsonBody(request);
+      const body = await readFormOrJson(request);
       try {
         const client = await oauth.registerClient({
-          redirectUris: body.redirect_uris,
+          // フォームで送られた場合は1つの文字列で届くので、配列に揃える。
+          redirectUris: Array.isArray(body.redirect_uris)
+            ? body.redirect_uris
+            : (body.redirect_uris ? [body.redirect_uris] : []),
           clientName: body.client_name,
         });
         return json({
           client_id: client.clientId,
           client_name: client.clientName,
           redirect_uris: client.redirectUris,
+          client_id_issued_at: Math.floor(Date.parse(client.createdAt) / 1000),
           token_endpoint_auth_method: "none",
           grant_types: ["authorization_code"],
           response_types: ["code"],
+          scope: "read write",
         }, { status: 201 });
       } catch (error) {
         return json({ error: "invalid_client_metadata", error_description: error.message }, { status: 400 });
@@ -403,12 +448,24 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
           status: 400, headers: { "content-type": "text/plain; charset=utf-8" },
         });
       }
+      // RFC 8707: どのMCPサーバー向けの認可かの指定。送られてきたら中身を確かめる。
+      const resource = url.searchParams.get("resource");
+      if (!resourceMatches(resource, mcpUrlOf(request))) {
+        // 宛先が違うので、クライアントへ理由を返して戻す。
+        const target = new URL(redirectUri);
+        target.searchParams.set("error", "invalid_target");
+        target.searchParams.set("error_description", `resource は ${mcpUrlOf(request)} を指定してください。`);
+        const state = url.searchParams.get("state");
+        if (state) target.searchParams.set("state", state);
+        return new Response(null, { status: 302, headers: { location: target.toString() } });
+      }
       return new Response(consentPage(origin, {
         clientName: client.clientName,
         clientId,
         redirectUri,
         codeChallenge: url.searchParams.get("code_challenge") ?? "",
         state: url.searchParams.get("state") ?? "",
+        resource: resource ?? "",
       }), { headers: { "content-type": "text/html; charset=utf-8" } });
     }
 
@@ -420,6 +477,12 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
       if (!client || !client.redirectUris.includes(redirectUri)) {
         return new Response("redirect_uri が登録されていません。", { status: 400 });
       }
+      const resource = form.get("resource") ? String(form.get("resource")) : null;
+      if (!resourceMatches(resource, mcpUrlOf(request))) {
+        return new Response("resource がこのサーバーのものと一致しません。", {
+          status: 400, headers: { "content-type": "text/plain; charset=utf-8" },
+        });
+      }
       const authenticated = await auth.authenticate(String(form.get("connection_token") ?? ""));
       if (!authenticated.ok) {
         return new Response(consentPage(origin, {
@@ -428,6 +491,7 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
           redirectUri,
           codeChallenge: String(form.get("code_challenge") ?? ""),
           state: String(form.get("state") ?? ""),
+          resource: resource ?? "",
         }, authenticated.message), { status: 401, headers: { "content-type": "text/html; charset=utf-8" } });
       }
       const code = await oauth.issueCode({
@@ -436,6 +500,8 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
         codeChallenge: String(form.get("code_challenge") ?? ""),
         scopes: authenticated.actor.tokenScopes,
         tokenId: authenticated.actor.tokenId,
+        // 宛先の指定が無いクライアントには、このサーバーのMCPを宛先として結び付ける。
+        resource: canonicalResource(resource) ?? mcpUrlOf(request),
       });
       const target = new URL(redirectUri);
       target.searchParams.set("code", code);
@@ -447,25 +513,53 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
     }
 
     if (path === "/oauth/token" && request.method === "POST") {
-      const form = await request.formData();
-      if (form.get("grant_type") !== "authorization_code") {
-        return json({ error: "unsupported_grant_type" }, { status: 400 });
+      // form でも JSON でも受け取れるようにする（クライアントによって送り方が違う）。
+      const form = await readFormOrJson(request);
+      if (form.grant_type === "refresh_token") {
+        try {
+          const refreshed = await oauth.refresh({
+            refreshToken: form.refresh_token,
+            clientId: form.client_id ? String(form.client_id) : null,
+            resource: form.resource ?? null,
+          });
+          return json({
+            access_token: refreshed.accessToken,
+            refresh_token: refreshed.refreshToken,
+            token_type: "Bearer",
+            expires_in: refreshed.expiresIn,
+            scope: refreshed.scopes.join(" "),
+          }, { headers: { "cache-control": "no-store" } });
+        } catch (error) {
+          return json({ error: "invalid_grant", error_description: error.message }, { status: 400 });
+        }
+      }
+      if (form.grant_type !== "authorization_code") {
+        return json({
+          error: "unsupported_grant_type",
+          error_description: "grant_type は authorization_code か refresh_token だけに対応しています。",
+        }, { status: 400 });
       }
       try {
         const issued = await oauth.exchangeCode({
-          code: form.get("code"),
-          clientId: String(form.get("client_id") ?? ""),
-          redirectUri: String(form.get("redirect_uri") ?? ""),
-          codeVerifier: String(form.get("code_verifier") ?? ""),
+          code: form.code,
+          clientId: String(form.client_id ?? ""),
+          redirectUri: String(form.redirect_uri ?? ""),
+          codeVerifier: String(form.code_verifier ?? ""),
+          resource: form.resource ?? null,
         });
         return json({
           access_token: issued.accessToken,
+          refresh_token: issued.refreshToken,
           token_type: "Bearer",
           expires_in: issued.expiresIn,
           scope: issued.scopes.join(" "),
         }, { headers: { "cache-control": "no-store" } });
       } catch (error) {
-        return json({ error: "invalid_grant", error_description: error.message }, { status: 400 });
+        const isTarget = /resource/.test(error.message);
+        return json({
+          error: isTarget ? "invalid_target" : "invalid_grant",
+          error_description: error.message,
+        }, { status: 400 });
       }
     }
 
@@ -522,7 +616,10 @@ code{background:#f0f0f3;padding:2px 6px;border-radius:6px}:root{color-scheme:lig
           || path === "/.well-known/oauth-protected-resource/mcp") {
           response = json(protectedResourceMetadata(originOf(request)));
         } else if (path === "/.well-known/oauth-authorization-server"
-          || path === "/.well-known/openid-configuration") {
+          || path === "/.well-known/oauth-authorization-server/mcp"
+          || path === "/.well-known/openid-configuration"
+          || path === "/.well-known/openid-configuration/mcp") {
+          // MCPクライアントは、入口のパス（/mcp）を付けた場所も探しに来る。
           response = json(authorizationServerMetadata(originOf(request)));
         } else if (path.startsWith("/oauth/")) {
           response = await handleOAuth(request, path);

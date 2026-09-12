@@ -114,7 +114,15 @@ claude mcp add --transport http study-todo https://study-todo-mcp.xxx.workers.de
 2. URL に `https://study-todo-mcp.xxx.workers.dev/mcp` を入れる
 3. 接続すると同意の画面が出るので、7で発行した接続トークンを貼り付けて「許可する」
 
-OAuth 2.1 + PKCE に対応しているので、Bearer を直接設定できないクライアントでも接続できます。
+OAuth 2.1 + PKCE（S256）に対応しているので、Bearer を直接設定できないクライアントでも接続できます。
+対応している仕様は次のとおりです。
+
+- RFC 9728 Protected Resource Metadata … `/.well-known/oauth-protected-resource`（`/mcp` 付きも可）
+- RFC 8414 Authorization Server Metadata … `/.well-known/oauth-authorization-server`（`/mcp` 付きも可）
+- RFC 7591 動的クライアント登録 … `/oauth/register`
+- RFC 8707 resource（宛先）の指定 … `/oauth/authorize` と `/oauth/token` の `resource`
+  認可のときと引き換えのときで宛先が違えば拒み、アクセストークンはこのサーバー専用として発行します
+- RFC 9207 `iss` の付与、更新トークン（`grant_type=refresh_token`）
 
 ---
 
@@ -206,3 +214,4 @@ npm test        # = node --test
 | AIが「権限がありません」と言う | 設定画面の「権限：予定を変更する」を許可する |
 | 予定を変えたのに端末へ反映されない | その端末で「いますぐ同期」を押す（起動時とオンライン復帰時にも同期します） |
 | 端末を無くした | 設定画面で同期コードを発行しなおし、接続トークンも再発行する |
+| Claude.ai で「認証に失敗しました」と出る | Worker を最新版にデプロイし直す（claude.ai からの呼び出しを許可し、`/mcp` 付きの案内と `resource` に対応したのは新しい版）。そのうえで、コネクタを一度削除してから登録しなおす |
