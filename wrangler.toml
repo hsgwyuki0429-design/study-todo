@@ -1,10 +1,11 @@
 # Cloudflare Workers へ study-todo MCP Server を置くための設定。
 #
-#   1. npx wrangler kv namespace create STUDY_TODO_KV
-#      表示された id を下の kv_namespaces に貼る
-#   2. npx wrangler secret put STUDY_TODO_OWNER_KEY
+#   1. npx wrangler secret put STUDY_TODO_OWNER_KEY
 #      （管理キー。ここで入力した値はリポジトリには残らない）
-#   3. npx wrangler deploy
+#   2. npx wrangler deploy
+#
+# main へ push すれば GitHub Actions が同じことをする
+# （.github/workflows/deploy.yml）。手で配るのは最初の1回だけでよい。
 #
 # 秘密（STUDY_TODO_OWNER_KEY）は必ず secret として入れること。
 # このファイルへ直接書くとGitHubへ公開されてしまう。
@@ -20,4 +21,4 @@ STUDY_TODO_ALLOWED_ORIGINS = "https://hsgwyuki0429-design.github.io"
 
 [[kv_namespaces]]
 binding = "STUDY_TODO_KV"
-id = "ここに wrangler kv namespace create で表示された id を貼る"
+id = "6323230941a246aabb65915bddc0be94"

@@ -6,8 +6,10 @@
 #   CLOUDFLARE_API_TOKEN   … Cloudflare の API トークン
 #                            （テンプレート「Edit Cloudflare Workers」でよい）
 #   CLOUDFLARE_ACCOUNT_ID  … Cloudflare ダッシュボード右側に出ているアカウントID
-#   STUDY_TODO_KV_ID       … wrangler.toml の id を伏せたままにする場合だけ。
-#                            実際の id を wrangler.toml に書いてコミットするなら不要。
+#
+# KV名前空間IDは wrangler.toml に書いてある（識別子であって秘密ではない）。
+# 伏せておきたい場合だけ、Secrets に STUDY_TODO_KV_ID を入れれば
+# 実行時に差し替える。
 #
 # 管理キー（STUDY_TODO_OWNER_KEY）はここでは扱わない。
 # あれは `npx wrangler secret put` で Cloudflare 側に入れたものがそのまま残る。
