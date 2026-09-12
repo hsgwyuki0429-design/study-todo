@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ja" >
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#0b0b0d" media="(prefers-color-scheme: dark)" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<title>青チャート学習管理</title>
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+<link rel="apple-touch-icon" href="icons/icon-180.png" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div id="app">
+
+  <!-- ============ ホーム ============ -->
+  <section class="screen" id="screen-home">
+    <div class="timer-panel">
+      <div class="timer-label" id="timer-label">今日の学習時間</div>
+      <div class="timer-value" id="timer-value">00:00</div>
+      <div class="timer-actions" id="timer-actions"></div>
+    </div>
+
+    <div class="mini-cards" id="mini-cards">
+      <div class="mini-card"><div class="k">累計時間</div><div class="v" id="stat-total">0分</div></div>
+      <div class="mini-card"><div class="k">解いた問題数</div><div class="v" id="stat-count">0</div></div>
+    </div>
+
+    <div class="panel" id="home-panel"></div>
+  </section>
+
+  <!-- ============ 記録 ============ -->
+  <section class="screen" id="screen-records" hidden>
+    <div class="view-head">
+      <div class="view-title">記録</div>
+      <button class="link-btn" id="btn-import">問題をインポート</button>
+    </div>
+    <div class="filters">
+      <select id="filter-chapter"><option value="">すべての章</option></select>
+      <select id="filter-eval"><option value="">すべての評価</option></select>
+    </div>
+    <div class="list" id="records-list"></div>
+  </section>
+
+  <!-- ============ スケジュール ============ -->
+  <section class="screen" id="screen-schedule" hidden>
+    <div class="view-head">
+      <div class="view-title">スケジュール</div>
+      <button class="link-btn" id="btn-add-goal">目標を追加</button>
+    </div>
+    <form class="form" id="goal-form" hidden>
+      <input type="text" id="goal-title" placeholder="目標（例：数列を1周する）" required />
+      <input type="date" id="goal-deadline" required />
+      <input type="text" id="goal-scope" placeholder="対象範囲（例：数学I+A / 数列）" />
+      <div class="timer-actions">
+        <button type="button" class="btn" id="goal-cancel">キャンセル</button>
+        <button type="submit" class="btn btn-primary">保存</button>
+      </div>
+    </form>
+    <div class="list" id="schedule-list"></div>
+  </section>
+
+  <nav class="tabbar" role="tablist">
+    <button role="tab" data-tab="home" aria-selected="true"><span class="tab-mark">■</span>ホーム</button>
+    <button role="tab" data-tab="records" aria-selected="false"><span class="tab-mark">≡</span>記録</button>
+    <button role="tab" data-tab="schedule" aria-selected="false"><span class="tab-mark">▤</span>スケジュール</button>
+  </nav>
+</div>
+
+<dialog id="dialog-question"></dialog>
+
+<dialog id="dialog-import">
+  <form method="dialog">
+    <div class="view-title" style="margin-bottom:8px">問題マスタのインポート</div>
+    <div class="note" style="border:none;padding:0 0 8px">
+      Question[] の JSON 配列を貼り付けてください（id / subject / chapter / section / type / number / label）。
+    </div>
+    <textarea id="import-text" placeholder='[{"subject":"数学I+A","chapter":"数列","section":"漸化式","type":"例題","number":90}]'></textarea>
+    <div class="timer-actions">
+      <button class="btn" value="cancel">キャンセル</button>
+      <button class="btn btn-primary" id="import-run" value="ok" type="button">取り込む</button>
+    </div>
+  </form>
+</dialog>
+
+<script type="module" src="src/app.js"></script>
+</body>
+</html>
