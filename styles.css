@@ -479,3 +479,20 @@ dialog textarea {
   border-radius: 6px;
   padding: 8px;
 }
+
+/* ---------- AI連携 / 同期の入力欄 ---------- */
+
+input[type='password'] { width: 100%; }
+
+.cloud-input {
+  font: inherit;
+  width: 100%;
+  min-height: var(--tap);
+  padding: 0 10px;
+  margin-top: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  box-sizing: border-box;
+}

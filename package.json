@@ -1,0 +1,11 @@
+{
+  "name": "study-todo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "start": "python3 -m http.server 8000",
+    "server": "node server/adapters/node.js"
+  }
+}

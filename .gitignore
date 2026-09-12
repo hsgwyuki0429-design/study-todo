@@ -1,0 +1,12 @@
+# 秘密が入るもの。絶対にコミットしない。
+.env
+.env.*
+!.env.example
+
+# Node で動かしたときの保存先
+.study-todo-data/
+
+# 作業中に出るもの
+node_modules/
+.wrangler/
+.DS_Store

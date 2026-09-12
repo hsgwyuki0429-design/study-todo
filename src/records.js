@@ -1,7 +1,7 @@
 // 記録タブ。目次ビュー（章→単元→例題→履歴）と履歴ビュー（時系列）を切り替える。
 
 import * as api from './api.js';
-import { EVALUATIONS, EVAL_MAP } from './api.js';
+import { EVALUATIONS, EVAL_MAP, dayOf } from './api.js';
 import { state, q, qLabel, render } from './state.js';
 import { el, fmtMS, fmtTime, fmtDate, row, segmented, emptyState } from './ui.js';
 
@@ -49,7 +49,7 @@ async function tocView(screen) {
       list.append(trail);
       for (const r of history) {
         const node = row({
-          title: fmtDate(r.timestamp.slice(0, 10)),
+          title: fmtDate(dayOf(r.timestamp)),
           sub: fmtTime(r.timestamp),
           right: el('span', 'row-time', fmtMS(r.durationSeconds)),
         });
@@ -170,7 +170,7 @@ async function historyView(screen) {
 
   let day = null;
   for (const r of records) {
-    const d = r.timestamp.slice(0, 10);
+    const d = dayOf(r.timestamp);
     if (d !== day) {
       day = d;
       list.append(el('div', 'section-head', fmtDate(d)));
