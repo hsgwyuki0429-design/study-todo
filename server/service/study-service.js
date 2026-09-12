@@ -165,6 +165,9 @@ export function createStudyService({ sync, now = () => Date.now() }) {
           .map(([type, count]) => ({ type, count }))
           .sort((left, right) => right.count - left.count),
         difficultyScale: "1〜5（青チャートのコンパスの数）。小さいほどやさしい。",
+        // needsReview が付いた問題は、誌面からの読み取りが確定していない項目を含む。
+        needsReviewCount: questions.filter((question) => question.needsReview === true).length,
+        needsReviewNote: "needsReview が true の問題は、難易度など一部の項目が未確認。番号・章・単元・掲載ページは確認済みなので、予定づくりには使える。",
         studyRecords: records.length,
         devices: status.devices,
         lastSyncedAt: status.lastSyncedAt,
@@ -220,6 +223,9 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       const pageTo = readInteger(args.pageTo, "pageTo", { min: 0 });
       if (pageFrom !== null) list = list.filter((question) => pageOf(question) !== null && pageOf(question) >= pageFrom);
       if (pageTo !== null) list = list.filter((question) => pageOf(question) !== null && pageOf(question) <= pageTo);
+
+      if (args.needsReview === true) list = list.filter((question) => question.needsReview === true);
+      if (args.needsReview === false) list = list.filter((question) => question.needsReview !== true);
 
       // 並びは教科書の掲載順（教科→章→節→種類→番号）。章名の文字列順にはしない。
       list = [...list].sort(compareQuestions);

@@ -111,6 +111,22 @@ test("章名の文字列順ではなく、教科書の掲載順で並ぶ", async
   assert.deepEqual(chapters, ["数と式", "集合と命題", "2次関数", "図形と計量", "データの分析"]);
 });
 
+test("確認待ちの印が、同期とMCPを通っても残る", async () => {
+  const { app } = createTestApp();
+  const device = await joinDevice(app);
+  const { questions } = await master();
+  await pushMaster(app, device.deviceKey, questions);
+  const token = await enableAiLink(app, { write: false });
+
+  const one = await callTool(app, token, "getQuestion", { id: "aochart1a-m1-exr-001" });
+  assert.equal(one.question.needsReview, true);
+  const listed = await callTool(app, token, "listQuestions", { type: "EXERCISES", limit: 1 });
+  assert.equal(listed.questions[0].needsReview, true);
+  // 例題には印が付かない（確認済みのため）。
+  const example = await callTool(app, token, "getQuestion", { id: "aochart1a-m1-ex-001" });
+  assert.equal(example.question.needsReview, undefined);
+});
+
 test("推測で埋めた値が無い（難易度は1〜5、ページは整数）", async () => {
   const { questions } = await master();
   for (const q of questions) {
@@ -238,7 +254,8 @@ test("MCP から追加した情報を読める", async () => {
     ["数と式", "集合と命題", "2次関数", "図形と計量", "データの分析"],
   );
   assert.equal(info.subjects[0].chapters[0].sectionDetails[0].page, 12);
-  assert.ok(info.questionTypes.some((t) => t.type === "基本例題" && t.count === 273));
+  assert.ok(info.questionTypes.some((t) => t.type === "基本例題" && t.count === 269));
+  assert.equal(info.needsReviewCount, 241);
 
   const one = await callTool(app, token, "getQuestion", { id: "aochart1a-m1-ex-001" });
   assert.equal(one.question.title, "同類項の整理と次数・定数項");
@@ -270,14 +287,14 @@ test("『基本例題だけ』『難しい問題を除く』で絞れる", async
   const token = await enableAiLink(app, { write: false });
 
   const basic = await callTool(app, token, "listQuestions", { types: ["基本例題"], limit: 1 });
-  assert.equal(basic.total, 273);
+  assert.equal(basic.total, 269);
 
   const easy = await callTool(app, token, "listQuestions", { types: ["基本例題"], difficultyTo: 2, limit: 1 });
   assert.ok(easy.total > 0);
   assert.ok(easy.total < basic.total);
 
   const both = await callTool(app, token, "listQuestions", { types: ["基本例題", "重要例題"], limit: 1 });
-  assert.equal(both.total, 273 + 63);
+  assert.equal(both.total, 269 + 68);
 });
 
 test("『例題50〜65』は教科を指定して取れる", async () => {

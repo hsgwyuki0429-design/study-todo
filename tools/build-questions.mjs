@@ -54,6 +54,9 @@ export function buildQuestions() {
           });
         }
         for (const [number, difficulty, page] of section.exercises) {
+          // EXERCISES の難易度は、誌面の小さな丸数字から読み取ったもの。
+          // 抜き取り検証で読み違いが見つかったため、確認待ちの印を付けておく。
+          // 番号・掲載ページ・所属する節は大きく印字されており、確認済み。
           questions.push({
             id: `aochart1a-${slug}-exr-${pad(number)}`,
             ...common,
@@ -63,6 +66,7 @@ export function buildQuestions() {
             title: null,
             page,
             difficulty,
+            needsReview: true,
           });
         }
       }
@@ -90,6 +94,7 @@ export function checkQuestions(questions) {
       add(`難易度が1〜5でない: ${q.id} (${q.difficulty})`);
     }
     if (!Number.isInteger(q.sectionPage)) add(`節のページが無い: ${q.id}`);
+    if (q.type === 'EXERCISES' && q.needsReview !== true) add(`EXERCISESに確認待ちの印が無い: ${q.id}`);
   }
 
   // 教科×種類ごとに、番号が1から連番になっているか
