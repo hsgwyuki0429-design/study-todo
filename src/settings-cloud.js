@@ -1,0 +1,254 @@
+// 設定タブの「AI連携 / 同期」カード。
+//
+// ここは画面の組み立てだけを受け持ち、通信と保存は src/cloud-sync.js に任せる。
+// 管理キー（オーナーキー）と端末キーはこの端末の中だけに置き、画面には全文を出さない。
+
+import * as cloud from './cloud-sync.js';
+import * as api from './api.js';
+import { state, loadTasks, refreshToday } from './state.js';
+import { el, row } from './ui.js';
+
+// 発行した直後の接続トークンだけ、画面が再描画されるまで覚えておく。
+// サーバーには残らないので、ここで控えてもらう。
+let issuedToken = null;
+let lastMessage = null;
+
+/** 同期で入ってきた内容を、画面が使っている状態へ読み込み直す。 */
+async function reloadFromLocal() {
+  const questions = await api.listQuestions();
+  state.questions = new Map(questions.map((question) => [question.id, question]));
+  await loadTasks();
+  await refreshToday();
+}
+
+const mask = (value) => (value ? `${String(value).slice(0, 6)}…` : '—');
+const fmtDateTime = (iso) => (iso ? new Date(iso).toLocaleString('ja-JP') : '—');
+
+function field(labelText, input) {
+  const wrap = el('div', 'setting');
+  const head = el('div', 'setting-head');
+  head.append(el('div', 'row-title', labelText));
+  wrap.append(head, input);
+  return wrap;
+}
+
+function textInput({ value = '', placeholder = '', type = 'text' }) {
+  const input = el('input', 'cloud-input');
+  input.type = type;
+  input.value = value ?? '';
+  input.placeholder = placeholder;
+  input.autocapitalize = 'off';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  return input;
+}
+
+function actions(...buttons) {
+  const wrap = el('div', 'setting-actions');
+  wrap.append(...buttons);
+  return wrap;
+}
+
+function button(label, onClick, cls = 'btn') {
+  const node = el('button', cls, label);
+  node.onclick = onClick;
+  return node;
+}
+
+/**
+ * 「AI連携 / 同期」カードを組み立てて list に足す。
+ * rerender は設定画面をもう一度描き直すための関数。
+ */
+export async function renderCloudCard(list, rerender) {
+  const config = await cloud.getCloudConfig();
+
+  // 管理キーがあり、オンラインならサーバーの状態も見に行く。
+  let status = null;
+  let statusError = null;
+  if (config.serverUrl && config.ownerKey) {
+    try {
+      status = await cloud.admin.status(config);
+    } catch (error) {
+      statusError = error.message;
+    }
+  }
+  const state = cloud.connectionState(config, { serverEnabled: status?.enabled ?? null });
+
+  list.append(el('div', 'section-head', 'AI連携 / 同期'));
+
+  const pill = el('span', `state-pill${state.key === 'linked' ? ' active' : ''}`, state.label);
+  list.append(row({
+    title: '接続状態',
+    sub: [
+      `最終同期: ${fmtDateTime(config.lastSyncedAt)}`,
+      config.lastError ? `直前の問題: ${config.lastError}` : null,
+      statusError ? `サーバー: ${statusError}` : null,
+    ].filter(Boolean).join(' / '),
+    right: pill,
+  }));
+
+  if (lastMessage) {
+    list.append(row({ title: lastMessage, classes: ['row-indent'] }));
+    lastMessage = null;
+  }
+
+  list.append(row({
+    title: 'MCP Server URL',
+    sub: config.serverUrl ? cloud.mcpUrlFor(config) : '未設定',
+  }));
+
+  const urlInput = textInput({ value: config.serverUrl, placeholder: 'https://study-todo-mcp.xxx.workers.dev' });
+  const keyInput = textInput({ value: '', placeholder: config.ownerKey ? '保存済み（変更するときだけ入力）' : '管理キー', type: 'password' });
+  list.append(field('サーバーのURL', urlInput));
+  list.append(field('管理キー（この端末の中だけに保存）', keyInput));
+  list.append(actions(button('保存', async () => {
+    await cloud.saveCloudConfig({
+      serverUrl: urlInput.value,
+      ...(keyInput.value ? { ownerKey: keyInput.value } : {}),
+    });
+    lastMessage = '保存しました。';
+    rerender();
+  }, 'btn btn-primary')));
+
+  // ----- 端末の登録 -----
+  const nameInput = textInput({ value: config.deviceName, placeholder: 'iPhone / iPad / PC など' });
+  if (!cloud.isLinked(config)) {
+    const codeInput = textInput({ value: '', placeholder: 'STUDY-XXXX-XXXX' });
+    list.append(field('この端末の名前', nameInput));
+    list.append(field('同期コード', codeInput));
+    list.append(actions(button('この端末を登録', async () => {
+      try {
+        await cloud.joinDevice({
+          serverUrl: urlInput.value || config.serverUrl,
+          code: codeInput.value,
+          deviceName: nameInput.value || '端末',
+        });
+        lastMessage = '登録しました。「いますぐ同期」を押すと学習データが行き来します。';
+      } catch (error) {
+        lastMessage = `登録できませんでした: ${error.message}`;
+      }
+      rerender();
+    }, 'btn btn-primary')));
+  } else {
+    list.append(row({ title: '端末', sub: `${config.deviceName || '端末'}（${config.deviceId}）` }));
+    list.append(actions(
+      button('いますぐ同期', async () => {
+        const result = await cloud.syncNow({ force: true });
+        // 受け取った内容を画面へ反映する（問題マスタ・今日のTODO・今日の集計）。
+        if (result.ok) await reloadFromLocal();
+        lastMessage = result.ok
+          ? `同期しました（受け取り: 記録${result.applied.records}件 / 予定${result.applied.plans}日ぶん${result.remaining ? ` ・ 未送信 ${result.remaining}件が残っています` : ''}）`
+          : `同期できませんでした: ${result.message ?? result.reason}`;
+        rerender();
+      }, 'btn btn-primary'),
+      button('同期を解除', async () => {
+        if (!confirm('この端末の同期を解除します。クラウドとこの端末の学習記録は消えません。よろしいですか？')) return;
+        await cloud.leaveDevice();
+        lastMessage = '同期を解除しました。';
+        rerender();
+      }, 'btn btn-danger'),
+    ));
+  }
+
+  if (config.ownerKey) {
+    list.append(actions(button('同期コードを発行（他の端末を追加するとき）', async () => {
+      try {
+        const issued = await cloud.admin.issueSyncCode(config);
+        lastMessage = `同期コード: ${issued.syncCode}（他の端末でこれを入力してください。次の画面では二度と表示されません）`;
+      } catch (error) {
+        lastMessage = `発行できませんでした: ${error.message}`;
+      }
+      rerender();
+    })));
+  }
+
+  // ----- サーバー側の設定（管理キーが要る） -----
+  if (status) {
+    list.append(row({
+      title: 'AI連携',
+      sub: status.enabled ? 'AIからの接続を受け付けています' : 'AIからは接続できません',
+      right: button(status.enabled ? 'オフにする' : 'オンにする', async () => {
+        await cloud.admin.updateSettings(config, { enabled: !status.enabled });
+        rerender();
+      }, 'link-btn'),
+    }));
+
+    list.append(row({
+      title: '権限：学習状況を見る',
+      sub: 'AI連携を使うときは常に必要',
+      right: el('span', 'state-pill active', '許可'),
+    }));
+    list.append(row({
+      title: '権限：予定を変更する',
+      sub: 'AIが今日のTODOや目標を書き換えられるようにする',
+      right: button(status.permissions.write ? '許可中' : '許可しない', async () => {
+        await cloud.admin.updateSettings(config, { permissions: { write: !status.permissions.write } });
+        rerender();
+      }, 'link-btn'),
+    }));
+
+    list.append(row({
+      title: '接続トークン（AIへ渡す鍵）',
+      sub: status.token
+        ? `${status.token.preview} ・ 権限 ${status.token.scopes.join(' / ')} ・ 最終利用 ${fmtDateTime(status.token.lastUsedAt)}`
+        : 'まだ発行していません',
+    }));
+    if (issuedToken) {
+      list.append(row({
+        title: issuedToken,
+        sub: '今だけ表示されます。AIのMCP設定へ貼り付けてください。',
+        classes: ['row-indent'],
+      }));
+    }
+    list.append(actions(
+      button(status.token ? 'トークンを再発行' : 'トークンを発行', async () => {
+        const scopes = status.permissions.write ? ['read', 'write'] : ['read'];
+        try {
+          const issued = await cloud.admin.issueToken(config, scopes);
+          issuedToken = issued.token;
+          lastMessage = '発行しました。前のトークンは使えなくなります。';
+        } catch (error) {
+          lastMessage = `発行できませんでした: ${error.message}`;
+        }
+        rerender();
+      }, 'btn btn-primary'),
+      ...(status.token ? [button('トークンを失効', async () => {
+        if (!confirm('いま発行されている接続トークンを使えなくします。よろしいですか？')) return;
+        await cloud.admin.revokeToken(config);
+        issuedToken = null;
+        lastMessage = '失効しました。';
+        rerender();
+      }, 'btn btn-danger')] : []),
+    ));
+
+    list.append(row({
+      title: 'クラウドの内容',
+      sub: `学習記録 ${status.sync.records}件 ・ 問題 ${status.sync.questions}問 ・ 端末 ${status.sync.devices.length}台`,
+    }));
+
+    list.append(el('div', 'section-head', '最近のAI操作'));
+    if (!status.log.length) {
+      list.append(row({ title: 'まだありません', classes: ['row-indent'] }));
+    } else {
+      for (const entry of status.log.slice(0, 10)) {
+        list.append(row({
+          title: entry.summary,
+          sub: `${fmtDateTime(entry.timestamp)} ・ ${entry.clientName ?? 'AI'} ・ ${entry.tool}`,
+          classes: ['row-indent'],
+        }));
+      }
+    }
+  } else if (config.serverUrl && !config.ownerKey) {
+    list.append(row({
+      title: 'AI連携の設定には管理キーが必要です',
+      sub: 'Cloudflare に登録した STUDY_TODO_OWNER_KEY を上の欄へ入力してください。',
+      classes: ['row-indent'],
+    }));
+  }
+
+  list.append(row({
+    title: 'この端末の鍵',
+    sub: `管理キー ${config.ownerKey ? mask(config.ownerKey) : '未設定'} ・ 端末キー ${config.deviceKey ? '保存済み' : '未取得'}（どちらもバックアップJSONには入りません）`,
+    classes: ['row-indent'],
+  }));
+}

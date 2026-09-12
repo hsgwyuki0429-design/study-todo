@@ -9,6 +9,7 @@ import { renderHome, tickHome } from './home.js';
 import { renderRecords } from './records.js';
 import { renderSchedule } from './schedule.js';
 import { renderSettings, applyTheme } from './settings.js';
+import { startCloudSync } from './cloud-sync.js';
 
 const TABS = [
   ['home', 'ホーム', '■'],
@@ -104,6 +105,10 @@ async function boot() {
   });
 
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+
+  // クラウド同期は「追加の機能」。設定していなければ何も起きず、
+  // 失敗しても学習機能には影響しない。
+  startCloudSync();
 }
 
 boot();

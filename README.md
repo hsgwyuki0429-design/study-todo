@@ -37,8 +37,13 @@ python3 -m http.server 8000
 | `src/settings.js` | 設定タブ |
 | `src/api.js` | データアクセス層（MCPツールと1:1対応） |
 | `src/idb.js` | IndexedDB ラッパー（保存先の差し替え点） |
+| `src/datetime.js` | 日付と時間帯（日本時間で「今日」を判断する） |
+| `src/cloud-sync.js` | クラウド同期のクライアント（任意機能） |
+| `src/settings-cloud.js` | 設定タブの「AI連携 / 同期」カード |
 | `src/seed.js` | 初期データ |
 | `sw.js` | アプリシェルのキャッシュ（オフライン起動） |
+| `server/` | MCP Server（Cloudflare Workers + KV。詳細は `docs/mcp.md`） |
+| `test/` | サーバー側の自動テスト（`npm test`） |
 
 ## ホーム画面
 
@@ -99,13 +104,50 @@ python3 -m http.server 8000
 
 メモ欄・原因タグは設けない（原因は5択に内包される）。
 
-## MCP連携
+## クラウド同期と MCP 連携（任意）
 
-`src/api.js` が MCP サーバー側から呼ばれる想定の関数を提供する。
+学習データを Cloudflare（Worker + KV）へ預けると、Claude などの MCP 対応AIから
+学習状況を読み取り、今日のTODOや目標を変更できる。変更は次に同期したときPWAへ反映される。
 
-`getAppInfo` / `listQuestions` / `searchQuestions` / `getQuestion` / `getStudyHistory` / `getRecentMistakes` / `getStudyStats` / `getRecentChallengeResult` / `getTodayTasks` / `updateTodayTasks` / `getGoals` / `addGoal` / `updateGoal`
+```
+study-todo（PWA・IndexedDB）
+      ↓↑
+Cloudflare Worker + KV  →  MCP Server  →  Claude などのAI
+```
 
-現状の保存先はブラウザの IndexedDB のみ。サーバー同期に移行する際は `src/idb.js` を差し替え、`src/api.js` のシグネチャを維持すればよい。
+**この連携は追加機能**であり、設定しなければ今までどおりブラウザの中だけで動く。
+サーバーが落ちていても、オフラインでも、学習の記録・タイマー・カレンダーはすべて使える。
+オフライン中の記録は端末に貯まり、オンラインに戻ったときにまとめて送られる（何度送っても
+`id` で重複しない）。
+
+**AIは学習実績を作れない。** 公開しているのは「読む」ツールと「これからの予定・目標を
+変える」ツールだけで、学習記録とチャレンジ結果を作れるのはPWA本体だけ。
+
+| 種類 | 同期 |
+|---|---|
+| 学習記録・チャレンジ結果 | する（追加専用イベント。`id` で重複排除し、合計はサーバーで数え直す） |
+| その日の予定（TaskPlan） | する（日付ごとに `revision` で競合を解く） |
+| 目標 | する |
+| 問題マスタ | する（指紋が変わったときだけ送る） |
+| 計測中のタイマー・表示設定 | しない（端末ごとのもの） |
+| 管理キー・端末キー・接続トークン | しない（端末の中だけ。バックアップJSONにも入らない） |
+
+設定手順（Cloudflare の準備からClaudeへの登録まで）とツールの一覧は
+**[docs/mcp.md](docs/mcp.md)** にある。
+
+主なツール:
+`getAppInfo` / `listQuestions` / `searchQuestions` / `getQuestion` / `getStudyHistory` /
+`getRecentMistakes` / `getStudyStats` / `getRecentChallengeResult` / `getChallengeResults` /
+`getTodayTasks` / `getTasksInRange` / `getGoals` / `getRecentAiChanges` /
+`updateTodayTasks` / `updateTasksForDate` / `addGoal` / `updateGoal`
+
+サーバー側のテストは `npm test`（Node標準のテストのみ。PWA本体は引き続きビルド不要）。
+
+## 日付の扱い
+
+「今日」は日本時間（UTC+9）で判断する（`src/datetime.js`）。ISO文字列の先頭10文字をそのまま
+使うと、深夜〜朝に前日として扱われてしまうため、日付の判定はすべてこのモジュールを通す。
+MCPのツールでは `timezoneOffsetMinutes` で別の時間帯も指定できる（既定は540）。
 
 ## 問題マスタのインポート
 
@@ -116,3 +158,4 @@ python3 -m http.server 8000
 ```
 
 `id` を省略すると `subject-type-number` から生成される。設定タブからは全データの JSON 書き出しもできる。
+書き出したJSONに、管理キー・端末キー・接続トークンなどの秘密は含まれない。

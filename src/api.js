@@ -4,8 +4,9 @@
 // 将来サーバー同期に差し替える場合も、この関数シグネチャを保てばよい。
 
 import { idb, STORES } from './idb.js';
+import { dateKeyOf, todayKeyOf } from './datetime.js';
 
-export const DATA_VERSION = '1.0.0';
+export const DATA_VERSION = '1.1.0';
 
 export const EVALUATIONS = [
   { value: 'perfect', symbol: '◯', label: '完璧にできた', tone: 'success' },
@@ -27,10 +28,17 @@ export const TASK_KINDS = {
 export const uid = (prefix = 'id') =>
   `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
+/**
+ * 「今日」の日付キー。日本時間（UTC+9）で判断する。
+ * ISO文字列の先頭10文字（UTC日付）を使うと、深夜〜朝に前日扱いになってしまうため、
+ * 日付の判定はすべて src/datetime.js を通す。
+ */
 export function todayKey(d = new Date()) {
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  return dateKeyOf(d);
 }
+
+/** 学習記録の時刻から、その記録が属する日（日本時間）を求める。 */
+export const dayOf = (timestamp) => dateKeyOf(timestamp);
 
 /* ------------------------------------------------------------------ */
 /* 問題マスタ                                                          */
@@ -129,6 +137,35 @@ export async function getAppInfo() {
 }
 
 /* ------------------------------------------------------------------ */
+/* 送信待ちの控え（オフラインでも学習を止めないための仕組み）          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * クラウドへ送る予定の変更を控えておく。
+ * 送信できたかどうかに関わらず、ここへ積むだけで学習側の処理は止めない。
+ * 同じものを何度送ってもサーバー側で重複しないので、失敗しても消さずに残す。
+ */
+export async function enqueueOutbox(type, id) {
+  try {
+    await idb.put(STORES.outbox, { key: `${type}:${id}`, type, id, queuedAt: Date.now() });
+  } catch {
+    // 控えに失敗しても学習の記録自体は成功させる（次回の全体同期で拾える）。
+  }
+}
+
+export async function listOutbox() {
+  try {
+    return await idb.all(STORES.outbox);
+  } catch {
+    return [];
+  }
+}
+
+export async function clearOutboxEntries(keys) {
+  await Promise.all(keys.map((key) => idb.del(STORES.outbox, key).catch(() => {})));
+}
+
+/* ------------------------------------------------------------------ */
 /* 学習記録                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -142,6 +179,7 @@ export async function addStudyRecord({ questionId, evaluation, durationSeconds, 
     ...(challengeId ? { challengeId } : {}),
   };
   await idb.put(STORES.records, record);
+  await enqueueOutbox('record', record.id);
   return record;
 }
 
@@ -196,7 +234,7 @@ export async function getStudyStats() {
 
 export async function getTodayStats(date = todayKey()) {
   const records = await idb.all(STORES.records);
-  const today = records.filter((r) => r.timestamp.slice(0, 10) === date);
+  const today = records.filter((r) => dayOf(r.timestamp) === date);
   return {
     seconds: today.reduce((s, r) => s + r.durationSeconds, 0),
     count: today.length,
@@ -213,7 +251,23 @@ export async function getTodayTasks(date = todayKey()) {
   return tasks.sort((a, b) => a.order - b.order);
 }
 
-export async function updateTodayTasks(tasks, date = todayKey()) {
+/**
+ * その日の予定の版（revision）。クラウドと突き合わせるときに使う。
+ * サーバーが持っている版の番号と、この端末で変更したかどうかを覚えておく。
+ */
+export async function getPlanMeta() {
+  const row = await idb.get(STORES.meta, 'planMeta');
+  return row?.value ?? {};
+}
+
+export async function setPlanMeta(date, patch) {
+  const all = await getPlanMeta();
+  const next = { ...all, [date]: { ...(all[date] ?? { revision: 0 }), ...patch } };
+  await idb.put(STORES.meta, { key: 'planMeta', value: next });
+  return next;
+}
+
+export async function updateTodayTasks(tasks, date = todayKey(), { markDirty = true, updatedBy = 'app' } = {}) {
   const existing = await idb.byIndex(STORES.tasks, 'date', date);
   await Promise.all(existing.map((t) => idb.del(STORES.tasks, t.id)));
   const normalized = tasks.map((t, i) => ({
@@ -227,6 +281,10 @@ export async function updateTodayTasks(tasks, date = todayKey()) {
     ...(t.title ? { title: t.title } : {}),
   }));
   await idb.putAll(STORES.tasks, normalized);
+  if (markDirty) {
+    // この端末で変えた予定は、次の同期でクラウドへ送る。
+    await setPlanMeta(date, { updatedAt: new Date().toISOString(), dirty: true, updatedBy });
+  }
   return normalized;
 }
 
@@ -253,7 +311,7 @@ export async function getRecordedByDate() {
   const records = await idb.all(STORES.records);
   const map = {};
   records.forEach((r) => {
-    const day = r.timestamp.slice(0, 10);
+    const day = dayOf(r.timestamp);
     (map[day] ??= new Set()).add(r.questionId);
   });
   return map;
@@ -261,6 +319,8 @@ export async function getRecordedByDate() {
 
 export async function saveTask(task) {
   await idb.put(STORES.tasks, task);
+  // 完了の付け外しもその日の予定の変更なので、次の同期で送る。
+  await setPlanMeta(task.date, { updatedAt: new Date().toISOString(), dirty: true, updatedBy: 'app' });
   return task;
 }
 
@@ -271,6 +331,7 @@ export async function saveTask(task) {
 export async function saveChallengeResult(result) {
   const saved = { id: result.id || uid('chl'), timestamp: new Date().toISOString(), ...result };
   await idb.put(STORES.challenges, saved);
+  await enqueueOutbox('challenge', saved.id);
   return saved;
 }
 
@@ -289,13 +350,20 @@ export async function getChallengeResults(limit = 20) {
 /* 目標                                                                */
 /* ------------------------------------------------------------------ */
 
-export async function getGoals() {
-  const goals = await idb.all(STORES.goals);
+export async function getGoals({ includeDeleted = false } = {}) {
+  const all = await idb.all(STORES.goals);
+  const goals = includeDeleted ? all : all.filter((g) => !g.deletedAt);
   return goals.sort((a, b) => String(a.deadline).localeCompare(String(b.deadline)));
 }
 
 export async function addGoal({ title, deadline, scope }) {
-  const goal = { id: uid('goal'), title, deadline, scope: scope || '' };
+  const goal = {
+    id: uid('goal'),
+    title,
+    deadline,
+    scope: scope || '',
+    updatedAt: new Date().toISOString(),
+  };
   await idb.put(STORES.goals, goal);
   return goal;
 }
@@ -303,13 +371,19 @@ export async function addGoal({ title, deadline, scope }) {
 export async function updateGoal(id, patch) {
   const goal = await idb.get(STORES.goals, id);
   if (!goal) return null;
-  const next = { ...goal, ...patch, id };
+  const next = { ...goal, ...patch, id, updatedAt: new Date().toISOString() };
   await idb.put(STORES.goals, next);
   return next;
 }
 
+/**
+ * 目標を消す。消したことを他の端末へも伝える必要があるので、
+ * すぐ消さずに「消した印」を残す（同期が済んだ端末では表示されなくなる）。
+ */
 export async function deleteGoal(id) {
-  await idb.del(STORES.goals, id);
+  const goal = await idb.get(STORES.goals, id);
+  if (!goal) return;
+  await idb.put(STORES.goals, { ...goal, deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
 }
 
 /* ------------------------------------------------------------------ */

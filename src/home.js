@@ -5,6 +5,7 @@ import * as api from './api.js';
 import { EVALUATIONS, EVAL_MAP } from './api.js';
 import { state, q, qLabel, render, refreshToday } from './state.js';
 import { $, el, fmtMS, fmtShort, row, segmented, emptyState } from './ui.js';
+import { syncInBackground } from './cloud-sync.js';
 
 const persist = () => api.setSessionState(state.session);
 
@@ -279,6 +280,8 @@ async function recordChallengeEvaluation(evaluation) {
 }
 
 async function refreshAfterRecord() {
+  // 学習記録を保存したあとにクラウドへ送る。失敗しても学習側は止めない。
+  syncInBackground();
   await refreshToday();
   await markCompletedTasks();
   await persist();

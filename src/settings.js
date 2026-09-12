@@ -2,7 +2,8 @@
 
 import * as api from './api.js';
 import { state, render } from './state.js';
-import { el, row, emptyState } from './ui.js';
+import { el, row } from './ui.js';
+import { renderCloudCard } from './settings-cloud.js';
 
 async function update(patch) {
   state.settings = await api.saveSettings({ ...state.settings, ...patch });
@@ -103,14 +104,8 @@ export async function renderSettings(screen) {
   exportWrap.append(exportBtn);
   list.append(exportWrap);
 
-  list.append(el('div', 'section-head', 'MCP連携'));
-  list.append(
-    row({
-      title: '接続状況',
-      sub: 'アプリ内で完結（未接続）',
-      right: el('span', 'state-pill', '未接続'),
-    })
-  );
+  await renderCloudCard(list, render);
+
   list.append(
     row({
       title: 'データ形式のバージョン',
