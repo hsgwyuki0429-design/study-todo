@@ -230,6 +230,35 @@ export async function updateTodayTasks(tasks, date = todayKey()) {
   return normalized;
 }
 
+export async function getTasksInRange(fromDate, toDate) {
+  const all = await idb.all(STORES.tasks);
+  return all
+    .filter((t) => t.date >= fromDate && t.date <= toDate)
+    .sort((a, b) => a.date.localeCompare(b.date) || a.order - b.order);
+}
+
+/** 問題ID -> 最新の評価。カレンダーの目盛りの色分けに使う。 */
+export async function getLatestEvaluations() {
+  const records = await idb.all(STORES.records);
+  records.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const map = {};
+  records.forEach((r) => {
+    map[r.questionId] = r.evaluation;
+  });
+  return map;
+}
+
+/** 日付 -> その日に記録された問題IDの集合。達成率の算出に使う。 */
+export async function getRecordedByDate() {
+  const records = await idb.all(STORES.records);
+  const map = {};
+  records.forEach((r) => {
+    const day = r.timestamp.slice(0, 10);
+    (map[day] ??= new Set()).add(r.questionId);
+  });
+  return map;
+}
+
 export async function saveTask(task) {
   await idb.put(STORES.tasks, task);
   return task;
@@ -294,12 +323,41 @@ export const EMPTY_SESSION = {
   currentChallengeId: null,
   questionElapsed: {},
   currentStartedAt: null,
+
+  // 学習セッション全体のタイマー（問題を切り替えても止まらない）
+  sessionElapsed: 0,
+  sessionStartedAt: null,
+
   challengeStartedAt: null,
   challengeTimeLimitSeconds: null,
   challengeCountUp: false,
   challengeOrder: null,
-  completedQuestionIds: [],
+  challengeFinishedElapsed: null,  // 「終了」を押した時点の全体経過秒
+  reviewQueue: [],                 // チャレンジ終了後にまとめて評価する問題
+  reviewIndex: 0,
+  evaluations: {},   // チャレンジ評価入力の途中経過
 };
+
+/* ------------------------------------------------------------------ */
+/* 設定                                                                */
+/* ------------------------------------------------------------------ */
+
+export const DEFAULT_SETTINGS = {
+  calendarStyle: 'ring',      // 'ring' | 'fill'
+  fillVariation: 'random',    // 'random' | 'month' | 'week'
+  theme: 'auto',              // 'auto' | 'light' | 'dark'
+};
+
+export async function getSettings() {
+  const row = await idb.get(STORES.meta, 'settings');
+  return { ...DEFAULT_SETTINGS, ...(row?.value ?? {}) };
+}
+
+export async function saveSettings(settings) {
+  const next = { ...DEFAULT_SETTINGS, ...settings };
+  await idb.put(STORES.meta, { key: 'settings', value: next });
+  return next;
+}
 
 export async function getSessionState() {
   const row = await idb.get(STORES.meta, 'session');
@@ -309,4 +367,29 @@ export async function getSessionState() {
 export async function setSessionState(value) {
   await idb.put(STORES.meta, { key: 'session', value });
   return value;
+}
+
+/* ------------------------------------------------------------------ */
+/* バックアップ                                                        */
+/* ------------------------------------------------------------------ */
+
+export async function exportAll() {
+  const [questions, records, tasks, challenges, goals, settings] = await Promise.all([
+    idb.all(STORES.questions),
+    idb.all(STORES.records),
+    idb.all(STORES.tasks),
+    idb.all(STORES.challenges),
+    idb.all(STORES.goals),
+    getSettings(),
+  ]);
+  return {
+    dataVersion: DATA_VERSION,
+    exportedAt: new Date().toISOString(),
+    questions,
+    records,
+    tasks,
+    challenges,
+    goals,
+    settings,
+  };
 }
