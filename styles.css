@@ -395,10 +395,10 @@ input[type='text'] { width: 100%; }
 .cal-num { position: relative; font-size: 12px; font-variant-numeric: tabular-nums; }
 .cal-grid.year .cal-num { font-size: 13px; }
 
-.ring { position: absolute; inset: 3px; width: auto; height: auto; fill: none; background: none; }
+.ring { position: absolute; inset: 4px; width: auto; height: auto; max-width: 100%; max-height: 100%; fill: none; background: none; pointer-events: none; }
 .ring-track { stroke: var(--line-strong); stroke-width: 1.5; }
 .ring-track-miss { stroke: var(--danger); opacity: 0.4; }
-.ring-value { stroke: currentColor; stroke-width: 3.5; stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
+.ring-value { stroke: currentColor; stroke-width: 3.2; stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
 
 .rtone-success { color: var(--success); }
 .rtone-warning { color: var(--warning); }
@@ -411,16 +411,28 @@ input[type='text'] { width: 100%; }
 
 .bar-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
 .bar-date { font-size: 11px; color: var(--fg-faint); font-variant-numeric: tabular-nums; min-width: 34px; }
-.bar-title { flex: 1; font-size: 14px; }
+.bar-title { flex: 1; min-width: 0; font-size: 14px; overflow-wrap: anywhere; line-height: 1.4; }
 .bar-count { font-size: 11px; color: var(--fg-sub); font-variant-numeric: tabular-nums; }
 
-.bar { display: flex; gap: 2px; height: 12px; }
+.bar {
+  display: flex;
+  height: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  overflow: hidden;
+}
 
-.bar .seg { flex: 1; border: 1px solid var(--line-strong); border-radius: 2px; background: none; min-width: 3px; }
-.bar .seg.tone-success { background: var(--success); border-color: var(--success); }
-.bar .seg.tone-accent { background: var(--accent); border-color: var(--accent); }
-.bar .seg.tone-warning { background: var(--warning); border-color: var(--warning); }
-.bar .seg.tone-danger { background: var(--danger); border-color: var(--danger); }
+.bar .seg {
+  flex: 1;
+  min-width: 3px;
+  background: none;
+  border-right: 1px solid var(--line);
+}
+.bar .seg:last-child { border-right: none; }
+.bar .seg.tone-success { background: var(--success); border-right-color: var(--success); }
+.bar .seg.tone-accent { background: var(--accent); border-right-color: var(--accent); }
+.bar .seg.tone-warning { background: var(--warning); border-right-color: var(--warning); }
+.bar .seg.tone-danger { background: var(--danger); border-right-color: var(--danger); }
 
 /* ---------- 設定 ---------- */
 

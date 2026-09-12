@@ -122,12 +122,13 @@ function dayCell(dateKey, label, info, { muted = false } = {}) {
     if (info) {
       const rate = isFuture ? 0 : info.rate;
       const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      svg.setAttribute('viewBox', '0 0 36 36');
+      svg.setAttribute('viewBox', '0 0 40 40');
+      svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
       svg.setAttribute('class', `ring rtone-${isFuture ? 'idle' : rateTone(rate)}`);
       const circle = (cls, dash) => {
         const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-        c.setAttribute('cx', '18');
-        c.setAttribute('cy', '18');
+        c.setAttribute('cx', '20');
+        c.setAttribute('cy', '20');
         c.setAttribute('r', '15.9155');
         c.setAttribute('class', cls);
         if (dash) c.setAttribute('stroke-dasharray', dash);
@@ -220,24 +221,46 @@ function progressBar(questionIds, latest) {
 function barItem(dateText, title, questionIds, latest) {
   const item = el('div', 'bar-item');
   const head = el('div', 'bar-head');
-  head.append(el('span', 'bar-date', dateText), el('span', 'bar-title', title));
+  if (dateText) head.append(el('span', 'bar-date', dateText));
+  head.append(el('span', 'bar-title', title));
   const done = questionIds.filter((id) => latest[id]).length;
   head.append(el('span', 'bar-count', `${done}/${questionIds.length}`));
   item.append(head, progressBar(questionIds, latest));
   return item;
 }
 
+// 連続する番号は「30〜38」のようにまとめ、飛んでいる箇所だけ区切る
+function compressRuns(nums) {
+  const parts = [];
+  let start = nums[0];
+  let prev = nums[0];
+  for (let i = 1; i <= nums.length; i++) {
+    const n = nums[i];
+    if (n === prev + 1) {
+      prev = n;
+      continue;
+    }
+    parts.push(start === prev ? `${start}` : `${start}〜${prev}`);
+    start = prev = n;
+  }
+  return parts;
+}
+
 function rangeLabel(questionIds) {
   const qs = questionIds.map(q).filter(Boolean);
   if (!qs.length) return `${questionIds.length}問`;
   if (qs.length === 1) return qs[0].label;
-  const nums = qs.map((x) => x.number).sort((a, b) => a - b);
+  const nums = [...new Set(qs.map((x) => x.number))].sort((a, b) => a - b);
   const types = new Set(qs.map((x) => x.type));
   // 例題 / 基本例題 が混ざる場合は共通する「例題」でまとめる
   const prefix =
     types.size === 1 ? [...types][0] : qs.every((x) => x.type.endsWith('例題')) ? '例題' : '';
-  const range = `${nums[0]}〜${nums[nums.length - 1]}`;
-  return prefix ? `${prefix} ${range}` : range;
+  const list = compressRuns(nums).join('、');
+  return prefix ? `${prefix} ${list}` : list;
+}
+
+function uniqueIds(taskList) {
+  return [...new Set(taskList.flatMap((t) => t.questionIds))];
 }
 
 function progressList(tasks, latest) {
@@ -258,16 +281,20 @@ function progressList(tasks, latest) {
     return list;
   }
 
-  for (const task of tasks) {
-    const [, m, d] = task.date.split('-');
-    list.append(
-      barItem(
-        `${Number(m)}/${Number(d)}`,
-        task.kind === 'challenge' ? task.title ?? 'チャレンジ' : rangeLabel(task.questionIds),
-        task.questionIds,
-        latest
-      )
-    );
+  // 週/月表示では、例題とチャレンジをそれぞれ1本のバーにまとめる
+  const sorted = [...tasks].sort((a, b) => a.date.localeCompare(b.date));
+  const plainTasks = sorted.filter((t) => t.kind !== 'challenge');
+  const challengeTasks = sorted.filter((t) => t.kind === 'challenge');
+
+  if (plainTasks.length) {
+    const ids = uniqueIds(plainTasks);
+    list.append(barItem(null, rangeLabel(ids), ids, latest));
+  }
+  if (challengeTasks.length) {
+    const titles = new Set(challengeTasks.map((t) => t.title ?? 'チャレンジ'));
+    const title = titles.size === 1 ? [...titles][0] : 'チャレンジ';
+    const ids = uniqueIds(challengeTasks);
+    list.append(barItem(null, title, ids, latest));
   }
   return list;
 }
@@ -316,62 +343,27 @@ function dayDetail(dateKey, tasks, latest, recorded) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 目標                                                                */
-/* ------------------------------------------------------------------ */
-
-function goalForm(onSaved) {
-  const form = el('form', 'form');
-  const title = el('input');
-  title.type = 'text';
-  title.placeholder = '目標（例：数列を1周する）';
-  title.required = true;
-  const deadline = el('input');
-  deadline.type = 'date';
-  deadline.required = true;
-  const scope = el('input');
-  scope.type = 'text';
-  scope.placeholder = '対象範囲（例：数学I+A / 数列）';
-  const actions = el('div', 'timer-actions');
-  const cancel = el('button', 'btn', 'キャンセル');
-  cancel.type = 'button';
-  cancel.onclick = () => form.remove();
-  const save = el('button', 'btn btn-primary', '保存');
-  save.type = 'submit';
-  actions.append(cancel, save);
-  form.append(title, deadline, scope, actions);
-  form.onsubmit = async (e) => {
-    e.preventDefault();
-    await api.addGoal({ title: title.value.trim(), deadline: deadline.value, scope: scope.value.trim() });
-    onSaved();
-  };
-  return form;
-}
-
-async function goalSection(list) {
-  const goals = await api.getGoals();
-  list.append(el('div', 'section-head', '目標'));
-  if (!goals.length) list.append(emptyState('目標がありません'));
-  for (const g of goals) {
-    const del = el('button', 'link-btn', '削除');
-    del.onclick = async (e) => {
-      e.stopPropagation();
-      await api.deleteGoal(g.id);
-      render();
-    };
-    list.append(
-      row({
-        title: g.title,
-        sub: `${fmtDate(g.deadline)} まで ・ ${g.scope || '範囲未設定'}`,
-        right: del,
-      })
-    );
-  }
-}
-
-/* ------------------------------------------------------------------ */
 
 export async function renderSchedule(screen) {
   screen.innerHTML = '';
+
+  const head = el('div', 'view-head');
+  head.append(el('div', 'view-title', 'スケジュール'));
+  screen.append(head);
+
+  if (state.schedule.selectedDate) {
+    const { from, to } = periodRange();
+    const [tasks, recorded, latest] = await Promise.all([
+      api.getTasksInRange(from, to),
+      api.getRecordedByDate(),
+      api.getLatestEvaluations(),
+    ]);
+    const bottom = el('div', 'panel');
+    bottom.append(dayDetail(state.schedule.selectedDate, tasks, latest, recorded));
+    screen.append(bottom);
+    return;
+  }
+
   const { from, to } = periodRange();
   const [tasks, recorded, latest] = await Promise.all([
     api.getTasksInRange(from, to),
@@ -380,14 +372,8 @@ export async function renderSchedule(screen) {
   ]);
   const rates = buildRates(tasks, recorded);
 
-  const head = el('div', 'view-head');
-  head.append(el('div', 'view-title', 'スケジュール'));
-  const addGoal = el('button', 'link-btn', '目標を追加');
-  head.append(addGoal);
-  screen.append(head);
-
   screen.append(
-    segmented([['month', '月'], ['week', '週'], ['year', '年']], state.schedule.unit, (v) => {
+    segmented([['week', '週'], ['month', '月'], ['year', '年']], state.schedule.unit, (v) => {
       state.schedule.unit = v;
       state.schedule.selectedDate = null;
       render();
@@ -417,19 +403,6 @@ export async function renderSchedule(screen) {
   screen.append(cal);
 
   const bottom = el('div', 'panel');
-  if (state.schedule.selectedDate) {
-    bottom.append(dayDetail(state.schedule.selectedDate, tasks, latest, recorded));
-  } else {
-    const list = progressList(tasks, latest);
-    await goalSection(list);
-    bottom.append(list);
-  }
+  bottom.append(progressList(tasks, latest));
   screen.append(bottom);
-
-  // 描画後に差し替わるため、クリック時点の実際の親に挿入する
-  addGoal.onclick = () => {
-    const parent = bottom.parentNode;
-    if (!parent || parent.querySelector('.form')) return;
-    parent.insertBefore(goalForm(() => render()), bottom);
-  };
 }
