@@ -1,0 +1,25 @@
+# どのブランチでも、push と Pull Request のたびにテストを走らせる。
+# デプロイはしない（デプロイは .github/workflows/deploy.yml）。
+
+name: test
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+      - name: 問題マスタが tools/source と一致しているか
+        run: npm run build:questions -- --check

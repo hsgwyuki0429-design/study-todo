@@ -1,0 +1,78 @@
+# main への push で、テストが通ったときだけ Cloudflare Workers へ配る。
+#
+# 事前に GitHub のリポジトリ設定 → Secrets and variables → Actions で、
+# 次の2つ（必要なら3つ）を登録しておくこと。
+#
+#   CLOUDFLARE_API_TOKEN   … Cloudflare の API トークン
+#                            （テンプレート「Edit Cloudflare Workers」でよい）
+#   CLOUDFLARE_ACCOUNT_ID  … Cloudflare ダッシュボード右側に出ているアカウントID
+#   STUDY_TODO_KV_ID       … wrangler.toml の id を伏せたままにする場合だけ。
+#                            実際の id を wrangler.toml に書いてコミットするなら不要。
+#
+# 管理キー（STUDY_TODO_OWNER_KEY）はここでは扱わない。
+# あれは `npx wrangler secret put` で Cloudflare 側に入れたものがそのまま残る。
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    # PWA だけの変更でデプロイしても意味がないので、サーバーに関わるものに絞る。
+    paths:
+      - 'server/**'
+      - 'src/question-order.js'
+      - 'src/hash.js'
+      - 'src/datetime.js'
+      - 'test/**'
+      - 'wrangler.toml'
+      - 'package.json'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+# 続けて push されたときは、古い方を止めて最後の1つだけ配る。
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # テストが落ちたらここで止まる。壊れたものは配らない。
+      - name: テスト
+        run: npm test
+
+      # 問題マスタが tools/source から作り直した結果と一致しているか。
+      - name: 問題マスタの整合性
+        run: npm run build:questions -- --check
+
+      # wrangler.toml の id を伏せている場合だけ、ここで実際の値に差し替える。
+      # 差し替えた wrangler.toml はこの実行の中だけのもので、コミットはしない。
+      - name: KV名前空間IDを埋める
+        env:
+          KV_ID: ${{ secrets.STUDY_TODO_KV_ID }}
+        run: |
+          if grep -q 'ここに wrangler kv namespace create' wrangler.toml; then
+            if [ -z "$KV_ID" ]; then
+              echo "wrangler.toml の kv_namespaces の id が未設定です。" >&2
+              echo "実際の id を wrangler.toml に書くか、Secrets に STUDY_TODO_KV_ID を登録してください。" >&2
+              exit 1
+            fi
+            sed -i "s|ここに wrangler kv namespace create で表示された id を貼る|$KV_ID|" wrangler.toml
+            echo "KV名前空間IDを差し替えました。"
+          else
+            echo "wrangler.toml に id が書かれているので、そのまま使います。"
+          fi
+
+      - name: Cloudflare Workers へデプロイ
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

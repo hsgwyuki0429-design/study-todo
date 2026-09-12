@@ -38,7 +38,9 @@ python3 -m http.server 8000
 | `src/api.js` | データアクセス層（MCPツールと1:1対応） |
 | `src/question-order.js` | 問題マスタの項目と掲載順。PWAとサーバーで共有する |
 | `data/questions.json` | 問題マスタの実体（青チャート数学I+A 591問のメタデータ） |
-| `tools/build-questions.mjs` | 誌面から起こした表（`tools/source/`）から問題マスタを生成・検証する |
+| `tools/build-questions.mjs` | `tools/source/` から問題マスタを生成・検証する |
+| `.github/workflows/test.yml` | push と Pull Request のたびにテストを走らせる |
+| `.github/workflows/deploy.yml` | `main` への push で Cloudflare Workers へ自動デプロイする |
 | `src/idb.js` | IndexedDB ラッパー（保存先の差し替え点） |
 | `src/datetime.js` | 日付と時間帯（日本時間で「今日」を判断する） |
 | `src/cloud-sync.js` | クラウド同期のクライアント（任意機能） |

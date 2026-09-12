@@ -69,6 +69,31 @@ npx wrangler deploy
 `https://study-todo-mcp.＜あなたのアカウント名＞.workers.dev` のようなURLが表示されます。
 ブラウザで開いて案内ページが出れば成功です。`/health` を開くと `{"ok":true,...}` が返ります。
 
+## 5. 2回目からは GitHub に任せる（任意）
+
+`main` へ push すると、テストが通ったときだけ自動でデプロイされる仕組みを
+`.github/workflows/deploy.yml` に置いてあります。使うには、GitHub のリポジトリで
+Settings → Secrets and variables → Actions を開き、次を登録します。
+
+| 名前 | 中身 |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | Cloudflare の API トークン。テンプレート「Edit Cloudflare Workers」で作る |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare ダッシュボードの右側に出ているアカウントID |
+| `STUDY_TODO_KV_ID` | `wrangler.toml` の id を伏せたままにする場合だけ。実際の id を書いてコミットするなら不要 |
+
+管理キー（`STUDY_TODO_OWNER_KEY`）はここには入れません。3 で Cloudflare 側へ
+入れたものがそのまま使われます。GitHub には渡りません。
+
+デプロイが走るのは `server/` など、サーバーに関わるファイルを変えたときだけです。
+PWA だけ直したときは走りません。手で動かしたいときは、GitHub の Actions タブから
+`deploy` を選んで「Run workflow」を押します。
+
+うまくいったかは、こう確かめられます。
+
+```sh
+curl -s https://＜あなたのWorkerのURL＞/health
+```
+
 ## 5. study-todo の設定画面へURLと管理キーを入れる
 
 study-todo を開き、**設定 → AI連携 / 同期** で次を入力して「保存」を押します。
