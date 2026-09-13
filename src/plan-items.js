@@ -74,6 +74,9 @@ function normalizeItem(item, task) {
   return {
     itemId: String(item.itemId),
     questionId: String(item.questionId ?? ''),
+    // どの目標のための取り組みか。目標に結び付いていない予定は null。
+    // 実績（学習記録）は planItemId → この goalId をたどって目標に数える。
+    goalId: typeof item.goalId === 'string' && item.goalId ? item.goalId : (task?.goalId ?? null),
     // 当初の予定日。繰り越しても変えない（「本当はいつやるはずだったか」）。
     originalDate: item.originalDate ?? task?.date ?? null,
     carriedCount: Number.isFinite(Number(item.carriedCount)) ? Number(item.carriedCount) : 0,
@@ -93,7 +96,7 @@ export function reconcileItems(task, nextQuestionIds, previousItems = null) {
   }
   return nextQuestionIds.map((questionId) => {
     const reused = pool.get(questionId)?.shift();
-    return normalizeItem(reused ?? { itemId: newItemId(task.id), questionId }, task);
+    return normalizeItem(reused ?? { itemId: newItemId(task.id), questionId, goalId: task?.goalId ?? null }, task);
   });
 }
 
@@ -187,6 +190,7 @@ export function normalizeMove(raw, { now = Date.now() } = {}) {
     items: items.slice(0, 100).map((item) => ({
       itemId: String(item?.itemId ?? ''),
       questionId: String(item?.questionId ?? ''),
+      goalId: typeof item?.goalId === 'string' ? item.goalId : null,
       originalDate: item?.originalDate ?? null,
       carriedCount: Number.isFinite(Number(item?.carriedCount)) ? Number(item.carriedCount) : 0,
     })).filter((item) => item.itemId),

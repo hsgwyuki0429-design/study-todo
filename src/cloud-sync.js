@@ -237,6 +237,7 @@ async function buildPayload(config) {
     api.getPlanMeta(),
     idb.all(STORES.moves),
   ]);
+  const [availability, estimateEntries] = await Promise.all([api.getAvailability(), api.getEstimateEntries()]);
 
   const queuedRecordIds = new Set(outbox.filter((e) => e.type === 'record').map((e) => e.id));
   const queuedChallengeIds = new Set(outbox.filter((e) => e.type === 'challenge').map((e) => e.id));
@@ -281,6 +282,9 @@ async function buildPayload(config) {
       records: recordsToSend.slice(0, PUSH_CHUNK),
       challenges: challengesToSend.slice(0, 100),
       moves: movesToSend.slice(0, 200),
+      // 学習可能時間と見積もりの指定も送る（どちらも消さずに重ねられる）。
+      availability,
+      estimates: estimateEntries,
       taskPlans: taskPlans.slice(0, 120),
       goals,
       questions: questions.length && localHash !== config.questionsHash
@@ -293,7 +297,7 @@ async function buildPayload(config) {
 
 /** 受け取った内容をローカルへ重ねる。ここでも消す操作は一切しない。 */
 async function applySnapshot(snapshot) {
-  const applied = { records: 0, challenges: 0, plans: 0, goals: 0, questions: 0, moves: 0 };
+  const applied = { records: 0, challenges: 0, plans: 0, goals: 0, questions: 0, moves: 0, availability: 0, estimates: 0 };
 
   const existingRecords = new Set((await idb.all(STORES.records)).map((r) => r.id));
   const newRecords = (snapshot.records ?? [])
@@ -311,6 +315,39 @@ async function applySnapshot(snapshot) {
   if (newChallenges.length) {
     await idb.putAll(STORES.challenges, newChallenges);
     applied.challenges = newChallenges.length;
+  }
+
+  // 学習可能時間は、新しいほうを採る（サーバー側で突き合わせ済み）。
+  if (snapshot.availability) {
+    const local = await api.getAvailability();
+    const incomingAt = Date.parse(snapshot.availability.updatedAt ?? '') || 0;
+    const localAt = Date.parse(local.updatedAt ?? '') || 0;
+    if (incomingAt > localAt) {
+      await idb.put(STORES.meta, { key: api.AVAILABILITY_KEY, value: snapshot.availability });
+      applied.availability = 1;
+    }
+  }
+
+  // 見積もりの指定は、項目ごとに新しいほうを採る（本人の指定を仮の値で消さない）。
+  if (snapshot.estimates && typeof snapshot.estimates === 'object') {
+    const local = await api.getEstimateEntries();
+    const merged = { ...local };
+    for (const [questionId, entry] of Object.entries(snapshot.estimates)) {
+      const current = merged[questionId] ?? {};
+      const newer = (key, atKey) => ((Date.parse(entry[atKey] ?? '') || 0) >= (Date.parse(current[atKey] ?? '') || 0)
+        ? entry[key] : current[key]);
+      merged[questionId] = {
+        ...current,
+        manualSeconds: newer('manualSeconds', 'manualUpdatedAt'),
+        manualUpdatedAt: newer('manualUpdatedAt', 'manualUpdatedAt') ?? current.manualUpdatedAt ?? null,
+        aiSeconds: newer('aiSeconds', 'aiUpdatedAt'),
+        aiSource: newer('aiSource', 'aiUpdatedAt'),
+        aiNote: newer('aiNote', 'aiUpdatedAt'),
+        aiUpdatedAt: newer('aiUpdatedAt', 'aiUpdatedAt') ?? current.aiUpdatedAt ?? null,
+      };
+    }
+    await idb.put(STORES.meta, { key: api.ESTIMATES_KEY, value: merged });
+    applied.estimates = Object.keys(snapshot.estimates).length;
   }
 
   // 繰り越しの記録も、無いものだけ足す（消さない・上書きしない）。

@@ -113,6 +113,16 @@ export async function renderDayDetail(screen, dateKey) {
   head.append(el('div', 'view-title', `${fmtDate(dateKey)}${dateKey === today ? '（今日）' : ''}`));
   screen.append(head);
 
+  // その日の時間のやりくり（過ぎた日は出さない）。
+  let timeInfo = null;
+  if (dateKey >= today) {
+    const [availability, plannedMinutes] = await Promise.all([
+      api.availabilityForDay(dateKey),
+      api.plannedMinutesFor(dateKey),
+    ]);
+    timeInfo = { ...availability, plannedMinutes };
+  }
+
   const list = el('div', 'list');
   list.append(row({
     title: '← 週の一覧に戻る',
@@ -124,6 +134,18 @@ export async function renderDayDetail(screen, dateKey) {
       render();
     },
   }));
+
+  if (timeInfo) {
+    const available = timeInfo.available;
+    const short = available !== null && timeInfo.plannedMinutes > available;
+    list.append(row({
+      title: available === null
+        ? `予定 ${timeInfo.plannedMinutes}分 ／ 使える時間は未設定`
+        : `予定 ${timeInfo.plannedMinutes}分 ／ 使える ${available}分${short ? `（${timeInfo.plannedMinutes - available}分オーバー）` : ''}`,
+      sub: timeInfo.note,
+      classes: ['row-indent'],
+    }));
+  }
 
   /* ---------- 実施したもの ---------- */
   const plainRecords = records.filter((record) => !record.challengeId);
@@ -224,6 +246,34 @@ export async function renderDayDetail(screen, dateKey) {
       if (carryOverFor === entry.task.id) {
         list.append(carryOverPanel(dateKey, entry.task, entry.pending, rerender));
       }
+    }
+  }
+
+  /* ---------- まだ予定に入っていない目標の分 ---------- */
+  if (dateKey >= today) {
+    const goals = await api.getGoals();
+    const unplaced = [];
+    for (const goal of goals) {
+      if (goal.status !== 'active' || goal.needsScopeSetup) continue;
+      const progress = await api.getGoalProgressLocal(goal);
+      if (progress.unplanned) unplaced.push({ goal, progress });
+    }
+    if (unplaced.length) {
+      list.append(el('div', 'section-head', 'まだ予定に入っていない分'));
+      for (const entry of unplaced) {
+        list.append(row({
+          title: entry.goal.title,
+          sub: `未配置 ${entry.progress.unplanned}問 ・ 残り${entry.progress.remainingMinutes}分`
+            + `${entry.goal.deadline ? ` ・ 期限 ${fmtDate(entry.goal.deadline)}` : ''}`
+            + `${entry.progress.remainingIsComplete ? '' : '（習得までの総時間は不確実）'}`,
+          classes: ['row-indent'],
+        }));
+      }
+      list.append(row({
+        title: 'この分は消えずに残ります',
+        sub: '入りきらないときは、期限・対象・使える時間のどれを調整するか決めてください。Claude に「今週を組み直して」と頼むこともできます。',
+        classes: ['row-indent'],
+      }));
     }
   }
 

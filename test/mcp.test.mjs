@@ -126,8 +126,18 @@ test("書き込みツールで予定を置き換えられ、操作が記録に�
 test("目標を追加・変更できる", async () => {
   const { app } = createTestApp();
   const { token } = await seed(app);
-  const added = await callTool(app, token, "addGoal", { title: "12月までにI+Aを終える", deadline: "2026-12-31" });
+  // 目標の対象は、問題IDの一覧として確定させる（文章だけでは作れない）。
+  const vague = await callTool(app, token, "addGoal", { title: "がんばる" });
+  assert.equal(vague.error, "invalid_input");
+
+  const added = await callTool(app, token, "addGoal", {
+    title: "12月までにI+Aを終える",
+    deadline: "2026-12-31",
+    questionIds: QUESTIONS.map((question) => question.id),
+  });
   assert.equal(added.ok, true);
+  assert.equal(added.goal.questionIds.length, 3);
+  assert.equal(added.goal.completion.type, "attempt");
   const changed = await callTool(app, token, "updateGoal", { id: added.goal.id, title: "1月までにI+Aを終える" });
   assert.equal(changed.goal.title, "1月までにI+Aを終える");
   const goals = await callTool(app, token, "getGoals");

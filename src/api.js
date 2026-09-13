@@ -7,6 +7,9 @@ import { idb, STORES } from './idb.js';
 import { dateKeyOf, todayKeyOf } from './datetime.js';
 import { buildOutline, compareQuestions, normalizeQuestion, questionHaystack } from './question-order.js';
 import { itemsOf, splitPlanItems, withItems } from './plan-items.js';
+import { normalizeGoal, goalAttempts as goalAttemptsOf, questionSatisfied as questionSatisfiedFor } from './goals.js';
+import { normalizeAvailability, availabilityForDate } from './availability.js';
+import { estimateForQuestion } from './estimates.js';
 
 // 1.2.0 で問題マスタに book / chapterOrder / sectionOrder / title / page / sectionPage を、
 // 1.3.0 で courses（SELECT STUDY の3コース）と needsReview を足した。
@@ -32,6 +35,12 @@ export const TASK_KINDS = {
 };
 
 export { itemsOf, splitPlanItems, MOVE_REASONS, MOVE_REASON_LABELS, MOVE_KIND_LABELS } from './plan-items.js';
+export {
+  GOAL_COMPLETION_LABELS, GOAL_COMPLETION_TYPES, GOAL_STATUSES, GOAL_STATUS_LABELS,
+  selectQuestions, goalAttempts, questionSatisfied,
+} from './goals.js';
+export { WEEKDAY_KEYS, WEEKDAY_LABELS, availabilityForDate } from './availability.js';
+export { CONFIDENCE_LABELS } from './estimates.js';
 
 export const uid = (prefix = 'id') =>
   `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
@@ -511,17 +520,27 @@ export async function getChallengeResults(limit = 20) {
 export async function getGoals({ includeDeleted = false } = {}) {
   const all = await idb.all(STORES.goals);
   const goals = includeDeleted ? all : all.filter((g) => !g.deletedAt);
-  return goals.sort((a, b) => String(a.deadline).localeCompare(String(b.deadline)));
+  // 古い目標（文章の範囲しか無いもの）も、そのまま読めるように整えて返す。
+  return goals
+    .map((goal) => normalizeGoal(goal))
+    .sort((a, b) => (a.priority - b.priority)
+      || String(a.deadline || '9999').localeCompare(String(b.deadline || '9999')));
 }
 
-export async function addGoal({ title, deadline, scope }) {
-  const goal = {
+export async function addGoal({ title, deadline, scope, questionIds = [], completion, priority, startDate }) {
+  const goal = normalizeGoal({
     id: uid('goal'),
     title,
+    startDate: startDate ?? todayKey(),
     deadline,
     scope: scope || '',
+    questionIds,
+    completion,
+    priority,
+    status: 'active',
     updatedAt: new Date().toISOString(),
-  };
+    revision: 1,
+  });
   await idb.put(STORES.goals, goal);
   return goal;
 }
@@ -529,7 +548,13 @@ export async function addGoal({ title, deadline, scope }) {
 export async function updateGoal(id, patch) {
   const goal = await idb.get(STORES.goals, id);
   if (!goal) return null;
-  const next = { ...goal, ...patch, id, updatedAt: new Date().toISOString() };
+  const next = normalizeGoal({
+    ...goal,
+    ...patch,
+    id,
+    updatedAt: new Date().toISOString(),
+    revision: Number(goal.revision ?? 0) + 1,
+  });
   await idb.put(STORES.goals, next);
   return next;
 }
@@ -542,6 +567,161 @@ export async function deleteGoal(id) {
   const goal = await idb.get(STORES.goals, id);
   if (!goal) return;
   await idb.put(STORES.goals, { ...goal, deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+}
+
+/**
+ * 目標の進み具合を、この端末のデータだけで数える（サーバーと同じ考え方）。
+ *
+ * 実績として数えるのは「その目標に結び付いた予定から実施された取り組み」だけ。
+ * 同じ問題を別の目的で解いた記録は流用しない。
+ */
+export async function getGoalProgressLocal(goal) {
+  const [records, tasks] = await Promise.all([idb.all(STORES.records), idb.all(STORES.tasks)]);
+  const itemGoalMap = new Map();
+  for (const task of tasks) {
+    for (const item of itemsOf(task)) {
+      if (item.goalId) itemGoalMap.set(item.itemId, item.goalId);
+    }
+  }
+  const attempts = goalAttemptsOf(goal, { records, itemGoalMap });
+  const plannedQuestionIds = new Set();
+  for (const task of tasks) {
+    const split = splitPlanItems(task, records, { date: task.date, allowLegacyMatch: false });
+    for (const item of split.pending) {
+      if (item.goalId === goal.id) plannedQuestionIds.add(item.questionId);
+    }
+  }
+  const satisfied = [];
+  const unsatisfied = [];
+  for (const questionId of goal.questionIds ?? []) {
+    if (questionSatisfiedFor(goal, attempts.get(questionId) ?? [])) satisfied.push(questionId);
+    else unsatisfied.push(questionId);
+  }
+  const unplanned = unsatisfied.filter((id) => !plannedQuestionIds.has(id));
+  let remainingSeconds = 0;
+  for (const questionId of unsatisfied) {
+    remainingSeconds += (await estimateForQuestionId(questionId)).seconds;
+  }
+  return {
+    goalId: goal.id,
+    total: (goal.questionIds ?? []).length,
+    satisfied: satisfied.length,
+    unsatisfied: unsatisfied.length,
+    planned: unsatisfied.length - unplanned.length,
+    unplanned: unplanned.length,
+    unplannedQuestionIds: unplanned,
+    remainingMinutes: Math.round(remainingSeconds / 60),
+    // 「習得する目標」は、何回で習得できるか分からないので総時間は不確実。
+    remainingIsComplete: goal.completion?.type !== 'mastery',
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* 学習可能時間と見積もり                                              */
+/* ------------------------------------------------------------------ */
+
+export const AVAILABILITY_KEY = 'availability';
+export const ESTIMATES_KEY = 'estimates';
+
+/** 1日に使える学習時間の設定。未設定の曜日は null（0分とは違う）。 */
+export async function getAvailability() {
+  const row = await idb.get(STORES.meta, AVAILABILITY_KEY);
+  return normalizeAvailability(row?.value ?? {});
+}
+
+export async function saveAvailability(patch) {
+  const current = await getAvailability();
+  const next = normalizeAvailability({
+    ...current,
+    ...patch,
+    weekly: { ...current.weekly, ...(patch.weekly ?? {}) },
+    overrides: { ...current.overrides, ...(patch.overrides ?? {}) },
+    updatedAt: new Date().toISOString(),
+    revision: Number(current.revision ?? 0) + 1,
+  });
+  if (patch.overrides) {
+    for (const [date, value] of Object.entries(patch.overrides)) {
+      if (value === null) delete next.overrides[date];
+    }
+  }
+  if (patch.todayRemaining === null) next.todayRemaining = null;
+  await idb.put(STORES.meta, { key: AVAILABILITY_KEY, value: next });
+  return next;
+}
+
+/**
+ * 問題別の見積もり指定（本人が決めた時間と、AIが入れた仮の値）。
+ * 実績から計算できる分は保存しない（記録が増えれば計算し直せるため）。
+ */
+export async function getEstimateEntries() {
+  const row = await idb.get(STORES.meta, ESTIMATES_KEY);
+  return row?.value ?? {};
+}
+
+export async function setManualEstimate(questionId, seconds) {
+  const entries = await getEstimateEntries();
+  const next = {
+    ...entries,
+    [questionId]: {
+      ...(entries[questionId] ?? {}),
+      manualSeconds: seconds === null ? undefined : Math.max(30, Math.round(seconds)),
+      manualUpdatedAt: new Date().toISOString(),
+    },
+  };
+  await idb.put(STORES.meta, { key: ESTIMATES_KEY, value: next });
+  return next;
+}
+
+/** その日に使える時間（画面に「予定○分／使える○分」を出すために使う）。 */
+export async function availabilityForDay(dateKey) {
+  const [availability, records] = await Promise.all([getAvailability(), idb.all(STORES.records)]);
+  const spentSeconds = records
+    .filter((r) => dayOf(r.timestamp) === dateKey)
+    .reduce((sum, r) => sum + (r.durationSeconds ?? 0), 0);
+  return availabilityForDate(availability, dateKey, { spentSeconds, isToday: dateKey === todayKey() });
+}
+
+/**
+ * 1問の見積もり（画面用）。
+ * サーバーと同じ考え方で計算する（共有モジュール src/estimates.js）。
+ */
+export async function estimateForQuestionId(questionId, { inChallenge = false } = {}) {
+  const [question, history, entries, availability, challenges] = await Promise.all([
+    idb.get(STORES.questions, questionId),
+    getQuestionAttempts(questionId),
+    getEstimateEntries(),
+    getAvailability(),
+    idb.all(STORES.challenges),
+  ]);
+  const truncated = new Set(challenges.filter((c) => c.succeeded === false).map((c) => c.id));
+  return estimateForQuestion({
+    question,
+    history,
+    stored: entries[questionId] ?? null,
+    condition: { firstTry: history.length === 0, inChallenge },
+    review: {
+      timerIncludesReview: availability.timerIncludesReview,
+      reviewOverheadSeconds: availability.reviewOverheadSeconds,
+    },
+    truncatedChallengeIds: truncated,
+  });
+}
+
+/** その日の未実施の予定にかかる見積もり（分）。 */
+export async function plannedMinutesFor(dateKey) {
+  const [tasks, records] = await Promise.all([
+    idb.byIndex(STORES.tasks, 'date', dateKey),
+    idb.all(STORES.records),
+  ]);
+  let seconds = 0;
+  for (const task of tasks) {
+    const split = splitPlanItems(task, records, { date: dateKey });
+    for (const item of split.pending) {
+      const estimate = await estimateForQuestionId(item.questionId, { inChallenge: task.kind === 'challenge' });
+      seconds += estimate.seconds;
+    }
+  }
+  return Math.round(seconds / 60);
 }
 
 /* ------------------------------------------------------------------ */
@@ -618,6 +798,7 @@ export async function exportAll() {
     idb.all(STORES.moves),
     getSettings(),
   ]);
+  const [availability, estimateEntries] = await Promise.all([getAvailability(), getEstimateEntries()]);
   return {
     dataVersion: DATA_VERSION,
     exportedAt: new Date().toISOString(),
@@ -628,6 +809,10 @@ export async function exportAll() {
     goals,
     // 繰り越し・予定変更の記録。予定と実績の食い違いを後から追うために残す。
     moves,
+    // 学習可能時間と、見積もりの「指定」（本人の指定・AIの仮値）。
+    // 実績から計算できる見積もりは、書き出さない（記録から作り直せる）。
+    availability,
+    estimates: estimateEntries,
     settings,
   };
 }

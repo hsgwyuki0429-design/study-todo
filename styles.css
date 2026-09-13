@@ -402,7 +402,7 @@ input[type='text'] { width: 100%; }
 
 .choice[aria-selected='true'] { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
 
-.setting-actions { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; }
+.setting-actions { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 /* ---------- ダイアログ ---------- */
 
@@ -640,3 +640,23 @@ input[type='password'] { width: 100%; }
 }
 
 .attempt-history { padding: 10px 16px; }
+
+/* 目標・学習可能時間の設定（設定タブ） */
+.goal-detail { padding: 0 16px 8px 32px; }
+.plan-form { padding: 10px 16px 14px; display: flex; flex-direction: column; gap: 8px; }
+.plan-form select, .plan-form input { width: 100%; max-width: 100%; box-sizing: border-box; }
+.time-input { width: 92px; }
+
+.weekday-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: 8px;
+  padding: 4px 16px 12px;
+}
+.weekday-cell { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.weekday-name { width: 1.5em; color: var(--fg-sub); }
+.weekday-cell .time-input { width: 100%; min-width: 0; }
+
+/* 週間カレンダーの「予定○分／使える○分」 */
+.day-time { font-size: 12px; color: var(--fg-sub); margin-top: 6px; }
+.day-time.short { color: var(--danger); }

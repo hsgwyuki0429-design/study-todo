@@ -15,6 +15,8 @@
 import { fail, readString } from "../core/validate.js";
 import { generateToken, hashToken, timingSafeEqual } from "../auth/tokens.js";
 import { runTransaction, supportsTransactions, updateDocument } from "../storage/driver.js";
+import { normalizeAvailability } from "../../src/availability.js";
+import { normalizeGoal as normalizeStructuredGoal } from "../../src/goals.js";
 import {
   applyChanges,
   buildUndoChanges,
@@ -26,6 +28,8 @@ import {
 import { dateKeyOf, isDateKey, monthKeyOf, todayKeyOf } from "../../src/datetime.js";
 import {
   hashQuestions,
+  mergeAvailability,
+  mergeEstimateEntries,
   mergeEvents,
   mergeGoals,
   mergeTaskPlan,
@@ -53,6 +57,10 @@ export const SYNC_KEYS = Object.freeze({
   placements: "studytodo:placements",
   // 予定を別の日へ動かした記録（繰り越し・予定変更）。追加専用。
   moves: "studytodo:moves",
+  // 1日に使える学習時間（曜日別・日付ごと・今日の残り）。
+  availability: "studytodo:availability",
+  // 問題別の見積もり指定（本人の指定とAIの仮見積もり）。実績から計算する分は保存しない。
+  estimates: "studytodo:estimates",
 });
 
 export const SYNC_LIMITS = Object.freeze({
@@ -108,6 +116,8 @@ const DEFAULT_LOG = { entries: [] };
 const DEFAULT_CHANGES = { entries: [] };
 const DEFAULT_PLACEMENTS = { tasks: {} };
 const DEFAULT_MOVES = { moves: {} };
+const DEFAULT_AVAILABILITY_DOC = { weekly: {}, overrides: {}, todayRemaining: null, reserveMinutes: 0, updatedAt: null };
+const DEFAULT_ESTIMATES = { byQuestion: {} };
 
 export function createSyncService({ storage, now = () => Date.now() }) {
   async function readDoc(key, defaults) {
@@ -167,12 +177,32 @@ export function createSyncService({ storage, now = () => Date.now() }) {
   }
 
   /** 目標を id ごとに重ねて書く。消した印（deletedAt）も引き継ぐ。 */
-  async function writeGoals(incoming = []) {
-    const normalized = incoming.map((goal) => normalizeGoal(goal, { now: now() })).filter(Boolean);
+  async function writeGoals(incoming = [], { bumpRevision = false } = {}) {
+    const at = new Date(now()).toISOString();
+    let saved = [];
     const { document } = await updateDocument(storage, SYNC_KEYS.goals, (draft) => {
-      draft.goals = mergeGoals(draft.goals ?? [], normalized);
+      const stored = draft.goals ?? [];
+      const normalized = incoming.map((goal) => {
+        const current = stored.find((entry) => entry.id === goal.id);
+        return normalizeStructuredGoal({
+          ...goal,
+          updatedAt: goal.updatedAt ?? at,
+          // 目標そのものにも版を持たせる。計画を作ってから反映するまでに
+          // 目標が変わっていないかを、この番号で確かめられる。
+          revision: bumpRevision ? Number(current?.revision ?? 0) + 1 : (goal.revision ?? current?.revision ?? 0),
+        }, { now: now() });
+      }).filter(Boolean);
+      saved = normalized;
+      draft.goals = mergeGoals(stored, normalized);
     }, { defaults: structuredClone(DEFAULT_GOALS) });
+    void saved;
     return document.goals;
+  }
+
+  /** 目標全体の版。どれか1つでも変われば増える（計画の作り直しの目安になる）。 */
+  async function goalsRevision() {
+    const goals = await readGoals({ includeDeleted: true });
+    return goals.reduce((sum, goal) => sum + Number(goal.revision ?? 0), 0);
   }
 
   async function appendLog(entry) {
@@ -258,6 +288,13 @@ export function createSyncService({ storage, now = () => Date.now() }) {
   async function readPlacements() {
     const document = await readDoc(SYNC_KEYS.placements, DEFAULT_PLACEMENTS);
     return document.tasks ?? {};
+  }
+
+  /** 同じ操作IDで、すでに実行された変更があるか。送り直しの見分けに使う。 */
+  async function findChangeByOperation(operationId) {
+    if (!operationId) return null;
+    const document = await readDoc(SYNC_KEYS.changes, DEFAULT_CHANGES);
+    return (document.entries ?? []).find((entry) => entry.operationId === operationId) ?? null;
   }
 
   /** 予定の一括変更の記録。新しい順。 */
@@ -564,6 +601,79 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     return { added };
   }
 
+  /* ------------------------------------------------------------------ */
+  /* 学習可能時間と見積もり                                               */
+  /* ------------------------------------------------------------------ */
+
+  /** 1日に使える学習時間の設定。未設定の曜日は null のまま返す。 */
+  async function readAvailability() {
+    const stored = await storage.get(SYNC_KEYS.availability);
+    return normalizeAvailability(stored ?? {});
+  }
+
+  /** 設定を書き換える。渡された項目だけを変え、ほかはそのまま残す。 */
+  async function writeAvailability(patch = {}, { updatedBy = "app" } = {}) {
+    const at = new Date(now()).toISOString();
+    const { document } = await updateDocument(storage, SYNC_KEYS.availability, (draft) => {
+      const current = normalizeAvailability(draft);
+      const next = normalizeAvailability({
+        ...current,
+        ...patch,
+        weekly: { ...current.weekly, ...(patch.weekly ?? {}) },
+        overrides: { ...current.overrides, ...(patch.overrides ?? {}) },
+        // 上書きを消したいときは、その日に null を渡す。
+        updatedAt: at,
+        revision: Number(current.revision ?? 0) + 1,
+      });
+      if (patch.overrides) {
+        for (const [date, value] of Object.entries(patch.overrides)) {
+          if (value === null) delete next.overrides[date];
+        }
+      }
+      if (patch.todayRemaining === null) next.todayRemaining = null;
+      Object.assign(draft, next, { updatedBy });
+    }, { defaults: structuredClone(DEFAULT_AVAILABILITY_DOC) });
+    return normalizeAvailability(document);
+  }
+
+  /** 端末から届いた設定を重ねる（新しいほうを採る）。 */
+  async function pushAvailability(incoming) {
+    if (!incoming) return { outcome: "ignored" };
+    let outcome = "ignored";
+    await updateDocument(storage, SYNC_KEYS.availability, (draft) => {
+      const merged = mergeAvailability(draft.updatedAt ? draft : null, incoming);
+      outcome = merged.outcome;
+      if (merged.availability) Object.assign(draft, merged.availability);
+    }, { defaults: structuredClone(DEFAULT_AVAILABILITY_DOC) });
+    return { outcome };
+  }
+
+  /**
+   * 問題別の見積もり指定。
+   * ここに入るのは「本人が決めた時間」と「AIが教材を見て入れた仮の値」だけで、
+   * 実績から計算できる分は保存しない（記録が増えれば計算し直せるため）。
+   */
+  async function readEstimateEntries() {
+    const document = await readDoc(SYNC_KEYS.estimates, DEFAULT_ESTIMATES);
+    return document.byQuestion ?? {};
+  }
+
+  async function writeEstimateEntries(entries = {}) {
+    const at = new Date(now()).toISOString();
+    const stamped = {};
+    for (const [questionId, entry] of Object.entries(entries)) {
+      stamped[questionId] = {
+        ...entry,
+        ...(entry.manualSeconds !== undefined ? { manualUpdatedAt: entry.manualUpdatedAt ?? at } : {}),
+        ...(entry.aiSeconds !== undefined ? { aiUpdatedAt: entry.aiUpdatedAt ?? at } : {}),
+      };
+    }
+    const { document } = await updateDocument(storage, SYNC_KEYS.estimates, (draft) => {
+      draft.byQuestion = mergeEstimateEntries(draft.byQuestion ?? {}, stamped);
+    }, { defaults: structuredClone(DEFAULT_ESTIMATES) });
+    return document.byQuestion;
+  }
+
   /** 保存先が何を保証できるか。画面とAIへ正直に返すために使う。 */
   function storageCapabilities() {
     return {
@@ -582,6 +692,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     readChallenges,
     readGoals,
     writeGoals,
+    goalsRevision,
     readQuestions,
     readTaskPlan,
     readTaskPlansInRange,
@@ -590,8 +701,13 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     applyTaskChanges,
     undoTaskChange,
     readChanges,
+    findChangeByOperation,
     readMoves,
     saveMoves,
+    readAvailability,
+    writeAvailability,
+    readEstimateEntries,
+    writeEstimateEntries,
     readPlacements,
     setTaskPinned,
     reportActivity,
@@ -789,6 +905,20 @@ export function createSyncService({ storage, now = () => Date.now() }) {
 
       const addedMoves = (await saveMoves(moves)).added;
 
+      // 学習可能時間と見積もりの指定も同期する（どちらも消さずに重ねる）。
+      let availabilityOutcome = "ignored";
+      if (payload.availability) {
+        availabilityOutcome = (await pushAvailability(payload.availability)).outcome;
+      }
+      let estimatesStored = 0;
+      if (payload.estimates && typeof payload.estimates === "object") {
+        const entries = Object.entries(payload.estimates).slice(0, 2000);
+        if (entries.length) {
+          await writeEstimateEntries(Object.fromEntries(entries));
+          estimatesStored = entries.length;
+        }
+      }
+
       if (goals.length) {
         const incoming = goals.map((goal) => normalizeGoal(goal, { now: at })).filter(Boolean);
         await updateDocument(storage, SYNC_KEYS.goals, (document) => {
@@ -832,6 +962,8 @@ export function createSyncService({ storage, now = () => Date.now() }) {
           taskPlans: planOutcomes,
           moves: addedMoves,
           duplicatedMoves: moves.length - addedMoves,
+          availability: availabilityOutcome,
+          estimates: estimatesStored,
           goals: goals.length,
         },
         questionsStored,
@@ -871,6 +1003,9 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         taskPlans: plans,
         // 繰り越しの記録も配る（追加専用なので、重ねても増えない）。
         moves: (await readMoves({ limit: SYNC_LIMITS.movesPerPull })).moves,
+        availability: await readAvailability(),
+        // 見積もりの「指定」だけを配る。実績から計算できる分は配らない。
+        estimates: await readEstimateEntries(),
         goals,
         questions: {
           version: questions.version,

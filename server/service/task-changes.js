@@ -79,8 +79,8 @@ export const protectionMessage = (reason) => PROTECTION_MESSAGES[reason] ?? "こ
 /* 入力の確認                                                          */
 /* ------------------------------------------------------------------ */
 
-const TASK_FIELDS = ["questionIds", "kind", "title", "timeLimitSeconds", "position"];
-const PATCH_FIELDS = ["questionIds", "kind", "title", "timeLimitSeconds", "position"];
+const TASK_FIELDS = ["questionIds", "kind", "title", "timeLimitSeconds", "position", "goalId"];
+const PATCH_FIELDS = ["questionIds", "kind", "title", "timeLimitSeconds", "position", "goalId"];
 
 function readTaskId(value, field) {
   return readString(value, field, { required: true, max: 80 });
@@ -116,6 +116,9 @@ function readTaskBody(raw, field, { partial = false } = {}) {
   }
   if (raw.position !== undefined) {
     body.position = readInteger(raw.position, `${field}.position`, { min: 0, max: CHANGE_LIMITS.tasksPerDay });
+  }
+  if (raw.goalId !== undefined) {
+    body.goalId = raw.goalId === null || raw.goalId === "" ? null : readString(raw.goalId, `${field}.goalId`, { max: 80 });
   }
   if (!partial) {
     const questionIds = body.questionIds ?? [];
@@ -257,6 +260,11 @@ function insertAt(plan, task, position) {
 }
 
 function applyBody(task, body, at) {
+  if (body.goalId !== undefined) {
+    task.goalId = body.goalId;
+    // 予定項目にも目標を書き入れる。繰り越しで別のタスクへ分かれても結び付きが切れない。
+    task.items = (task.items ?? []).map((item) => ({ ...item, goalId: body.goalId }));
+  }
   if (body.questionIds !== undefined) {
     // 問題を入れ替えても、残る問題の予定項目のIDは引き継ぐ
     // （実績との対応が切れないように）。
@@ -395,7 +403,11 @@ export function applyChanges({
         source: actorKind,
       }, change.task, at);
       // 当初の予定日は、作った日のまま（あとで繰り越しても変えない）。
-      task.items = task.items.map((item) => ({ ...item, originalDate: change.date }));
+      task.items = task.items.map((item) => ({
+        ...item,
+        originalDate: change.date,
+        goalId: change.task.goalId ?? item.goalId ?? null,
+      }));
       insertAt(draft[change.date], task, change.task.position ?? null);
       created.push({ date: change.date, taskId: task.id, tempId: change.tempId ?? null });
       touched.add(change.date);
@@ -538,6 +550,7 @@ export function applyChanges({
         pinned: false,
         ...(found.task.timeLimitSeconds ? { timeLimitSeconds: found.task.timeLimitSeconds } : {}),
         ...(found.task.title ? { title: found.task.title } : {}),
+        ...(found.task.goalId ? { goalId: found.task.goalId } : {}),
         createdAt: at,
         updatedAt: at,
         source: actorKind,

@@ -14,6 +14,8 @@ import { ValidationError } from "./core/validate.js";
 import { SERVICE_LIMITS } from "./service/study-service.js";
 import { EVALUATIONS, MISTAKE_EVALUATIONS, TASK_KINDS } from "./service/merge.js";
 import { CHANGE_LIMITS } from "./service/task-changes.js";
+import { GOAL_COMPLETION_TYPES, GOAL_STATUSES } from "../src/goals.js";
+import { WEEKDAY_KEYS } from "../src/availability.js";
 
 const TIMEZONE_PROPERTY = {
   type: "integer",
@@ -95,6 +97,18 @@ const EXPECTED_REVISIONS_SCHEMA = {
   },
 };
 
+/** 計画のもとにした状態が、反映のときに変わっていないかを確かめるための版。 */
+const EXPECTED_CONTEXT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  description: "getPlanningContext が返した expectedContext をそのまま渡す。"
+    + " 目標や学習可能時間が、計画を作ってから変わっていた場合は、何も変えずに context_stale を返す。",
+  properties: {
+    goalsRevision: { type: "integer", minimum: 0, description: "目標全体の版。" },
+    availabilityRevision: { type: "integer", minimum: 0, description: "学習可能時間の設定の版。" },
+  },
+};
+
 const TASK_BODY_PROPERTIES = {
   questionIds: {
     type: "array",
@@ -106,6 +120,12 @@ const TASK_BODY_PROPERTIES = {
   title: { type: "string", maxLength: 120, description: "画面に出す見出し。問題IDを伴わない予定では必須。" },
   timeLimitSeconds: { type: "integer", minimum: 60, maximum: 21600, description: "制限時間（秒）。主に kind=challenge で使う。" },
   position: { type: "integer", minimum: 0, maximum: CHANGE_LIMITS.tasksPerDay, description: "その日の中での位置（0が先頭）。省略すると最後。" },
+  goalId: {
+    type: "string",
+    maxLength: 80,
+    description: "どの目標のための予定か。渡すと、その予定から実施された取り組みが目標の実績として数えられる。"
+      + " 目標に結び付けない予定なら渡さない（あとから目標の実績には数えられない）。",
+  },
 };
 
 const CHANGE_SCHEMA = {
@@ -386,11 +406,15 @@ export function createTools() {
     defineTool({
       name: "getGoals",
       title: "目標の一覧",
-      description: "「12月までに青チャートI+Aを終える」のような長期の目標を、期限の近い順に返す。",
+      description: "目標を、優先順位と期限の順に返す。目標は「何を（questionIds）・いつまでに（deadline）・どの状態まで（completion）」を持つ。needsScopeSetup が true の目標は、対象が文章だけの古いもので、計算には使えない（対象を推測して確定させず、利用者に選んでもらうこと）。",
       scope: "read",
       annotations: { readOnlyHint: true, openWorldHint: false },
-      inputSchema: { properties: {} },
-      run: (_args, { service }) => service.getGoals(),
+      inputSchema: {
+        properties: {
+          includeInactive: { type: "boolean", description: "一時停止・取り消しの目標も含める。既定は false。" },
+        },
+      },
+      run: (args, { service }) => service.getGoals(args),
     }),
 
     defineTool({
@@ -466,6 +490,7 @@ export function createTools() {
         "移動（move）ではタスクIDは変わらない。追加のときだけ新しいIDが発行される。",
         "完了済み・実行中・利用者が固定したタスク（locked が true）は変更・削除・移動できない。",
         "通信が切れて同じ要求を送り直すときは、同じ operationId を使えば二重に適用されない。",
+        "保存の前に、日ごとの時間・重複・期限・目標や学習可能時間の版も確かめる（validatePlanChanges と同じ確認）。",
         "学習記録とチャレンジ結果はこの操作では一切変わらない。",
       ].join(""),
       scope: "write",
@@ -490,6 +515,8 @@ export function createTools() {
             maxLength: CHANGE_LIMITS.reasonLength,
             description: "なぜこの変更をするか（例: 今日は30分しか時間が取れないため、2件を明日へ移した）。履歴に残り、利用者が画面で確認できる。",
           },
+          expectedContext: EXPECTED_CONTEXT_SCHEMA,
+          timezoneOffsetMinutes: TIMEZONE_PROPERTY,
         },
         required: ["operationId", "expectedRevisions", "changes"],
       },
@@ -586,14 +613,65 @@ export function createTools() {
     defineTool({
       name: "addGoal",
       title: "目標を追加",
-      description: "長期の目標を1件追加する（例: 「12月までに青チャートI+Aの例題を終える」）。日々の予定は updateTodayTasks / updateTasksForDate で、ここは月単位の目標だけに使う。",
+      description: [
+        "「何を・いつまでに・どの状態まで」を決めた目標を1件作る。対象は必ず問題IDの一覧として確定させる。",
+        "questionIds を直接渡すか、scopeFilter（教科・章・単元・種類・番号・難易度・コース）で選ぶ。",
+        "scopeFilter で選んだ場合も、保存されるのは選んだ結果のID一覧なので、あとで問題マスタが変わっても対象は動かない。",
+        "達成条件は attempt（1回ずつ取り組めば達成。評価が不正解でも取り組みとして数える）か、",
+        "mastery（この目標に結び付いた **最新** の取り組みが、指定した評価になっていれば達成。既定は perfect）。",
+        "目標の実績として数えるのは、その目標に結び付いた予定（applyTaskChanges の task.goalId）から実施された取り組みだけ。",
+        "だから2周目の目標を作っても、1周目の記録では達成にならない。",
+      ].join(""),
       scope: "write",
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       inputSchema: {
         properties: {
-          title: { type: "string", maxLength: 200, description: "目標の内容。" },
-          deadline: { ...DATE_PROPERTY, description: "期限（YYYY-MM-DD）。省略可。" },
-          scope: { type: "string", maxLength: 400, description: "対象の範囲（例: 数学I+A 例題1〜200）。省略可。" },
+          title: { type: "string", maxLength: 200, description: "目標の内容（例: 12月までに数学Iの基本例題を一通り解く）。" },
+          startDate: { ...DATE_PROPERTY, description: "開始日。省略すると今日。" },
+          deadline: { ...DATE_PROPERTY, description: "期限。省略すると期限なし。" },
+          questionIds: {
+            type: "array",
+            items: { type: "string", maxLength: 120 },
+            maxItems: 2000,
+            description: "対象の問題ID。listQuestions が返す question.id をそのまま並べる。",
+          },
+          scopeFilter: {
+            type: "object",
+            additionalProperties: false,
+            description: "条件で対象を選ぶ（questionIds を渡さないときに使う）。選んだ結果はID一覧として確定する。",
+            properties: {
+              subject: { type: "string", maxLength: 60 },
+              chapter: { type: "string", maxLength: 80 },
+              section: { type: "string", maxLength: 80 },
+              course: { type: "string", maxLength: 20 },
+              types: { type: "array", items: { type: "string", maxLength: 40 }, maxItems: 20 },
+              numberFrom: { type: "integer", minimum: 0 },
+              numberTo: { type: "integer", minimum: 0 },
+              difficultyFrom: { type: "integer", minimum: 1, maximum: 5 },
+              difficultyTo: { type: "integer", minimum: 1, maximum: 5 },
+            },
+          },
+          completion: {
+            type: "object",
+            additionalProperties: false,
+            description: "達成条件。省略すると attempt（1回ずつ取り組む）。",
+            properties: {
+              type: { type: "string", enum: [...GOAL_COMPLETION_TYPES], description: "attempt=取り組む / mastery=習得する。" },
+              evaluations: {
+                type: "array",
+                items: { type: "string", enum: [...EVALUATIONS] },
+                maxItems: 5,
+                description: "mastery のとき、合格とする評価。省略すると perfect だけ。",
+              },
+              mode: {
+                type: "string",
+                enum: ["latest", "ever"],
+                description: "latest（既定）=この目標に結び付いた最新の取り組みで判定 / ever=一度でも条件を満たせば達成。",
+              },
+            },
+          },
+          priority: { type: "integer", minimum: 1, maximum: 5, description: "優先順位（1がいちばん高い）。省略すると3。" },
+          scope: { type: "string", maxLength: 400, description: "対象の説明（人が読むための覚え書き。計算には使わない）。" },
         },
         required: ["title"],
       },
@@ -603,19 +681,216 @@ export function createTools() {
     defineTool({
       name: "updateGoal",
       title: "目標を変更",
-      description: "既存の目標を書き換える。変えたい項目（title / deadline / scope）だけを渡せば、ほかはそのまま残る。目標の削除はAIからはできない（study-todo の画面から行う）。",
+      description: "既存の目標を書き換える。変えたい項目だけを渡せば、ほかはそのまま残る。達成数は学習記録から数えるものなので、ここからは書き換えられない。目標の削除はAIからはできない（study-todo の画面から行う）。",
       scope: "write",
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         properties: {
           id: { type: "string", description: "変更する目標のID。getGoals で分かる。" },
           title: { type: "string", maxLength: 200, description: "新しい内容。" },
-          deadline: { ...DATE_PROPERTY, description: "新しい期限。空文字を渡すと期限なしになる。" },
-          scope: { type: "string", maxLength: 400, description: "新しい範囲。" },
+          startDate: { ...DATE_PROPERTY, description: "新しい開始日。" },
+          deadline: { ...DATE_PROPERTY, description: "新しい期限。空文字を渡すと期限なしになる。時間が足りないことを理由に、利用者に断りなく延ばさないこと。" },
+          questionIds: { type: "array", items: { type: "string", maxLength: 120 }, maxItems: 2000, description: "新しい対象（問題IDの一覧）。" },
+          completion: {
+            type: "object",
+            additionalProperties: false,
+            description: "新しい達成条件。",
+            properties: {
+              type: { type: "string", enum: [...GOAL_COMPLETION_TYPES] },
+              evaluations: { type: "array", items: { type: "string", enum: [...EVALUATIONS] }, maxItems: 5 },
+              mode: { type: "string", enum: ["latest", "ever"] },
+            },
+          },
+          priority: { type: "integer", minimum: 1, maximum: 5, description: "新しい優先順位。" },
+          status: { type: "string", enum: [...GOAL_STATUSES], description: "進行中 active / 達成 achieved / 一時停止 paused / 取り消し cancelled。" },
+          scope: { type: "string", maxLength: 400, description: "対象の説明（覚え書き）。" },
         },
         required: ["id"],
       },
       run: (args, { service, actor }) => service.updateGoal(args, actor),
+    }),
+
+    defineTool({
+      name: "getGoalProgress",
+      title: "目標の進み具合",
+      description: [
+        "目標ごとの、対象数・達成数・未達成の問題・すでに予定に入っている分・まだ予定に入っていない分・",
+        "残りの見積もり時間・期限までの日数を返す。達成数は学習記録から数え直した値で、AIからは書き換えられない。",
+        "「取り組む目標」は remainingIsComplete が true で、残量がそのまま残り時間になる。",
+        "「習得する目標」は false で、remainingSeconds は「未達成の問題にあと1回ずつ」ぶんにすぎない",
+        "（何回で習得できるかは分からないので、達成までの総時間はこれ以上になりうる）。",
+      ].join(""),
+      scope: "read",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          goalIds: { type: "array", items: { type: "string", maxLength: 80 }, maxItems: 50, description: "絞りたい目標ID。省略すると進行中のものすべて。" },
+          timezoneOffsetMinutes: TIMEZONE_PROPERTY,
+        },
+      },
+      run: (args, { service }) => service.getGoalProgress(args),
+    }),
+
+    defineTool({
+      name: "getStudyAvailability",
+      title: "学習に使える時間",
+      description: [
+        "1日に study-todo の学習へ使える時間の設定と、日ごとの「使える分数」を返す。",
+        "available が null の日は **未設定** で、0分とは違う。未設定の日に予定を置かないこと（利用者に設定を促す）。",
+        "source が today_remaining の日は「今日はあと○分」と指定された日で、そこから実施済みの時間を引いてはいけない（すでに引かれている）。",
+        "この時間は study-todo で管理する学習の枠であって、学校や他教科を含む生活全体の空き時間ではない。",
+      ].join(""),
+      scope: "read",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          from: { ...DATE_PROPERTY, description: "開始日。省略すると今日。" },
+          to: { ...DATE_PROPERTY, description: "終了日。省略すると今日から2週間。" },
+          timezoneOffsetMinutes: TIMEZONE_PROPERTY,
+        },
+      },
+      run: (args, { service }) => service.getStudyAvailability(args),
+    }),
+
+    defineTool({
+      name: "updateStudyAvailability",
+      title: "学習に使える時間を変更",
+      description: "曜日別の標準時間・日付ごとの上書き・「今日はあと○分」・予備時間を変える。利用者が言ったとおりに設定すること。時間が足りないことを理由に、断りなく増やさないこと。",
+      scope: "write",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          weekly: {
+            type: "object",
+            additionalProperties: false,
+            description: "曜日別の標準（分）。null を渡すと未設定に戻る。",
+            properties: Object.fromEntries(WEEKDAY_KEYS.map((key) => [key, { type: ["integer", "null"], minimum: 0, maximum: 1440 }])),
+          },
+          overrides: {
+            type: "object",
+            description: "日付ごとの上書き（YYYY-MM-DD をキーに分数）。0分の日も指定できる。null を渡すと上書きを消す。",
+            additionalProperties: { type: ["integer", "null"], minimum: 0, maximum: 1440 },
+          },
+          todayRemainingMinutes: { type: ["integer", "null"], minimum: 0, maximum: 1440, description: "「今日はあと○分」。null で取り消し。" },
+          todayRemainingDate: { ...DATE_PROPERTY, description: "上の指定がどの日のものか。省略すると今日。" },
+          reserveMinutes: { type: "integer", minimum: 0, maximum: 240, description: "予備として空けておく分数（1日につき1回だけ引かれる）。" },
+          timerIncludesReview: { type: "boolean", description: "アプリのタイマーが答え合わせまで含んでいるか。既定は true（含む）。" },
+          reviewOverheadSeconds: { type: "integer", minimum: 0, maximum: 1800, description: "タイマーに含まれないときの、1問あたりの答え合わせ時間（秒）。" },
+        },
+      },
+      run: (args, { service, actor }) => service.updateStudyAvailability(args, actor),
+    }),
+
+    defineTool({
+      name: "getQuestionEstimates",
+      title: "問題ごとの所要時間の見積もり",
+      description: [
+        "問題IDをまとめて渡すと、1問あたりの見積もり時間（秒）と、その根拠を返す。",
+        "source は manual（利用者が指定）/ history（本人の実績）/ history_blended（少ない実績と既定値を合わせた値）/",
+        "similar（似た問題の実績）/ ai_estimate（教材をもとにした仮の値）/ default（種類と難易度からの仮の値）。",
+        "confidence が low のものは仮の値なので、それに合わせて計画の確からしさも伝えること。",
+        "初見と復習、通常とチャレンジは分けて見積もっている。",
+      ].join(""),
+      scope: "read",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          questionIds: { type: "array", items: { type: "string", maxLength: 120 }, minItems: 1, maxItems: 200, description: "見積もりたい問題ID。" },
+          inChallenge: { type: "boolean", description: "制限時間つきのチャレンジとして解く場合は true。" },
+          timezoneOffsetMinutes: TIMEZONE_PROPERTY,
+        },
+        required: ["questionIds"],
+      },
+      run: (args, { service }) => service.getQuestionEstimates(args),
+    }),
+
+    defineTool({
+      name: "saveQuestionEstimates",
+      title: "仮の見積もりを保存",
+      description: [
+        "教材を見て作った「この問題はこれくらいかかりそう」という **仮の** 見積もりを、問題IDに結び付けて保存する。",
+        "これは実績ではない。学習記録にはならないし、利用者が自分で指定した時間を上書きすることもない。",
+        "本人の実績がたまれば、そちらが優先される。推測であることが分かるよう note に根拠を書いておくとよい。",
+      ].join(""),
+      scope: "write",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          estimates: {
+            type: "array",
+            minItems: 1,
+            maxItems: 200,
+            description: "仮見積もりの一覧。",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["questionId", "seconds"],
+              properties: {
+                questionId: { type: "string", maxLength: 120 },
+                seconds: { type: "integer", minimum: 30, maximum: 7200, description: "1回解くのにかかりそうな秒数。" },
+                note: { type: "string", maxLength: 200, description: "そう考えた理由（推測であることが分かるように）。" },
+              },
+            },
+          },
+        },
+        required: ["estimates"],
+      },
+      run: (args, { service, actor }) => service.saveQuestionEstimates(args, actor),
+    }),
+
+    defineTool({
+      name: "getPlanningContext",
+      title: "計画に必要な情報をまとめて取得",
+      description: [
+        "予定を組む・組み直すときに、まずこれを呼ぶ。指定した期間について、次をまとめて返す。",
+        "日本時間の今／最終同期時刻／目標と残量／日ごとの予定と使える時間／未実施の予定と見積もり／",
+        "まだ予定に入っていない分／過ぎた日に残っている分／繰り越しの履歴／保護されている予定／",
+        "反映のときに使う版情報（expectedRevisions と expectedContext）。",
+        "全問題・全履歴は返さない。期間と目標で絞った分だけで、省略があるときは *Truncated で知らせる。",
+      ].join(""),
+      scope: "read",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          from: { ...DATE_PROPERTY, description: "開始日。省略すると今日。" },
+          to: { ...DATE_PROPERTY, description: "終了日。省略すると今日から2週間。最大60日。" },
+          goalIds: { type: "array", items: { type: "string", maxLength: 80 }, maxItems: 50, description: "対象の目標。省略すると進行中のものすべて。" },
+          timezoneOffsetMinutes: TIMEZONE_PROPERTY,
+        },
+      },
+      run: (args, { service }) => service.getPlanningContext(args),
+    }),
+
+    defineTool({
+      name: "validatePlanChanges",
+      title: "配分案を保存前に確かめる",
+      description: [
+        "applyTaskChanges と同じ形の配分案を渡すと、保存せずに確かめた結果だけを返す。",
+        "問題ID・目標ID・タスクIDの確認、同じ取り組みの重複、日ごとの時間、保護された予定、期限、",
+        "対象日の revision、下見のときから目標や学習可能時間が変わっていないか（expectedContext）を見る。",
+        "days に日ごとの「予定○分／使える○分」、warnings に足りない時間や未設定の日、",
+        "unplaced にまだ置けていない分が入る。ここで ok でも、反映のときにもう一度確かめる。",
+      ].join(""),
+      scope: "read",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          operationId: { type: "string", maxLength: CHANGE_LIMITS.operationIdLength, description: "反映のときに使う予定の操作ID。" },
+          expectedRevisions: EXPECTED_REVISIONS_SCHEMA,
+          changes: {
+            type: "array",
+            minItems: 1,
+            maxItems: CHANGE_LIMITS.changesPerRequest,
+            description: "確かめたい変更の並び（applyTaskChanges と同じ形）。",
+            items: CHANGE_SCHEMA,
+          },
+          reason: { type: "string", maxLength: CHANGE_LIMITS.reasonLength, description: "変更の理由。" },
+          expectedContext: EXPECTED_CONTEXT_SCHEMA,
+          timezoneOffsetMinutes: TIMEZONE_PROPERTY,
+        },
+        required: ["operationId", "expectedRevisions", "changes"],
+      },
+      run: (args, { service, actor }) => service.validatePlanChanges(args, actor),
     }),
   ];
 }
@@ -683,6 +958,29 @@ export const SERVER_INSTRUCTIONS = `study-todo は、青チャート（数学の
   固定の付け外しができるのは利用者だけで、AIからは外せません。
   「実行中」はアプリが知らせてきた範囲でしか分からないため、圏外の端末で解いている
   タスクまでは守れません。時間帯によっては、利用者に確認してから変えてください。
+- 予定を組む・組み直すときの流れは決まっています。
+
+    1. getPlanningContext（期間と目標を指定）で、今の状態をまとめて受け取る
+       … 目標と残量・日ごとの予定と使える時間・未実施の予定と見積もり・未配置分・
+         繰り越し履歴・保護された予定・反映に使う版（expectedRevisions と expectedContext）
+    2. 受け取った見積もり（estimateSeconds）と使える時間（availableMinutes）をもとに配分案を作る
+    3. validatePlanChanges で確かめる（保存はされません）
+    4. applyTaskChanges に、同じ changes と expectedRevisions・expectedContext を付けて反映する
+
+  数えられること（実績・残量・見積もり・時間の過不足）はサーバーが出します。推測しないでください。
+  何を優先するか、どう配るか、なぜそうしたかの説明が、あなたの受け持ちです。
+- 時間が足りないときは、無理に詰め込まないでください。置けた分と置けなかった分（unplaced）、
+  足りない時間を伝え、次のどれにするかを利用者に相談します。
+  期限を延ばす・対象を減らす・達成条件を下げる・学習可能時間を増やす、のいずれも
+  **利用者の許可なしに勝手に行ってはいけません**。
+- 学習可能時間が未設定の日（available が null）は、0分とは違います。時間があると決めつけず、
+  設定を促してください。「今日はあと30分」と指定された日は、そこから実施済みの時間を引かないでください。
+- 断られたときの主な理由:
+  context_stale＝計画のもとにした目標か学習可能時間が変わった（getPlanningContext から取り直す）/
+  duplicate_plan_item＝すでにある予定を見落として二重に置いた（既存の予定は move か carryOver で動かす）/
+  unknown_goal＝目標IDが違う / over_capacity は警告（断りはしないが、利用者に伝える）。
+- 繰り越しが多い予定を見て、「難しいから進まない」と決めつけないでください。
+  理由（reason）が unspecified の移動は、理由が分かっていないという意味です。
 - 学習記録とチャレンジ結果は、このサーバーからは作れません。実際に study-todo で
   学習したときだけ記録されます。実績を推測で書き込むことはできません。
 - 予定・目標の変更は、利用者が study-todo の設定画面で「予定を変更する」権限を

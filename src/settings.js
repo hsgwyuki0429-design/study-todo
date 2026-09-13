@@ -4,6 +4,7 @@ import * as api from './api.js';
 import { state, render } from './state.js';
 import { el, row } from './ui.js';
 import { renderCloudCard } from './settings-cloud.js';
+import { renderAvailabilityCard, renderGoalCard } from './settings-plan.js';
 import { countDemoStudyData, removeDemoStudyData, loadQuestionMaster } from './seed.js';
 
 async function update(patch) {
@@ -56,6 +57,9 @@ export async function renderSettings(screen) {
   // カレンダーは週ぎめの正方形のマスに統一したため、
   // 月表示の「リング型／塗り型」の切り替えは無くなった。
   // 保存済みの設定値は消さずに残してある（古いバックアップもそのまま読める）。
+  await renderGoalCard(list, render);
+  await renderAvailabilityCard(list, render);
+
   list.append(el('div', 'section-head', '表示'));
   list.append(
     choiceRow('ダークモード', null,

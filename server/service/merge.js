@@ -12,6 +12,8 @@
 import { dateKeyOf, isDateKey } from "../../src/datetime.js";
 import { hashQuestions } from "../../src/hash.js";
 import { itemsOf, normalizeMove } from "../../src/plan-items.js";
+import { normalizeGoal } from "../../src/goals.js";
+import { normalizeAvailability } from "../../src/availability.js";
 
 export const EVALUATIONS = Object.freeze([
   "perfect", "better_solution", "weak_writing", "calc_error", "wrong_approach",
@@ -150,6 +152,7 @@ export function normalizeTask(raw, index = 0, { now = null, date = null } = {}) 
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : at,
     updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : at,
     ...(typeof raw.source === "string" ? { source: raw.source.slice(0, 20) } : {}),
+    ...(typeof raw.goalId === "string" && raw.goalId ? { goalId: raw.goalId.slice(0, 80) } : {}),
     // 予定項目（この予定の中の「1回の取り組み」1件ずつ）。
     // 古いデータには無いので questionIds の並びから組み立てる。
     items: itemsOf({ ...raw, id: taskId, questionIds, date: planDate }),
@@ -239,22 +242,11 @@ function carryProtections(stored, incoming, now) {
   return { ...incoming, tasks, ...(active ? { active } : {}) };
 }
 
-/** 目標は id ごとに、更新時刻が新しいほうを採る。消した印（deletedAt）も引き継ぐ。 */
-export function normalizeGoal(raw, { now = Date.now() } = {}) {
-  if (!isObject(raw)) return null;
-  const id = typeof raw.id === "string" ? raw.id.trim() : "";
-  if (!id) return null;
-  return {
-    id: id.slice(0, 80),
-    title: typeof raw.title === "string" ? raw.title.slice(0, 200) : "",
-    deadline: typeof raw.deadline === "string" ? raw.deadline.slice(0, 40) : "",
-    scope: typeof raw.scope === "string" ? raw.scope.slice(0, 400) : "",
-    updatedAt: typeof raw.updatedAt === "string" && Number.isFinite(Date.parse(raw.updatedAt))
-      ? raw.updatedAt
-      : new Date(now).toISOString(),
-    ...(typeof raw.deletedAt === "string" ? { deletedAt: raw.deletedAt } : {}),
-  };
-}
+/**
+ * 目標は「何を・いつまでに・どの状態まで」を持つ構造として扱う（src/goals.js）。
+ * 古い目標（文章の scope だけ）も、そのまま読めるようにしてある。
+ */
+export { normalizeGoal };
 
 export function mergeGoals(stored = [], incoming = []) {
   const byId = new Map(stored.map((goal) => [goal.id, goal]));
@@ -289,6 +281,55 @@ function carryItems(before, incoming) {
     const reused = pool.get(item.questionId)?.shift();
     return reused ? { ...reused, questionId: item.questionId } : item;
   });
+}
+
+/**
+ * 学習可能時間は1つの文書として持つ。端末どうしでぶつかったら、
+ * 更新時刻が新しいほうを採る（予定と同じ考え方）。消すことはしない。
+ */
+export function mergeAvailability(stored, incoming) {
+  const left = stored ? normalizeAvailability(stored) : null;
+  const right = incoming ? normalizeAvailability(incoming) : null;
+  if (!right) return { availability: left, outcome: "ignored" };
+  if (!left) return { availability: { ...right, revision: Math.max(1, right.revision || 1) }, outcome: "created" };
+  const leftAt = Date.parse(left.updatedAt ?? "") || 0;
+  const rightAt = Date.parse(right.updatedAt ?? "") || 0;
+  if (rightAt > leftAt) {
+    return { availability: { ...right, revision: Number(left.revision ?? 0) + 1 }, outcome: "applied" };
+  }
+  return { availability: left, outcome: "kept-server" };
+}
+
+/**
+ * 問題別の見積もり指定。
+ * 本人の指定（manualSeconds）とAIの仮見積もり（aiSeconds）は別々に持ち、
+ * どちらも「新しいほうを採る」。本人の指定をAIの値で黙って置き換えない。
+ */
+export function mergeEstimateEntries(stored = {}, incoming = {}) {
+  const merged = { ...stored };
+  for (const [questionId, entry] of Object.entries(incoming)) {
+    if (!entry || typeof entry !== "object") continue;
+    const current = merged[questionId] ?? {};
+    const pick = (key, atKey) => {
+      const currentAt = Date.parse(current[atKey] ?? "") || 0;
+      const incomingAt = Date.parse(entry[atKey] ?? "") || 0;
+      return incomingAt >= currentAt && entry[key] !== undefined ? entry[key] : current[key];
+    };
+    merged[questionId] = {
+      ...current,
+      manualSeconds: pick("manualSeconds", "manualUpdatedAt"),
+      manualUpdatedAt: (Date.parse(entry.manualUpdatedAt ?? "") || 0) >= (Date.parse(current.manualUpdatedAt ?? "") || 0)
+        ? (entry.manualUpdatedAt ?? current.manualUpdatedAt ?? null)
+        : current.manualUpdatedAt ?? null,
+      aiSeconds: pick("aiSeconds", "aiUpdatedAt"),
+      aiSource: pick("aiSource", "aiUpdatedAt"),
+      aiNote: pick("aiNote", "aiUpdatedAt"),
+      aiUpdatedAt: (Date.parse(entry.aiUpdatedAt ?? "") || 0) >= (Date.parse(current.aiUpdatedAt ?? "") || 0)
+        ? (entry.aiUpdatedAt ?? current.aiUpdatedAt ?? null)
+        : current.aiUpdatedAt ?? null,
+    };
+  }
+  return merged;
 }
 
 /** 移動（繰り越し）イベントは追加専用。id が同じものは1件として扱う。 */

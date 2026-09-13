@@ -67,7 +67,22 @@ function daySection(title, count, nodes, emptyText) {
   return section;
 }
 
-function dayCard(day, onOpen) {
+function timeLine(day, time) {
+  if (!time) return null;
+  const available = time.available;
+  const line = el('div', 'day-time');
+  if (available === null) {
+    line.textContent = `予定 ${time.plannedMinutes}分 ／ 使える時間は未設定`;
+    return line;
+  }
+  const short = time.plannedMinutes > available;
+  if (short) line.classList.add('short');
+  line.textContent = `予定 ${time.plannedMinutes}分 ／ 使える ${available}分`
+    + (short ? `（${time.plannedMinutes - available}分オーバー）` : '');
+  return line;
+}
+
+function dayCard(day, onOpen, time) {
   const date = parse(day.date);
   const card = el('button', 'day-card');
   if (day.isToday) card.classList.add('is-today');
@@ -82,6 +97,12 @@ function dayCard(day, onOpen) {
   if (day.isToday) head.append(el('span', 'day-today-pill', '今日'));
   head.append(el('span', 'day-open', '詳細 ›'));
   card.append(head);
+
+  // これからの日と今日は、「予定○分／使える○分」を出す。
+  if (!day.isPast) {
+    const line = timeLine(day, time);
+    if (line) card.append(line);
+  }
 
   // 何もない日は、2段を並べずに1行で済ませる（1週間ぶんが読みやすいように）。
   const nothing = !day.attempts.length && !day.plannedItems.length
@@ -158,6 +179,13 @@ export async function renderSchedule(screen) {
     api.getAttemptsByDate(from, to),
     api.getChallengeResults(200),
   ]);
+  // 各日の「使える時間」と「予定の見積もり」。過ぎた日は出さないので今日から先だけ。
+  const timeByDate = {};
+  for (const dateKey of days) {
+    if (dateKey < today) continue;
+    const info = await api.availabilityForDay(dateKey);
+    timeByDate[dateKey] = { available: info.available, plannedMinutes: await api.plannedMinutesFor(dateKey) };
+  }
   const challengesWithDate = challenges.map((result) => ({ ...result, date: api.dayOf(result.timestamp) }));
 
   const nav = el('div', 'week-nav');
@@ -188,7 +216,7 @@ export async function renderSchedule(screen) {
       state.schedule.scrollY = window.scrollY;
       state.schedule.selectedDate = dateKey;
       render();
-    }));
+    }, timeByDate[dateKey]));
   }
   screen.append(list);
   screen.append(legend());
