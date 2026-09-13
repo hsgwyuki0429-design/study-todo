@@ -6,7 +6,7 @@ study-todo の学習データを Cloudflare に預けて、Claude などの MCP 
 ```
 study-todo（PWA・IndexedDB）
       ↓↑  端末キーで守られた同期
-Cloudflare Worker + KV
+Cloudflare Worker + Durable Object（+ KV は引っ越し元として残る）
       ↓↑  接続トークン（read / write）
 MCP Server（/mcp）
       ↓↑
@@ -166,22 +166,351 @@ OAuth 2.1 + PKCE（S256）に対応しているので、Bearer を直接設定�
 | `getStudyStats` | 学習時間・評価別・章別の統計、ミス率の高い章 |
 | `getRecentChallengeResult` | 直近のチャレンジ結果 |
 | `getChallengeResults` | チャレンジ結果の一覧 |
-| `getTodayTasks` | 今日（または指定日）の予定 |
-| `getTasksInRange` | 期間の予定 |
+| `getTodayTasks` | 今日（または指定日）の予定と、その日に実際に取り組んだ記録 |
+| `getTasksInRange` | 期間の予定と実績（日ごと） |
+| `getQuestionAttempts` | 1つの問題への取り組みを1回ずつ（古い順・ページングあり） |
+| `getUnfinishedPlanItems` | まだ取り組んでいない予定（繰り越しの相談に使う） |
+| `getPlanMoves` | 繰り越し・予定変更の履歴（当初の予定日と回数つき） |
+| `getGoalProgress` | 目標ごとの達成数・残量・未配置分・残り時間 |
+| `getStudyAvailability` | 1日に使える学習時間（曜日別・日付ごと・今日の残り） |
+| `getQuestionEstimates` | 問題ごとの所要時間の見積もりと、その根拠 |
+| `getPlanningContext` | **計画を組むときの入口**。期間ぶんの状態をまとめて返す |
+| `validatePlanChanges` | 配分案を保存せずに確かめる |
 | `getGoals` | 長期の目標 |
 | `getRecentAiChanges` | AIが行った変更の記録 |
+
+| `getPlanChanges` | 予定の変更履歴（いつ・誰が・どの日の・どのタスクを・なぜ） |
 
 ### 変える（`write` の権限が要る）
 
 | Tool | 何をするか |
 |---|---|
-| `updateTodayTasks` | 今日の予定を**置き換える** |
-| `updateTasksForDate` | 指定した日の予定を**置き換える** |
+| `applyTaskChanges` | 予定を**タスク単位で**変える（追加・編集・削除・並べ替え・別の日へ移動） |
+| `undoTaskChanges` | 予定の変更を取り消す（取り消しも新しい変更として記録される） |
+| `updateTodayTasks` | 【古い形】今日の予定を置き換える |
+| `updateTasksForDate` | 【古い形】指定した日の予定を置き換える |
+| `updateStudyAvailability` | 学習可能時間を変える |
+| `saveQuestionEstimates` | 教材をもとにした**仮の**見積もりを保存する（実績にはならない） |
 | `addGoal` | 長期の目標を足す |
 | `updateGoal` | 長期の目標を書き換える |
 
-`updateTodayTasks` / `updateTasksForDate` は追加ではなく置き換えです。
-残したい予定がある場合は、先に `getTodayTasks` で取得して、残す分も含めて渡します。
+---
+
+## 目標と再計画
+
+### 役割の分け方
+
+| だれが | 何を |
+|---|---|
+| アプリ・サーバー | 実績の集計、残りの量、時間の見積もり、制約の確認、安全な保存 |
+| Claude | 目標や事情をふまえた優先順位、日々の配分案、変更理由の説明 |
+
+数えられること（実績・残量・見積もり・時間の過不足）はサーバーが返します。推測しないでください。
+
+### 計画の流れ
+
+```
+1. getPlanningContext（期間・目標を指定）
+      ↓  今の状態（目標と残量／日ごとの予定と使える時間／見積もり／未配置／版）
+2. 配分案を changes にまとめる
+      ↓
+3. validatePlanChanges           ← 保存はされない。時間・重複・期限・保護を確かめる
+      ↓
+4. applyTaskChanges（expectedRevisions ＋ expectedContext）
+      ↓  反映のときにもう一度確かめてから保存
+5. 何をなぜ変えたかを利用者に伝える
+```
+
+`expectedContext` は `getPlanningContext` が返した値をそのまま渡します。
+計画を作ってから反映するまでに目標や学習可能時間が変わっていた場合は、
+何も変えずに `context_stale` を返すので、取り直してやり直してください。
+
+### 目標
+
+目標は「何を・いつまでに・どの状態まで」を持ちます。
+
+| 項目 | 内容 |
+|---|---|
+| `questionIds` | 対象の問題ID（**確定した一覧**）。`scopeFilter` で選んでも、保存されるのは結果のID一覧 |
+| `startDate` / `deadline` | 開始日と期限（期限なしも可） |
+| `completion` | `attempt`（1回ずつ取り組めば達成）か `mastery`（評価の条件を満たせば達成） |
+| `priority` | 1〜5（1がいちばん高い） |
+| `status` | `active` / `achieved` / `paused` / `cancelled` |
+| `revision` | 競合の確認に使う版 |
+
+**達成の数え方**
+
+- 数えるのは「その目標に結び付いた予定から実施された取り組み」だけです。
+  予定を作るときに `task.goalId` を渡すと、そこから実施された記録が目標の実績になります。
+- だから**2周目の目標を作っても、1周目の記録では達成になりません**。
+- 同じ問題が複数の目標に入っていても、実績が自動で流用されることはありません
+  （予定を1つ置いただけなら、予定時間も1回ぶんしか数えません）。
+- `mastery` は既定で **latest 方式**です。その目標に結び付いた**最新**の取り組みが
+  `perfect` であれば達成で、あとで △ を取れば未達成に戻ります（`mode: "ever"` も選べます）。
+- `attempt` の残量は確定値（`remainingIsComplete: true`）ですが、
+  `mastery` は何回で習得できるか分からないので、返る残り時間は
+  「未達成の問題にあと1回ずつ」ぶんにすぎません（`remainingIsComplete: false`）。
+- 達成数はサーバーが学習記録から数え直します。AIからは書き換えられません。
+- 対象が文章だけの古い目標は `needsScopeSetup: true` で返ります。
+  文章から問題IDを推測して確定させないでください。
+
+### 学習に使える時間
+
+時刻の入った時間割ではなく、**1日あたりの分数**で決めます。
+
+| 決め方 | 内容 |
+|---|---|
+| 曜日別（`weekly`） | 平日60分・休日120分 のような標準 |
+| 日付ごと（`overrides`） | その日だけ 0分 や 180分 にする |
+| 今日の残り（`todayRemaining`） | 「今日はあと30分」 |
+| 予備（`reserveMinutes`） | 詰めすぎないための余白。**1日につき1回だけ**引かれる |
+
+- `available` が `null` の日は**未設定**で、0分とは違います。時間があると決めつけないでください。
+- 「今日はあと30分」と指定された日は、そこから実施済みの時間を**引きません**（二重控除の防止）。
+  標準の枠から計算する日だけ、その日にアプリで計測できた学習時間を引きます。
+  アプリの外で解いた分は分からないので、正確にしたいときは「あと○分」を指定してもらいます。
+- ここでいう時間は study-todo で管理する学習の枠であって、
+  学校や他教科を含む生活全体の空き時間ではありません。
+
+### 所要時間の見積もり
+
+毎回教材を読み直さずに、保存済みの情報だけで見積もります。優先順位は次のとおりです。
+
+1. `manual` … 利用者が指定した時間（AIは上書きしない）
+2. `history` … 同じ問題の、近い条件での本人の実績（中央値）
+3. `history_blended` … 実績が少ないとき、既定値・仮見積もりと合わせた値
+4. `similar` … 同じ単元・種類・難易度の問題での実績
+5. `ai_estimate` … 教材をもとにした仮の値（`saveQuestionEstimates` で保存）
+6. `default` … 種類と難易度から決めた仮の値
+
+- 初見と復習、通常とチャレンジは分けて見積もります。
+- 30秒未満（計測忘れ）と60分超（中断）の記録、制限時間で打ち切られたチャレンジの記録は
+  見積もりの計算から外します。**学習記録そのものは消しません**。
+- 平均ではなく中央値を使い、実績が少ないときは既定値と混ぜます。
+- 返り値には `source` / `sampleCount` / `confidence`（high / medium / low）/ `method` が付きます。
+  根拠のない精密な数字（信頼区間など）は出しません。
+
+**答え合わせの時間**：アプリのタイマーは「問題を始めてから評価を記録するまで」を計っているので、
+既定では答え合わせも含まれているものとして扱い、**上乗せしません**（`reviewSeconds: 0`）。
+含まれていない使い方をしている場合は、設定で `timerIncludesReview: false` にすると
+1問あたりの補助時間（`reviewOverheadSeconds`）を足します。予備時間（1日につき1回）とは別物で、
+二重には加算しません。以前の記録は計測範囲が分からないため、そのまま実績として扱います。
+
+### 入りきらないとき
+
+無理に詰め込みません。`validatePlanChanges` / `applyTaskChanges` は次を返します。
+
+- `days[]` … 日ごとの「予定○分／使える○分」
+- `warnings[]` … `over_capacity`（何分足りないか）/ `capacity_not_configured`（未設定の日）/
+  `after_deadline`（期限より後ろ）/ `single_item_too_long`（1問だけで枠を超える）
+- `unplaced[]` … まだ置けていない分（目標の対象として残り、消えません）
+
+足りないときは、**期限を延ばす・対象を減らす・達成条件を下げる・使える時間を増やす**の
+どれにするかを利用者に相談してください。AIが黙って変えてはいけません。
+
+## 予定と実績の考え方
+
+3つを区別しています。
+
+| ことば | 何か | 識別子 |
+|---|---|---|
+| 問題 | 例題50 のような、問題マスタ上の対象 | `question.id` |
+| 予定項目 | 「その問題に今回取り組む」1件の予定 | `item.itemId` |
+| 学習記録 | 「実際に今回取り組んだ」1件の結果 | `record.id` |
+
+**1回の取り組み＝1件の学習記録**です。
+
+- 同じ問題を2周目に解けば記録は2件。同じ日に2回解いても2件です（上書きしません）。
+- やらなかった予定を別の日へ繰り越しても、**取り組み回数は増えません**。
+- 学習記録の `planItemId` で、どの予定に対する取り組みだったかが分かります。
+  この仕組みより前の記録には入っていないので `legacy: true` で返ります。
+  同じ問題・同じ日というだけで対応付けを作ることはしません。
+
+`getTodayTasks` / `getTasksInRange` は、この両方を返します。
+
+```jsonc
+{
+  "date": "2026-09-12",
+  "tasks": [{
+    "id": "task_ab12",
+    "kind": "new",
+    "items": [
+      { "itemId": "task_ab12#0", "questionId": "数学I-例題-90", "label": "基本例題 90",
+        "originalDate": "2026-09-11", "carriedCount": 1, "carriedOver": true },
+      { "itemId": "task_ab12#1", "questionId": "数学I-例題-91", "label": "基本例題 91",
+        "originalDate": "2026-09-12", "carriedCount": 0, "carriedOver": false }
+    ],
+    "doneItemIds": ["task_ab12#0"],
+    "pendingItemIds": ["task_ab12#1"],
+    "locked": false
+  }],
+  "attempts": [
+    { "recordId": "rec_1", "questionId": "数学I-例題-90", "evaluation": "perfect",
+      "durationSeconds": 320, "inChallenge": false, "planItemId": "task_ab12#0", "legacy": false }
+  ],
+  "attemptCount": 1,
+  "pendingItemCount": 1,
+  "revision": 7
+}
+```
+
+## 繰り越し（やり残しを別の日へ）
+
+1. `getUnfinishedPlanItems` で、まだ取り組んでいない `itemId` を確かめる
+2. `applyTaskChanges` の `carryOver` で動かす
+
+```jsonc
+{
+  "operationId": "2026-09-12-carry-over",
+  "expectedRevisions": [
+    { "date": "2026-09-12", "revision": 7 },
+    { "date": "2026-09-13", "revision": 2 }
+  ],
+  "changes": [
+    { "op": "carryOver", "taskId": "task_ab12", "fromDate": "2026-09-12", "toDate": "2026-09-13",
+      "itemIds": ["task_ab12#1"], "reason": "time_shortage" }
+  ]
+}
+```
+
+- `itemIds` を省くと、そのタスクの**未実施の分すべて**が動きます。
+- すでに取り組んだ分を混ぜると `already_done` で断られます（実績は実施した日に残します）。
+- 予定項目のID（`itemId`）は動かしても変わりません。`originalDate`（当初の予定日）も変わらず、
+  `carriedCount` が1つ増えます。
+- **理由（`reason`）は、利用者が言ったときだけ**入れてください。
+  `time_shortage`（時間不足）/ `too_hard`（難しかった）/ `schedule_change`（予定変更）/
+  `other` / `unspecified`（未入力）。推測した理由を事実として保存してはいけません。
+- 動かしたことは追加専用の記録として残り、`getPlanMoves` で読めます。
+  同じ `operationId` の再送でも、記録は重複しません。
+
+アプリ側でも、スケジュールの日別の詳細から、理由をワンタップで選んで繰り越せます。
+
+## 予定の変え方（applyTaskChanges）
+
+AIが予定を変えるときの流れは、いつも同じ4段です。
+
+1. `getTodayTasks` / `getTasksInRange` で、**いまの予定・`task.id`・`revision`・`locked`** を取る
+2. 変えたい**タスクだけ**を `changes` に並べる
+3. 変える**すべての日**（移動元と移動先の両方）の `revision` を `expectedRevisions` に入れる
+4. `operationId`（自分で決める文字列）と `reason`（理由）を付けて呼ぶ
+
+```jsonc
+{
+  "operationId": "2026-09-12-shorten-today",
+  "reason": "今日は30分しか取れないため、2件を明日へ移した",
+  "expectedRevisions": [
+    { "date": "2026-09-12", "revision": 7 },
+    { "date": "2026-09-13", "revision": 2 }
+  ],
+  "changes": [
+    { "op": "move", "taskId": "task_ab12", "fromDate": "2026-09-12", "toDate": "2026-09-13" },
+    { "op": "move", "taskId": "task_cd34", "fromDate": "2026-09-12", "toDate": "2026-09-13" },
+    { "op": "update", "taskId": "task_ef56", "patch": { "questionIds": ["数学I-例題-90"] } },
+    { "op": "add", "date": "2026-09-13", "tempId": "review1",
+      "task": { "questionIds": ["数学I-例題-88"], "kind": "review", "title": "復習" } },
+    { "op": "reorder", "date": "2026-09-13", "taskIds": ["task_ab12", "task_cd34"] }
+  ]
+}
+```
+
+成功すると、変更ID・確定した内容・更新後の revision が返ります。
+
+```jsonc
+{
+  "ok": true,
+  "changeId": "chg_...",
+  "revisions": { "2026-09-12": 8, "2026-09-13": 3 },
+  "summary": {
+    "dates": ["2026-09-12", "2026-09-13"],
+    "moved": [{ "taskId": "task_ab12", "from": "2026-09-12", "to": "2026-09-13" }],
+    "created": [{ "date": "2026-09-13", "taskId": "task_9xyz", "tempId": "review1" }],
+    "removed": [], "updated": [{ "date": "2026-09-12", "taskId": "task_ef56" }]
+  },
+  "days": [ /* 変更後のその日の予定 */ ]
+}
+```
+
+決めごとは次のとおりです。
+
+- **IDは作るときだけ発行**します。編集しても、別の日へ移しても `task.id` は変わりません。
+- **指定しなかったタスクと項目はそのまま**残ります（`patch` に入れた項目だけが変わります）。
+- **全部成功か、全部未反映か**のどちらかです。1つでも通らなければ1件も変わりません。
+- **同じ `operationId` を送り直しても二重になりません**（前回と同じ結果が `replayed: true` で返ります）。
+  同じ `operationId` で内容だけ違う要求は断られます。
+- 存在しないタスクID・問題ID・不正な操作は、**変更を始める前に**確かめて断ります。
+
+### 断られたときの読み方
+
+| `error` | 意味 | 次にすること |
+|---|---|---|
+| `revision_conflict` | ほかの端末かAIが先に変更した | `getTasksInRange` で取り直して組み立て直す |
+| `missing_revision` | 変える日の revision が渡されていない | その日を `expectedRevisions` に足す |
+| `task_not_found` | タスクIDが古い／その日にない | 取り直す |
+| `protected_task` | 完了済み・実行中・固定のタスク | 触らずに、ほかのタスクで調整する |
+| `unknown_question` | 問題IDが問題マスタにない | `listQuestions` で確かめる |
+| `operation_conflict` | 同じ `operationId` で内容が違う | 新しい `operationId` を付ける |
+| `invalid_input` | 形が正しくない | メッセージの `field` を直す |
+| `permission_denied` | 利用者が「予定を変更する」を許可していない | 設定画面での許可を促す |
+| `storage_not_atomic` | サーバーの保存先の設定が古い | 下の「保存先の移行」を利用者に伝える |
+
+### 古い形（updateTodayTasks / updateTasksForDate）
+
+残してありますが、**その日の全置き換え**です。いまは中でタスク単位の変更へ直されるので、
+
+- 内容が同じタスクのIDは保たれます（`id` を渡せば確実です）
+- 完了済み・実行中・固定のタスクは、この経路でも消えず・変わりません
+- `expectedRevision` を渡せば、古い内容で新しい内容を上書きしません（強く推奨）
+- `completed: true` は渡せません（完了になるのは実際に学習したときだけ）
+
+新しく書くときは `applyTaskChanges` を使ってください。
+
+---
+
+## 守られるタスク（AIが動かせないもの）
+
+`getTodayTasks` / `getTasksInRange` が返すタスクには `locked` と `lockedReason` が付きます。
+
+| `lockedReason` | 何か | 解除できる人 |
+|---|---|---|
+| `completed` | もう終わったタスク | （学習の結果なので解除しない） |
+| `running` | いま解いているタスク | 端末が知らせるのをやめれば自然に外れる |
+| `pinned` | 利用者が固定したタスク | **利用者だけ**（study-todo のホーム画面の「固定」ボタン） |
+
+固定の付け外しは `/api/sync/pin`（端末キーが要る）だけで行えます。MCPには固定を付けるツールも
+外すツールもないので、AIが自分で保護を外すことはできません。
+
+### 「実行中」の限界（できていないこと）
+
+実行中かどうかは、**アプリがオンラインのときに知らせてきた範囲**でしか分かりません。
+
+- 端末は学習を始めたとき・問題を切り替えたとき、それに5分ごとに知らせます（期限つき・既定15分）。
+- **圏外・機内モード・アプリを閉じている**あいだは知らせが届かないので、
+  その端末で解いているタスクをAIが移したり消したりできてしまいます。
+- ただし、そのときも**学習記録・チャレンジ結果・タイマーは壊れません**。
+  記録は追加専用のイベントで、予定の変更とは別に `id` で重ね合わされます。
+  端末のタイマーはその端末の中だけで動いていて、同期で止まることも消えることもありません。
+  予定から消えたタスクの問題を解いた記録も、そのまま残ります。
+
+つまり「実行中の保護」は**完全ではありません**。確実に守りたいタスクは「固定」を使ってください。
+
+---
+
+## 変更履歴と取り消し
+
+一括変更ごとに、変更前後・対象のタスク・対象の日・実行者・日時・理由を残しています。
+
+- AIからは `getPlanChanges`（`includeDetail: true` で変更前後の中身も）
+- アプリからは **設定 → AI連携 / 同期 → 最近の予定の変更**
+- 取り消しは、アプリの「取り消す」ボタンか、AIの `undoTaskChanges`
+
+取り消しは履歴を消す操作ではなく、**打ち消す変更を新しく1件作って記録**します。
+次のときは何も変えずに `undo_conflict` を返します。
+
+- そのあとに学習が進んだ（完了になった）
+- そのあとに別の変更が入って、対象のタスクの中身が変わった
+- 対象のタスクが固定された／いま解かれている
+
+学習記録とチャレンジ結果は取り消しの対象になりません（予定だけが戻ります）。
 
 ### 同期されるもの・されないもの
 
@@ -189,8 +518,16 @@ OAuth 2.1 + PKCE（S256）に対応しているので、Bearer を直接設定�
 |---|---|---|
 | 学習記録（StudyRecord） | する | 追加専用イベント。`id` で重複排除。合計はサーバーで数え直す |
 | チャレンジ結果 | する | 追加専用イベント。`id` で重複排除 |
-| その日の予定（TaskPlan） | する | 日付ごとに `revision` と `updatedAt` で新しいほうを採る |
+| その日の予定（TaskPlan） | する | 日付ごとに `revision` と `updatedAt` で新しいほうを採る。別の日へ移したタスクは、移動を知らない端末が送ってきても元の日へ戻さない |
+| 固定（pinned） | する | サーバー側の固定は、端末の同期では消えない（`/api/sync/pin` だけが付け外しできる） |
+| 実行中の知らせ | する（片道・期限つき） | 端末 → サーバーのみ。オフラインの端末のぶんは分からない |
+| 予定の変更履歴 | する | 直近50件。取り消しに使う |
 | 目標（Goal） | する | `id` ごとに `updatedAt` が新しいほうを採る |
+| 繰り越しの記録（move） | する | 追加専用イベント。`id` で重複排除。再送しても増えない |
+| 目標（構造つき） | する | `id` ごとに `updatedAt` が新しいほうを採る。対象のID一覧も含む |
+| 学習可能時間 | する | 1つの文書。更新時刻が新しいほうを採る |
+| 見積もりの指定 | する | 問題ごとに「本人の指定」と「AIの仮値」を別々に、新しいほうを採る |
+| 見積もりの計算結果 | **しない** | 学習記録から計算し直せるので保存しない |
 | 問題マスタ | する | 指紋（hash）が変わったときだけ送り直す |
 | セッション状態（タイマー） | **しない** | 計測中の状態はその端末だけのもの |
 | 表示設定（テーマ・カレンダー） | **しない** | 端末ごとの好み |
@@ -198,13 +535,65 @@ OAuth 2.1 + PKCE（S256）に対応しているので、Bearer を直接設定�
 
 ---
 
+## 保存先の移行（KV → Durable Object）
+
+**なぜ必要か。** Cloudflare KV は「最後に書いた人が勝つ」保存先で、
+「読んだときから変わっていなければ書く」（compare-and-swap）ができません。
+世界中に配られるまでの遅れもあります。そのため、
+
+- 期待した revision を確かめてから書く
+- 複数の日を、途中を見せずにまとめて書く
+
+という処理を KV **だけ**では正しく行えません。Durable Object は1つだけ存在する
+オブジェクトで、その中の保存先はトランザクションに対応しているため、
+study-todo（利用者は1人）は Durable Object を1つ（名前 `study-todo`）作り、
+すべての読み書きをそこへ集めます。
+
+**手順。** `wrangler.toml` には設定済みなので、デプロイし直すだけです。
+
+```sh
+npx wrangler deploy
+```
+
+`main` へ push して GitHub Actions に配らせる場合も同じです（`wrangler.toml` に
+`[[migrations]]` が入っているので、Durable Object は配るときに自動で用意されます）。
+
+- 初回アクセスのときに、KV にあった `studytodo:` で始まるデータが
+  自動で Durable Object へ写されます（一度だけ。`server/storage/do-driver.js`）。
+- 写し終えても **KV のデータは消しません**。元の設定に戻すこともできます。
+- 移行できたかは `/health` で分かります。
+
+```sh
+curl -s https://＜あなたのWorkerのURL＞/health
+# {"ok":true,...,"storage":{"driver":"durable-object","atomicBatchUpdates":true,...}}
+```
+
+**移行前（KVのみ）はどうなるか。** 読み取り・端末どうしの同期・目標の変更は
+これまでどおり動きます。予定の変更（`applyTaskChanges` / `updateTodayTasks` /
+`updateTasksForDate` / 取り消し）は、**黙って書かずに** `storage_not_atomic` を返し、
+AIが利用者へ更新を促します。設定画面にも同じ案内が出ます。
+
+手元（Node）で動かすときの保存先はファイルで、1つのプロセスの中で順番待ちをするので
+まとめ書きができます。同じフォルダを複数のプロセスから同時に書く使い方は想定していません。
+
+---
+
 ## 会話の例
 
 - 「今日の青チャートは何をやる予定？」 → `getTodayTasks`
 - 「最近の△と✕を見て弱点を教えて」 → `getRecentMistakes` ＋ `getStudyStats`
-- 「今日30分しかないから、やる問題を減らして」 → `getTodayTasks` → `updateTodayTasks`
-- 「例題50〜65を3日間に分けて」 → `listQuestions` → `updateTasksForDate` を3回
+- 「今日30分しかないから、一部を明日に回して」 → `getTasksInRange`（今日・明日）→ `applyTaskChanges`（`move` を並べる）
+- 「例題50〜65を3日間に分けて」 → `listQuestions` → `applyTaskChanges` 1回（3日ぶんの `add`）
+- 「さっきの変更を取り消して」 → `getPlanChanges` → `undoTaskChanges`
 - 「最近、計算ミスと方針ミスはどちらが多い？」 → `getRecentMistakes`（`calcErrors` / `wrongApproaches`）
+- 「昨日やり残した分を今日に回して」 → `getUnfinishedPlanItems` → `applyTaskChanges`（`carryOver`）
+- 「例題90は何回解いた？」 → `getQuestionAttempts`（`totalAttempts` と1回ずつの評価）
+- 「何回繰り越した？」 → `getPlanMoves`（`carriedCount` と当初の予定日）
+- 「12月までに2次関数の基本例題を一通り終える目標を作って」 → `addGoal`（`scopeFilter` で対象を確定）
+- 「今週の予定を組んで」 → `getPlanningContext` → `validatePlanChanges` → `applyTaskChanges`
+- 「今日はあと30分。今週を組み直して」 → `updateStudyAvailability`（todayRemainingMinutes）
+  → `getPlanningContext` → `applyTaskChanges`（`carryOver` と `move`）
+- 「目標にどれくらい届いてる？」 → `getGoalProgress`
 - 「明日は例題84〜92と復習3問に変更して」 → `listQuestions` → `updateTasksForDate`
 
 AIが予定を変えると、次に study-todo を開いて同期したときに、ホーム画面のTODOと
@@ -238,5 +627,8 @@ npm test        # = node --test
 | AIが「接続トークンが正しくありません」と言う | 設定画面でトークンを再発行して入れ直す |
 | AIが「権限がありません」と言う | 設定画面の「権限：予定を変更する」を許可する |
 | 予定を変えたのに端末へ反映されない | その端末で「いますぐ同期」を押す（起動時とオンライン復帰時にも同期します） |
+| AIが「storage_not_atomic」と言う | 「保存先の移行」に従って `npx wrangler deploy` をやり直す |
+| AIが「このタスクは変更できません」と言う | 完了済み・実行中・固定のタスク。固定はホーム画面の「固定」ボタンで外せる |
+| AIが予定を変えすぎた | 設定 → AI連携 / 同期 → 最近の予定の変更 → 「取り消す」 |
 | 端末を無くした | 設定画面で同期コードを発行しなおし、接続トークンも再発行する |
 | Claude.ai で「認証に失敗しました」と出る | Worker を最新版にデプロイし直す（claude.ai からの呼び出しを許可し、`/mcp` 付きの案内と `resource` に対応したのは新しい版）。そのうえで、コネクタを一度削除してから登録しなおす |

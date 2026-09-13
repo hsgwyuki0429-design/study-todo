@@ -158,27 +158,96 @@ export async function leaveDevice() {
 }
 
 /* ------------------------------------------------------------------ */
+/* 予定まわりの個別の操作（端末キーで呼ぶ）                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 固定（ピン留め）をサーバーへも伝える。
+ * 固定はAIから外せない印なので、付け外しはこの端末からの操作でしか起きない。
+ * 同期していない・オフラインのときは、ローカルの印だけが残り、次の同期で送られる。
+ */
+export async function pushPin(date, taskId, pinned) {
+  const config = await getCloudConfig();
+  if (!isActive(config)) return { ok: false, reason: 'disabled' };
+  try {
+    return await request(config, '/api/sync/pin', {
+      method: 'POST',
+      body: { date, taskId, pinned },
+      token: config.deviceKey,
+    });
+  } catch (error) {
+    return { ok: false, reason: 'error', message: error.message };
+  }
+}
+
+/**
+ * 「いまこのタスクを解いている」ことをサーバーへ知らせる。
+ *
+ * これはAIが実行中のタスクを動かさないようにするための情報で、
+ * 期限つき（既定15分）で預けられる。圏外のときは届かないので、
+ * サーバーが知っている実行中の状態は「オンラインの端末のぶんだけ」である。
+ * 届かなくても学習は止めないし、ローカルのタイマーも記録も一切変わらない。
+ */
+export async function reportActivity(date, taskId, questionId = null) {
+  const config = await getCloudConfig();
+  if (!isActive(config)) return { ok: false, reason: 'disabled' };
+  try {
+    return await request(config, '/api/sync/activity', {
+      method: 'POST',
+      body: { date, taskId, questionId },
+      token: config.deviceKey,
+    });
+  } catch {
+    // 知らせられなくても学習は続く（保護が効かないだけ）。
+    return { ok: false, reason: 'offline' };
+  }
+}
+
+/** 予定の変更履歴を取る（設定画面の「最近の予定の変更」に出す）。 */
+export async function fetchPlanChanges(limit = 10) {
+  const config = await getCloudConfig();
+  if (!isLinked(config)) return { entries: [] };
+  return request(config, `/api/sync/changes?limit=${limit}`, { token: config.deviceKey });
+}
+
+/** 変更を取り消す。安全に戻せないときはサーバーが断り、何も変わらない。 */
+export async function undoPlanChange(changeId) {
+  const config = await getCloudConfig();
+  if (!isLinked(config)) throw new CloudError('この端末はまだ同期に参加していません。');
+  return request(config, '/api/sync/undo', {
+    method: 'POST',
+    body: { changeId, operationId: `undo_${changeId}_${Date.now().toString(36)}` },
+    token: config.deviceKey,
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* 同期                                                                */
 /* ------------------------------------------------------------------ */
 
 /** 送るものを組み立てる。初回（lastPulledAtMs が無い）はローカルの全部を送る。 */
 async function buildPayload(config) {
   const first = !config.lastPulledAtMs;
-  const [records, challenges, goals, questions, outbox, planMeta] = await Promise.all([
+  const [records, challenges, goals, questions, outbox, planMeta, moves] = await Promise.all([
     idb.all(STORES.records),
     idb.all(STORES.challenges),
     api.getGoals({ includeDeleted: true }),
     idb.all(STORES.questions),
     api.listOutbox(),
     api.getPlanMeta(),
+    idb.all(STORES.moves),
   ]);
+  const [availability, estimateEntries] = await Promise.all([api.getAvailability(), api.getEstimateEntries()]);
 
   const queuedRecordIds = new Set(outbox.filter((e) => e.type === 'record').map((e) => e.id));
   const queuedChallengeIds = new Set(outbox.filter((e) => e.type === 'challenge').map((e) => e.id));
+  const queuedMoveIds = new Set(outbox.filter((e) => e.type === 'move').map((e) => e.id));
 
   // 初回はローカルにあるものを全部送る（クラウドが空でも消えないように）。
   const recordsToSend = first ? records : records.filter((r) => queuedRecordIds.has(r.id));
   const challengesToSend = first ? challenges : challenges.filter((c) => queuedChallengeIds.has(c.id));
+  // 繰り越しの記録も追加専用。同じ id を何度送っても増えない。
+  const movesToSend = first ? moves : moves.filter((m) => queuedMoveIds.has(m.id));
 
   // 予定は、この端末で変更した日ぶん（初回はローカルにある全日ぶん）。
   const tasks = await idb.all(STORES.tasks);
@@ -203,13 +272,19 @@ async function buildPayload(config) {
     first,
     localHash,
     outboxKeys: outbox
-      .filter((e) => (e.type === 'record' && queuedRecordIds.has(e.id)) || (e.type === 'challenge' && queuedChallengeIds.has(e.id)))
+      .filter((e) => (e.type === 'record' && queuedRecordIds.has(e.id))
+        || (e.type === 'challenge' && queuedChallengeIds.has(e.id))
+        || (e.type === 'move' && queuedMoveIds.has(e.id)))
       .map((e) => e.key),
     pushedDates: dirtyDates,
     payload: {
       since: config.lastPulledAtMs ?? null,
       records: recordsToSend.slice(0, PUSH_CHUNK),
       challenges: challengesToSend.slice(0, 100),
+      moves: movesToSend.slice(0, 200),
+      // 学習可能時間と見積もりの指定も送る（どちらも消さずに重ねられる）。
+      availability,
+      estimates: estimateEntries,
       taskPlans: taskPlans.slice(0, 120),
       goals,
       questions: questions.length && localHash !== config.questionsHash
@@ -222,7 +297,7 @@ async function buildPayload(config) {
 
 /** 受け取った内容をローカルへ重ねる。ここでも消す操作は一切しない。 */
 async function applySnapshot(snapshot) {
-  const applied = { records: 0, challenges: 0, plans: 0, goals: 0, questions: 0 };
+  const applied = { records: 0, challenges: 0, plans: 0, goals: 0, questions: 0, moves: 0, availability: 0, estimates: 0 };
 
   const existingRecords = new Set((await idb.all(STORES.records)).map((r) => r.id));
   const newRecords = (snapshot.records ?? [])
@@ -240,6 +315,47 @@ async function applySnapshot(snapshot) {
   if (newChallenges.length) {
     await idb.putAll(STORES.challenges, newChallenges);
     applied.challenges = newChallenges.length;
+  }
+
+  // 学習可能時間は、新しいほうを採る（サーバー側で突き合わせ済み）。
+  if (snapshot.availability) {
+    const local = await api.getAvailability();
+    const incomingAt = Date.parse(snapshot.availability.updatedAt ?? '') || 0;
+    const localAt = Date.parse(local.updatedAt ?? '') || 0;
+    if (incomingAt > localAt) {
+      await idb.put(STORES.meta, { key: api.AVAILABILITY_KEY, value: snapshot.availability });
+      applied.availability = 1;
+    }
+  }
+
+  // 見積もりの指定は、項目ごとに新しいほうを採る（本人の指定を仮の値で消さない）。
+  if (snapshot.estimates && typeof snapshot.estimates === 'object') {
+    const local = await api.getEstimateEntries();
+    const merged = { ...local };
+    for (const [questionId, entry] of Object.entries(snapshot.estimates)) {
+      const current = merged[questionId] ?? {};
+      const newer = (key, atKey) => ((Date.parse(entry[atKey] ?? '') || 0) >= (Date.parse(current[atKey] ?? '') || 0)
+        ? entry[key] : current[key]);
+      merged[questionId] = {
+        ...current,
+        manualSeconds: newer('manualSeconds', 'manualUpdatedAt'),
+        manualUpdatedAt: newer('manualUpdatedAt', 'manualUpdatedAt') ?? current.manualUpdatedAt ?? null,
+        aiSeconds: newer('aiSeconds', 'aiUpdatedAt'),
+        aiSource: newer('aiSource', 'aiUpdatedAt'),
+        aiNote: newer('aiNote', 'aiUpdatedAt'),
+        aiUpdatedAt: newer('aiUpdatedAt', 'aiUpdatedAt') ?? current.aiUpdatedAt ?? null,
+      };
+    }
+    await idb.put(STORES.meta, { key: api.ESTIMATES_KEY, value: merged });
+    applied.estimates = Object.keys(snapshot.estimates).length;
+  }
+
+  // 繰り越しの記録も、無いものだけ足す（消さない・上書きしない）。
+  const existingMoves = new Set((await idb.all(STORES.moves)).map((m) => m.id));
+  const newMoves = (snapshot.moves ?? []).filter((m) => m && m.id && !existingMoves.has(m.id));
+  if (newMoves.length) {
+    await idb.putAll(STORES.moves, newMoves);
+    applied.moves = newMoves.length;
   }
 
   // 問題マスタは足すだけ。ローカルにしかない問題を消さない。

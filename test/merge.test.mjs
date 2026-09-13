@@ -9,6 +9,7 @@ import {
   mergeGoals,
   mergeTaskPlan,
   normalizeRecord,
+  normalizeTask,
   normalizeTaskPlan,
 } from "../server/service/merge.js";
 
@@ -59,4 +60,61 @@ test("統計はイベントから数え直す", () => {
   assert.equal(stats.byChapter["数列"].count, 2);
   // どちらも日本時間では 2026-09-12 の学習。
   assert.equal(stats.byDate["2026-09-12"].count, 2);
+});
+
+test("タスクのIDは作り直さず、古いデータには pinned を補う", () => {
+  const plan = normalizeTaskPlan({
+    date: "2026-09-12",
+    // pinned も createdAt も無い、古い形のデータ。
+    tasks: [{ id: "t1", questionIds: ["q1"], kind: "new", order: 0 }],
+  });
+  assert.equal(plan.tasks[0].id, "t1");
+  assert.equal(plan.tasks[0].pinned, false);
+  assert.ok(plan.tasks[0].createdAt);
+});
+
+test("同期で受け入れるときも、サーバー側の固定は消えない", () => {
+  const stored = normalizeTaskPlan({
+    date: "2026-09-12",
+    tasks: [{ id: "t1", questionIds: ["q1"], kind: "new", pinned: true }],
+    updatedAt: "2026-09-12T02:00:00Z",
+    revision: 3,
+  });
+  // 固定を知らない端末が、同じ版から送ってくる。
+  const incoming = normalizeTaskPlan({
+    date: "2026-09-12",
+    tasks: [{ id: "t1", questionIds: ["q1"], kind: "review" }],
+    updatedAt: "2026-09-12T02:30:00Z",
+    revision: 3,
+  });
+  const merged = mergeTaskPlan(stored, incoming);
+  assert.equal(merged.outcome, "applied");
+  assert.equal(merged.plan.tasks[0].kind, "review", "端末の変更自体は入る");
+  assert.equal(merged.plan.tasks[0].pinned, true, "固定は消えない");
+});
+
+test("移動を知らない端末の予定からは、移したタスクが落ちる", () => {
+  const stored = normalizeTaskPlan({
+    date: "2026-09-12",
+    tasks: [{ id: "keep", questionIds: ["q1"], kind: "new" }],
+    updatedAt: "2026-09-12T03:00:00Z",
+    revision: 5,
+  });
+  const incoming = normalizeTaskPlan({
+    date: "2026-09-12",
+    tasks: [
+      { id: "keep", questionIds: ["q1"], kind: "new" },
+      { id: "moved", questionIds: ["q2"], kind: "new" },
+    ],
+    updatedAt: "2026-09-12T04:00:00Z",
+    revision: 4,
+  });
+  const placements = { moved: { date: "2026-09-13", at: "2026-09-12T03:00:00Z" } };
+  const merged = mergeTaskPlan(stored, incoming, { placements });
+  assert.deepEqual(merged.plan.tasks.map((task) => task.id), ["keep"]);
+  assert.equal(merged.droppedTasks, 1);
+
+  // 最新の版を見ている端末なら、そのまま受け入れる（移動を知ったうえでの操作）。
+  const aware = mergeTaskPlan(stored, { ...incoming, revision: 5 }, { placements });
+  assert.deepEqual(aware.plan.tasks.map((task) => task.id), ["keep", "moved"]);
 });

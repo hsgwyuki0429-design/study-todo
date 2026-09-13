@@ -4,11 +4,14 @@ import * as api from './api.js';
 import { EVALUATIONS, EVAL_MAP, dayOf } from './api.js';
 import { state, q, qLabel, render } from './state.js';
 import { el, fmtMS, fmtTime, fmtDate, row, segmented, emptyState } from './ui.js';
+import { attemptDetailCard, attemptSquare, legend, squareRow } from './squares.js';
 
 const CHEVRON = '›';
 
 function evalMark(evaluation) {
   const ev = EVAL_MAP[evaluation];
+  // 評価が入っていない記録は、正解扱いにせず中立の印にする。
+  if (!ev) return el('span', 'eval-mark', '?');
   return el('span', `eval-mark tone-${ev.tone}`, ev.symbol);
 }
 
@@ -31,33 +34,53 @@ async function tocView(screen) {
   };
 
   if (toc.questionId) {
-    // 例題の履歴
-    const detail = await api.getQuestion(toc.questionId);
-    list.append(backRow(toc.section, () => go({ questionId: null })));
-    screen.append(el('div', 'panel-head', detail.question.label));
+    // 例題ごとの取り組み履歴。
+    // 1回の取り組み＝1マス。同じ日に2回解いた分もまとめずに2マス出す。
+    const attempts = await api.getQuestionAttempts(toc.questionId);
+    const question = q(toc.questionId);
+    list.append(backRow(toc.section, () => go({ questionId: null, attemptId: null })));
+    screen.append(el('div', 'panel-head', question?.label ?? toc.questionId));
 
-    if (!detail.history.length) {
+    if (!attempts.length) {
       list.append(emptyState('まだ解いていません'));
     } else {
-      // 古い順に並べ、評価の推移が読み取れるようにする
-      const history = [...detail.history].reverse();
-      const trail = el('div', 'trail');
-      history.forEach((r, i) => {
-        if (i) trail.append(el('span', 'trail-arrow', '→'));
-        trail.append(evalMark(r.evaluation));
-      });
-      list.append(trail);
-      for (const r of history) {
+      const last = attempts[attempts.length - 1];
+      list.append(row({
+        title: `取り組み ${attempts.length}回`,
+        sub: [
+          `直近 ${fmtDate(dayOf(last.timestamp))} ${EVAL_MAP[last.evaluation]?.label ?? '評価なし'}`,
+          question ? question.type : null,
+        ].filter(Boolean).join(' ・ '),
+      }));
+      // 古い順に並べる。マスはスケジュール画面と同じもの。
+      const squares = attempts.map((record) => attemptSquare(record, {
+        label: `${fmtDate(dayOf(record.timestamp))} ${qLabel(record.questionId)}`,
+        onClick: () => {
+          toc.attemptId = toc.attemptId === record.id ? null : record.id;
+          render();
+        },
+      }));
+      const wrap = el('div', 'attempt-history');
+      wrap.append(squareRow(squares));
+      list.append(wrap);
+      const opened = attempts.find((record) => record.id === toc.attemptId);
+      if (opened) list.append(attemptDetailCard(opened));
+      for (const record of attempts) {
         const node = row({
-          title: fmtDate(dayOf(r.timestamp)),
-          sub: fmtTime(r.timestamp),
-          right: el('span', 'row-time', fmtMS(r.durationSeconds)),
+          title: fmtDate(dayOf(record.timestamp)),
+          sub: `${fmtTime(record.timestamp)}${record.challengeId ? ' ・ チャレンジ' : ''}`,
+          right: el('span', 'row-time', fmtMS(record.durationSeconds)),
+          onClick: () => {
+            toc.attemptId = toc.attemptId === record.id ? null : record.id;
+            render();
+          },
         });
-        node.prepend(evalMark(r.evaluation));
+        node.prepend(evalMark(record.evaluation));
         list.append(node);
       }
     }
     screen.append(list);
+    screen.append(legend());
     return;
   }
 

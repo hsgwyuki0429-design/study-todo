@@ -6,10 +6,16 @@
 import { idb, STORES } from './idb.js';
 import { dateKeyOf, todayKeyOf } from './datetime.js';
 import { buildOutline, compareQuestions, normalizeQuestion, questionHaystack } from './question-order.js';
+import { itemsOf, splitPlanItems, withItems } from './plan-items.js';
+import { normalizeGoal, goalAttempts as goalAttemptsOf, questionSatisfied as questionSatisfiedFor } from './goals.js';
+import { normalizeAvailability, availabilityForDate } from './availability.js';
+import { estimateForQuestion } from './estimates.js';
 
 // 1.2.0 で問題マスタに book / chapterOrder / sectionOrder / title / page / sectionPage を、
 // 1.3.0 で courses（SELECT STUDY の3コース）と needsReview を足した。
-export const DATA_VERSION = '1.3.0';
+// 1.4.0 で予定に items（1回の取り組みごとの予定項目）、学習記録に planItemId、
+// 繰り越しの記録（moves）を足した。どれも足すだけで、古いデータはそのまま読める。
+export const DATA_VERSION = '1.4.0';
 
 export const EVALUATIONS = [
   { value: 'perfect', symbol: '◯', label: '完璧にできた', tone: 'success' },
@@ -27,6 +33,14 @@ export const TASK_KINDS = {
   challenge: { label: '挑戦', tone: 'violet' },
   priority: { label: '優先', tone: 'danger' },
 };
+
+export { itemsOf, splitPlanItems, MOVE_REASONS, MOVE_REASON_LABELS, MOVE_KIND_LABELS } from './plan-items.js';
+export {
+  GOAL_COMPLETION_LABELS, GOAL_COMPLETION_TYPES, GOAL_STATUSES, GOAL_STATUS_LABELS,
+  selectQuestions, goalAttempts, questionSatisfied,
+} from './goals.js';
+export { WEEKDAY_KEYS, WEEKDAY_LABELS, availabilityForDate } from './availability.js';
+export { CONFIDENCE_LABELS } from './estimates.js';
 
 export const uid = (prefix = 'id') =>
   `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
@@ -167,7 +181,13 @@ export async function clearOutboxEntries(keys) {
 /* 学習記録                                                            */
 /* ------------------------------------------------------------------ */
 
-export async function addStudyRecord({ questionId, evaluation, durationSeconds, challengeId }) {
+/**
+ * 学習記録を1件足す。
+ *
+ * 「1回の取り組み＝1件の記録」なので、同じ問題を何度解いても上書きせずに増やす。
+ * planItemId は「どの予定に対する取り組みだったか」。予定に無い問題を解いたときは入らない。
+ */
+export async function addStudyRecord({ questionId, evaluation, durationSeconds, challengeId, planTaskId, planItemId }) {
   const record = {
     id: uid('rec'),
     questionId,
@@ -175,6 +195,8 @@ export async function addStudyRecord({ questionId, evaluation, durationSeconds, 
     evaluation,
     durationSeconds: Math.max(0, Math.round(durationSeconds)),
     ...(challengeId ? { challengeId } : {}),
+    ...(planTaskId ? { planTaskId } : {}),
+    ...(planItemId ? { planItemId } : {}),
   };
   await idb.put(STORES.records, record);
   await enqueueOutbox('record', record.id);
@@ -268,7 +290,9 @@ export async function setPlanMeta(date, patch) {
 export async function updateTodayTasks(tasks, date = todayKey(), { markDirty = true, updatedBy = 'app' } = {}) {
   const existing = await idb.byIndex(STORES.tasks, 'date', date);
   await Promise.all(existing.map((t) => idb.del(STORES.tasks, t.id)));
-  const normalized = tasks.map((t, i) => ({
+  const now = new Date().toISOString();
+  const normalized = tasks.map((t, i) => withItems({
+    // IDは渡されたものを必ず残す。作り直すと、クラウド側の同じタスクと結び付かなくなる。
     id: t.id || uid('task'),
     date,
     questionIds: t.questionIds || [],
@@ -276,7 +300,16 @@ export async function updateTodayTasks(tasks, date = todayKey(), { markDirty = t
     order: t.order ?? i,
     ...(t.timeLimitSeconds ? { timeLimitSeconds: t.timeLimitSeconds } : {}),
     completed: !!t.completed,
+    // 利用者が固定した印。古いデータには無いので false として補う。
+    pinned: t.pinned === true,
+    createdAt: t.createdAt ?? now,
+    updatedAt: t.updatedAt ?? now,
+    ...(t.source ? { source: t.source } : {}),
+    ...(t.carriedFrom ? { carriedFrom: t.carriedFrom } : {}),
     ...(t.title ? { title: t.title } : {}),
+    // 予定項目（この予定の中の「1回の取り組み」1件ずつ）。
+    // 古いデータには無いので questionIds から組み立てる（IDは決め打ちなので毎回同じ）。
+    items: t.items,
   }));
   await idb.putAll(STORES.tasks, normalized);
   if (markDirty) {
@@ -315,11 +348,147 @@ export async function getRecordedByDate() {
   return map;
 }
 
+/** 固定（ピン留め）の付け外し。利用者だけが行える操作。 */
+export async function setTaskPinned(taskId, pinned) {
+  const task = await idb.get(STORES.tasks, taskId);
+  if (!task) return null;
+  const next = { ...task, pinned: pinned === true, updatedAt: new Date().toISOString() };
+  await idb.put(STORES.tasks, next);
+  await setPlanMeta(task.date, { updatedAt: next.updatedAt, dirty: true, updatedBy: 'app' });
+  return next;
+}
+
 export async function saveTask(task) {
   await idb.put(STORES.tasks, task);
   // 完了の付け外しもその日の予定の変更なので、次の同期で送る。
   await setPlanMeta(task.date, { updatedAt: new Date().toISOString(), dirty: true, updatedBy: 'app' });
   return task;
+}
+
+/* ------------------------------------------------------------------ */
+/* 予定と実績の対応                                                    */
+/* ------------------------------------------------------------------ */
+
+/** すでに取り組まれた予定項目（学習記録が結び付いているもの）のID。 */
+export async function getDoneItemIds() {
+  const records = await idb.all(STORES.records);
+  return new Set(records.filter((r) => r.planItemId).map((r) => r.planItemId));
+}
+
+/** 1つの問題への取り組みを、古い順に全部返す（1回＝1件）。 */
+export async function getQuestionAttempts(questionId) {
+  const records = await idb.byIndex(STORES.records, 'questionId', questionId);
+  return records.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
+}
+
+/** 期間の学習記録を、日付ごとにまとめる（カレンダーの実績マスに使う）。 */
+export async function getAttemptsByDate(fromDate, toDate) {
+  const records = await idb.all(STORES.records);
+  const byDate = {};
+  for (const record of records) {
+    const day = dayOf(record.timestamp);
+    if (day < fromDate || day > toDate) continue;
+    (byDate[day] ??= []).push(record);
+  }
+  Object.values(byDate).forEach((list) => list.sort((a, b) => a.timestamp.localeCompare(b.timestamp)));
+  return byDate;
+}
+
+/** 期間の予定を、日付ごとにまとめる。 */
+export async function getTasksByDate(fromDate, toDate) {
+  const tasks = await getTasksInRange(fromDate, toDate);
+  const byDate = {};
+  for (const task of tasks) (byDate[task.date] ??= []).push(task);
+  return byDate;
+}
+
+/* ------------------------------------------------------------------ */
+/* 繰り越し（予定を別の日へ動かす）                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 予定を別の日へ動かした記録。学習記録と同じく「追加専用のイベント」で、
+ * id で重ね合わせるだけなので、同期を何度やり直しても増えない。
+ */
+export async function listMoves({ from = null, to = null } = {}) {
+  const moves = await idb.all(STORES.moves);
+  return moves
+    .filter((move) => (!from || move.toDate >= from || move.fromDate >= from))
+    .filter((move) => (!to || move.toDate <= to || move.fromDate <= to))
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)));
+}
+
+export async function addMove(move) {
+  await idb.put(STORES.moves, move);
+  await enqueueOutbox('move', move.id);
+  return move;
+}
+
+/**
+ * まだ取り組んでいない予定項目だけを、別の日へ繰り越す。
+ *
+ * ・実施済みの分は動かさない（実績は実施した日に残る）
+ * ・予定項目のID（itemId）は変えない。動かしても「同じ予定」であり続ける
+ * ・繰り越しても取り組み回数は増えない（学習記録には手を触れない）
+ * ・動かしたことは移動イベントとして残り、あとから履歴を追える
+ *
+ * ここで変えるのは、この端末の予定だけである。変えた日は dirty として印を付け、
+ * ふだんの同期でクラウドへ送られる（サーバー側で版を見て重ね合わせる）。
+ */
+export async function carryOverPlanItems({
+  fromDate, taskId, itemIds = null, toDate,
+  reason = 'unspecified', kind = 'carry_over', actorName = null,
+}) {
+  const dayTasks = await idb.byIndex(STORES.tasks, 'date', fromDate);
+  const task = dayTasks.find((t) => t.id === taskId);
+  if (!task) return { ok: false, error: 'not_found' };
+  const done = await getDoneItemIds();
+  const all = itemsOf(task);
+  const pending = all.filter((item) => !done.has(item.itemId));
+  const wanted = itemIds ? pending.filter((item) => itemIds.includes(item.itemId)) : pending;
+  if (!wanted.length) return { ok: false, error: 'nothing_to_carry_over' };
+
+  const carriedIds = new Set(wanted.map((item) => item.itemId));
+  const carried = wanted.map((item) => ({ ...item, carriedCount: (item.carriedCount ?? 0) + 1 }));
+  const keep = all.filter((item) => !carriedIds.has(item.itemId));
+
+  // 移動元。全部動かすならタスクごと消え、一部なら残った分だけになる。
+  const remaining = dayTasks
+    .filter((t) => t.id !== taskId)
+    .concat(keep.length ? [{ ...task, items: keep, questionIds: keep.map((i) => i.questionId) }] : []);
+  await updateTodayTasks(remaining, fromDate);
+
+  // 移動先。繰り越した分を、新しいタスクとして足す。
+  const target = await idb.byIndex(STORES.tasks, 'date', toDate);
+  const carriedTask = {
+    id: uid('task'),
+    kind: task.kind,
+    ...(task.timeLimitSeconds ? { timeLimitSeconds: task.timeLimitSeconds } : {}),
+    ...(task.title ? { title: task.title } : {}),
+    items: carried,
+    questionIds: carried.map((item) => item.questionId),
+    completed: false,
+    pinned: false,
+    source: 'app',
+    carriedFrom: { taskId: task.id, date: fromDate },
+  };
+  await updateTodayTasks([...target, carriedTask], toDate);
+
+  const move = {
+    id: uid('mv'),
+    fromDate,
+    toDate,
+    at: new Date().toISOString(),
+    actorKind: 'user',
+    actorName: actorName ?? 'この端末',
+    kind,
+    reason,
+    taskId: task.id,
+    toTaskId: carriedTask.id,
+    items: carried,
+  };
+  await addMove(move);
+  return { ok: true, move, carried, task: carriedTask };
 }
 
 /* ------------------------------------------------------------------ */
@@ -351,17 +520,27 @@ export async function getChallengeResults(limit = 20) {
 export async function getGoals({ includeDeleted = false } = {}) {
   const all = await idb.all(STORES.goals);
   const goals = includeDeleted ? all : all.filter((g) => !g.deletedAt);
-  return goals.sort((a, b) => String(a.deadline).localeCompare(String(b.deadline)));
+  // 古い目標（文章の範囲しか無いもの）も、そのまま読めるように整えて返す。
+  return goals
+    .map((goal) => normalizeGoal(goal))
+    .sort((a, b) => (a.priority - b.priority)
+      || String(a.deadline || '9999').localeCompare(String(b.deadline || '9999')));
 }
 
-export async function addGoal({ title, deadline, scope }) {
-  const goal = {
+export async function addGoal({ title, deadline, scope, questionIds = [], completion, priority, startDate }) {
+  const goal = normalizeGoal({
     id: uid('goal'),
     title,
+    startDate: startDate ?? todayKey(),
     deadline,
     scope: scope || '',
+    questionIds,
+    completion,
+    priority,
+    status: 'active',
     updatedAt: new Date().toISOString(),
-  };
+    revision: 1,
+  });
   await idb.put(STORES.goals, goal);
   return goal;
 }
@@ -369,7 +548,13 @@ export async function addGoal({ title, deadline, scope }) {
 export async function updateGoal(id, patch) {
   const goal = await idb.get(STORES.goals, id);
   if (!goal) return null;
-  const next = { ...goal, ...patch, id, updatedAt: new Date().toISOString() };
+  const next = normalizeGoal({
+    ...goal,
+    ...patch,
+    id,
+    updatedAt: new Date().toISOString(),
+    revision: Number(goal.revision ?? 0) + 1,
+  });
   await idb.put(STORES.goals, next);
   return next;
 }
@@ -384,6 +569,161 @@ export async function deleteGoal(id) {
   await idb.put(STORES.goals, { ...goal, deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
 }
 
+/**
+ * 目標の進み具合を、この端末のデータだけで数える（サーバーと同じ考え方）。
+ *
+ * 実績として数えるのは「その目標に結び付いた予定から実施された取り組み」だけ。
+ * 同じ問題を別の目的で解いた記録は流用しない。
+ */
+export async function getGoalProgressLocal(goal) {
+  const [records, tasks] = await Promise.all([idb.all(STORES.records), idb.all(STORES.tasks)]);
+  const itemGoalMap = new Map();
+  for (const task of tasks) {
+    for (const item of itemsOf(task)) {
+      if (item.goalId) itemGoalMap.set(item.itemId, item.goalId);
+    }
+  }
+  const attempts = goalAttemptsOf(goal, { records, itemGoalMap });
+  const plannedQuestionIds = new Set();
+  for (const task of tasks) {
+    const split = splitPlanItems(task, records, { date: task.date, allowLegacyMatch: false });
+    for (const item of split.pending) {
+      if (item.goalId === goal.id) plannedQuestionIds.add(item.questionId);
+    }
+  }
+  const satisfied = [];
+  const unsatisfied = [];
+  for (const questionId of goal.questionIds ?? []) {
+    if (questionSatisfiedFor(goal, attempts.get(questionId) ?? [])) satisfied.push(questionId);
+    else unsatisfied.push(questionId);
+  }
+  const unplanned = unsatisfied.filter((id) => !plannedQuestionIds.has(id));
+  let remainingSeconds = 0;
+  for (const questionId of unsatisfied) {
+    remainingSeconds += (await estimateForQuestionId(questionId)).seconds;
+  }
+  return {
+    goalId: goal.id,
+    total: (goal.questionIds ?? []).length,
+    satisfied: satisfied.length,
+    unsatisfied: unsatisfied.length,
+    planned: unsatisfied.length - unplanned.length,
+    unplanned: unplanned.length,
+    unplannedQuestionIds: unplanned,
+    remainingMinutes: Math.round(remainingSeconds / 60),
+    // 「習得する目標」は、何回で習得できるか分からないので総時間は不確実。
+    remainingIsComplete: goal.completion?.type !== 'mastery',
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* 学習可能時間と見積もり                                              */
+/* ------------------------------------------------------------------ */
+
+export const AVAILABILITY_KEY = 'availability';
+export const ESTIMATES_KEY = 'estimates';
+
+/** 1日に使える学習時間の設定。未設定の曜日は null（0分とは違う）。 */
+export async function getAvailability() {
+  const row = await idb.get(STORES.meta, AVAILABILITY_KEY);
+  return normalizeAvailability(row?.value ?? {});
+}
+
+export async function saveAvailability(patch) {
+  const current = await getAvailability();
+  const next = normalizeAvailability({
+    ...current,
+    ...patch,
+    weekly: { ...current.weekly, ...(patch.weekly ?? {}) },
+    overrides: { ...current.overrides, ...(patch.overrides ?? {}) },
+    updatedAt: new Date().toISOString(),
+    revision: Number(current.revision ?? 0) + 1,
+  });
+  if (patch.overrides) {
+    for (const [date, value] of Object.entries(patch.overrides)) {
+      if (value === null) delete next.overrides[date];
+    }
+  }
+  if (patch.todayRemaining === null) next.todayRemaining = null;
+  await idb.put(STORES.meta, { key: AVAILABILITY_KEY, value: next });
+  return next;
+}
+
+/**
+ * 問題別の見積もり指定（本人が決めた時間と、AIが入れた仮の値）。
+ * 実績から計算できる分は保存しない（記録が増えれば計算し直せるため）。
+ */
+export async function getEstimateEntries() {
+  const row = await idb.get(STORES.meta, ESTIMATES_KEY);
+  return row?.value ?? {};
+}
+
+export async function setManualEstimate(questionId, seconds) {
+  const entries = await getEstimateEntries();
+  const next = {
+    ...entries,
+    [questionId]: {
+      ...(entries[questionId] ?? {}),
+      manualSeconds: seconds === null ? undefined : Math.max(30, Math.round(seconds)),
+      manualUpdatedAt: new Date().toISOString(),
+    },
+  };
+  await idb.put(STORES.meta, { key: ESTIMATES_KEY, value: next });
+  return next;
+}
+
+/** その日に使える時間（画面に「予定○分／使える○分」を出すために使う）。 */
+export async function availabilityForDay(dateKey) {
+  const [availability, records] = await Promise.all([getAvailability(), idb.all(STORES.records)]);
+  const spentSeconds = records
+    .filter((r) => dayOf(r.timestamp) === dateKey)
+    .reduce((sum, r) => sum + (r.durationSeconds ?? 0), 0);
+  return availabilityForDate(availability, dateKey, { spentSeconds, isToday: dateKey === todayKey() });
+}
+
+/**
+ * 1問の見積もり（画面用）。
+ * サーバーと同じ考え方で計算する（共有モジュール src/estimates.js）。
+ */
+export async function estimateForQuestionId(questionId, { inChallenge = false } = {}) {
+  const [question, history, entries, availability, challenges] = await Promise.all([
+    idb.get(STORES.questions, questionId),
+    getQuestionAttempts(questionId),
+    getEstimateEntries(),
+    getAvailability(),
+    idb.all(STORES.challenges),
+  ]);
+  const truncated = new Set(challenges.filter((c) => c.succeeded === false).map((c) => c.id));
+  return estimateForQuestion({
+    question,
+    history,
+    stored: entries[questionId] ?? null,
+    condition: { firstTry: history.length === 0, inChallenge },
+    review: {
+      timerIncludesReview: availability.timerIncludesReview,
+      reviewOverheadSeconds: availability.reviewOverheadSeconds,
+    },
+    truncatedChallengeIds: truncated,
+  });
+}
+
+/** その日の未実施の予定にかかる見積もり（分）。 */
+export async function plannedMinutesFor(dateKey) {
+  const [tasks, records] = await Promise.all([
+    idb.byIndex(STORES.tasks, 'date', dateKey),
+    idb.all(STORES.records),
+  ]);
+  let seconds = 0;
+  for (const task of tasks) {
+    const split = splitPlanItems(task, records, { date: dateKey });
+    for (const item of split.pending) {
+      const estimate = await estimateForQuestionId(item.questionId, { inChallenge: task.kind === 'challenge' });
+      seconds += estimate.seconds;
+    }
+  }
+  return Math.round(seconds / 60);
+}
+
 /* ------------------------------------------------------------------ */
 /* セッション状態（永続化）                                            */
 /* ------------------------------------------------------------------ */
@@ -392,6 +732,9 @@ export const EMPTY_SESSION = {
   active: false,
   mode: 'idle',
   currentQuestionId: null,
+  // いま解いているのが「どの予定の、どの1回ぶん」か。予定外に解いたときは null。
+  currentPlanItemId: null,
+  currentPlanTaskId: null,
   currentChallengeId: null,
   questionElapsed: {},
   currentStartedAt: null,
@@ -446,14 +789,16 @@ export async function setSessionState(value) {
 /* ------------------------------------------------------------------ */
 
 export async function exportAll() {
-  const [questions, records, tasks, challenges, goals, settings] = await Promise.all([
+  const [questions, records, tasks, challenges, goals, moves, settings] = await Promise.all([
     idb.all(STORES.questions),
     idb.all(STORES.records),
     idb.all(STORES.tasks),
     idb.all(STORES.challenges),
     idb.all(STORES.goals),
+    idb.all(STORES.moves),
     getSettings(),
   ]);
+  const [availability, estimateEntries] = await Promise.all([getAvailability(), getEstimateEntries()]);
   return {
     dataVersion: DATA_VERSION,
     exportedAt: new Date().toISOString(),
@@ -462,6 +807,12 @@ export async function exportAll() {
     tasks,
     challenges,
     goals,
+    // 繰り越し・予定変更の記録。予定と実績の食い違いを後から追うために残す。
+    moves,
+    // 学習可能時間と、見積もりの「指定」（本人の指定・AIの仮値）。
+    // 実績から計算できる見積もりは、書き出さない（記録から作り直せる）。
+    availability,
+    estimates: estimateEntries,
     settings,
   };
 }

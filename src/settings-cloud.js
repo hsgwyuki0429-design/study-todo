@@ -226,6 +226,59 @@ export async function renderCloudCard(list, rerender) {
       sub: `学習記録 ${status.sync.records}件 ・ 問題 ${status.sync.questions}問 ・ 端末 ${status.sync.devices.length}台`,
     }));
 
+    // ----- 予定の変更履歴と取り消し -----
+    list.append(el('div', 'section-head', '最近の予定の変更'));
+    let changes = { entries: [] };
+    try {
+      changes = await cloud.fetchPlanChanges(5);
+    } catch (error) {
+      list.append(row({ title: '変更履歴を読めませんでした', sub: error.message, classes: ['row-indent'] }));
+    }
+    if (!changes.entries.length) {
+      list.append(row({ title: 'まだありません', classes: ['row-indent'] }));
+    } else {
+      for (const entry of changes.entries) {
+        const parts = [];
+        if (entry.summary?.created?.length) parts.push(`追加${entry.summary.created.length}件`);
+        if (entry.summary?.removed?.length) parts.push(`削除${entry.summary.removed.length}件`);
+        if (entry.summary?.moved?.length) parts.push(`移動${entry.summary.moved.length}件`);
+        if (entry.summary?.updated?.length) parts.push(`変更${entry.summary.updated.length}件`);
+        const who = entry.actorKind === 'ai' ? `AI（${entry.actorName ?? '不明'}）` : (entry.actorName ?? 'この端末');
+        list.append(row({
+          title: `${(entry.dates ?? []).join('・')} ${parts.join('・') || '変更なし'}`,
+          sub: [
+            `${fmtDateTime(entry.at)} ・ ${who}`,
+            entry.reason ? `理由: ${entry.reason}` : null,
+            entry.undoneBy ? '取り消し済み' : null,
+            entry.undoOf ? '（取り消しの操作）' : null,
+          ].filter(Boolean).join(' ・ '),
+          classes: ['row-indent'],
+          right: entry.undoneBy || entry.undoOf ? null : button('取り消す', async () => {
+            if (!confirm('この変更を取り消します。学習の記録は変わりません。よろしいですか？')) return;
+            try {
+              const result = await cloud.undoPlanChange(entry.changeId);
+              lastMessage = result.ok
+                ? '取り消しました（取り消しも新しい変更として記録されます）。'
+                : `取り消せませんでした: ${result.message ?? ''}`;
+              await cloud.syncNow({ force: true });
+              await reloadFromLocal();
+            } catch (error) {
+              lastMessage = `取り消せませんでした: ${error.message}`;
+            }
+            rerender();
+          }, 'link-btn'),
+        }));
+      }
+    }
+    if (status.storage && status.storage.atomicBatchUpdates === false) {
+      list.append(row({
+        title: 'サーバーの保存先が古い設定です',
+        sub: 'いまの設定（KVのみ）では、AIからの予定の変更を安全に行えないため断っています。'
+          + ' docs/mcp.md の「保存先の移行」に従って Durable Object を有効にしてください。',
+        classes: ['row-indent'],
+      }));
+    }
+
     list.append(el('div', 'section-head', '最近のAI操作'));
     if (!status.log.length) {
       list.append(row({ title: 'まだありません', classes: ['row-indent'] }));

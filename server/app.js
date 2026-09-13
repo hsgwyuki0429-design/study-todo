@@ -10,6 +10,7 @@
 //   /api/sync/*                  … study-todo のPWAとのデータ同期（端末キーで守る）
 
 import { ERROR, createMcpServer } from "./core/mcp.js";
+import { StorageCapabilityError } from "./storage/driver.js";
 import { ValidationError } from "./core/validate.js";
 import { SCOPES, SCOPE_LABELS, createAuth } from "./auth/tokens.js";
 import {
@@ -262,6 +263,7 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
           lastUsedAt: entry.lastUsedAt,
         }))[0] ?? null,
         sync: status,
+        storage: sync.storageCapabilities(),
         log: log.entries,
       });
     }
@@ -354,6 +356,57 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
           questionsHash: params.get("questionsHash"),
         })),
       });
+    }
+
+    // 固定（ピン留め）の付け外し。アプリからだけ行える操作で、AIからは呼べない。
+    if (path === "/api/sync/pin" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      const result = await sync.setTaskPinned({
+        date: String(body.date ?? ""),
+        taskId: String(body.taskId ?? ""),
+        pinned: body.pinned === true,
+        deviceId: device.deviceId,
+      });
+      return json(result, { status: result.ok ? 200 : 404 });
+    }
+
+    // 「いまこのタスクを解いている」の知らせ。期限つきで預かる。
+    if (path === "/api/sync/activity" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      const result = await sync.reportActivity({
+        date: String(body.date ?? ""),
+        taskId: body.taskId === null || body.taskId === undefined ? null : String(body.taskId),
+        questionId: body.questionId ? String(body.questionId) : null,
+        deviceId: device.deviceId,
+        ttlSeconds: body.ttlSeconds ?? null,
+      });
+      return json(result, { status: result.ok ? 200 : 404 });
+    }
+
+    // 予定の変更履歴（アプリの「最近の変更」に出す）。
+    if (path === "/api/sync/changes" && request.method === "GET") {
+      const limit = Number(new URL(request.url).searchParams.get("limit") ?? 10);
+      return json(await sync.readChanges({ limit: Number.isFinite(limit) ? limit : 10 }));
+    }
+
+    // 直近の変更の取り消し。安全に戻せないときは何も変えずに競合を返す。
+    if (path === "/api/sync/undo" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      try {
+        const result = await sync.undoTaskChange({
+          changeId: body.changeId ? String(body.changeId) : null,
+          operationId: body.operationId ? String(body.operationId) : null,
+          actorKind: "user",
+          actorName: device.deviceName ?? "study-todo",
+          reason: body.reason ? String(body.reason) : null,
+        });
+        return json(result, { status: result.ok ? 200 : 409 });
+      } catch (error) {
+        if (error instanceof StorageCapabilityError) {
+          return json({ ok: false, error: "storage_not_atomic", message: error.message }, { status: 503 });
+        }
+        throw error;
+      }
     }
 
     if (path === "/api/sync/leave" && request.method === "POST") {
@@ -605,7 +658,13 @@ code{background:#f0f0f3;padding:2px 6px;border-radius:6px}:root{color-scheme:lig
       let response;
       try {
         if (path === "/health") {
-          response = json({ ok: true, server: SERVER_INFO.name, version: SERVER_INFO.version });
+          response = json({
+            ok: true,
+            server: SERVER_INFO.name,
+            version: SERVER_INFO.version,
+            // 保存先が何を保証できるか。設定画面と運用のときに確かめられるようにする。
+            storage: sync.storageCapabilities(),
+          });
         } else if (path === "/") {
           response = new Response(landingPage(request), {
             headers: { "content-type": "text/html; charset=utf-8" },

@@ -1,15 +1,37 @@
-// スケジュールタブ。上半分＝カレンダー、下半分＝その期間に終わらせるべきことの進捗バー。
+// スケジュールタブ。
+//
+// 主役は「週間カレンダー」。月曜から日曜までの7日ぶんのカードを縦に並べ、
+// それぞれのカードに、その日の「例題」と「チャレンジ」を正方形のマスで出す。
+//
+// マスの意味は日付で変わる。
+//
+//   過ぎた日 … その日に実際に取り組んだ記録（予定に無かったものも出す）
+//   今日     … 今日の実績 ＋ まだ残っている予定
+//   これから … その日にやる予定
+//
+// 数字や長い題名を並べず、マスの数で「どれだけやったか・やる予定か」が分かるようにする。
+// マスが多い日はカードが縦に伸びる（件数を黙って省かない）。
 
 import * as api from './api.js';
-import { EVAL_MAP, todayKey } from './api.js';
+import { todayKey } from './api.js';
+import { buildDay } from './day-model.js';
+import { startOfWeekKey } from './datetime.js';
 import { state, q, qLabel, render } from './state.js';
-import { el, fmtDate, row, segmented, emptyState } from './ui.js';
+import { el, fmtDate, fmtMS, fmtTime, row, emptyState } from './ui.js';
+import {
+  attemptSquare,
+  challengeSquare,
+  legend,
+  plannedChallengeSquare,
+  plannedSquare,
+  squareRow,
+} from './squares.js';
+import { renderDayDetail } from './day-detail.js';
 
 const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
-const MONTHS = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'];
 
 /* ------------------------------------------------------------------ */
-/* 日付ユーティリティ                                                  */
+/* 日付の道具                                                          */
 /* ------------------------------------------------------------------ */
 
 const parse = (key) => {
@@ -18,391 +40,194 @@ const parse = (key) => {
 };
 const key = (date) => todayKey(date);
 const addDays = (date, n) => new Date(date.getFullYear(), date.getMonth(), date.getDate() + n);
-const startOfWeek = (date) => addDays(date, -date.getDay());
-const startOfMonth = (date) => new Date(date.getFullYear(), date.getMonth(), 1);
-const endOfMonth = (date) => new Date(date.getFullYear(), date.getMonth() + 1, 0);
 
-function periodRange() {
-  const anchor = parse(state.schedule.anchor);
-  if (state.schedule.unit === 'week') {
-    const from = startOfWeek(anchor);
-    return { from: key(from), to: key(addDays(from, 6)) };
-  }
-  if (state.schedule.unit === 'year') {
-    return { from: `${anchor.getFullYear()}-01-01`, to: `${anchor.getFullYear()}-12-31` };
-  }
-  return { from: key(startOfMonth(anchor)), to: key(endOfMonth(anchor)) };
+export { startOfWeekKey as startOfWeek } from './datetime.js';
+
+export const weekDays = (weekStart) => {
+  const start = parse(weekStart);
+  return Array.from({ length: 7 }, (_, index) => key(addDays(start, index)));
+};
+
+const shortDate = (dateKey) => {
+  const date = parse(dateKey);
+  return `${date.getMonth() + 1}/${date.getDate()}`;
+};
+
+/* ------------------------------------------------------------------ */
+/* その日の中身を組み立てる                                            */
+/* ------------------------------------------------------------------ */
+
+function daySection(title, count, nodes, emptyText) {
+  const section = el('div', 'day-section');
+  const head = el('div', 'day-section-head');
+  head.append(el('span', null, title), el('span', null, count));
+  section.append(head);
+  if (nodes.length) section.append(squareRow(nodes));
+  else section.append(el('div', 'day-empty', emptyText));
+  return section;
 }
 
-function periodLabel() {
-  const anchor = parse(state.schedule.anchor);
-  if (state.schedule.unit === 'week') {
-    const from = startOfWeek(anchor);
-    const to = addDays(from, 6);
-    return `${from.getMonth() + 1}/${from.getDate()} 〜 ${to.getMonth() + 1}/${to.getDate()}`;
+function timeLine(day, time) {
+  if (!time) return null;
+  const available = time.available;
+  const line = el('div', 'day-time');
+  if (available === null) {
+    line.textContent = `予定 ${time.plannedMinutes}分 ／ 使える時間は未設定`;
+    return line;
   }
-  if (state.schedule.unit === 'year') return `${anchor.getFullYear()}年`;
-  return `${anchor.getFullYear()}年 ${anchor.getMonth() + 1}月`;
+  const short = time.plannedMinutes > available;
+  if (short) line.classList.add('short');
+  line.textContent = `予定 ${time.plannedMinutes}分 ／ 使える ${available}分`
+    + (short ? `（${time.plannedMinutes - available}分オーバー）` : '');
+  return line;
 }
 
-function shiftPeriod(direction) {
-  const anchor = parse(state.schedule.anchor);
-  const unit = state.schedule.unit;
-  const next =
-    unit === 'week'
-      ? addDays(anchor, 7 * direction)
-      : unit === 'year'
-        ? new Date(anchor.getFullYear() + direction, anchor.getMonth(), 1)
-        : new Date(anchor.getFullYear(), anchor.getMonth() + direction, 1);
-  state.schedule.anchor = key(next);
-  state.schedule.selectedDate = null;
+function dayCard(day, onOpen, time) {
+  const date = parse(day.date);
+  const card = el('button', 'day-card');
+  if (day.isToday) card.classList.add('is-today');
+  if (day.isPast) card.classList.add('is-past');
+  card.onclick = onOpen;
+
+  const head = el('div', 'day-head');
+  head.append(el('span', 'day-date', shortDate(day.date)));
+  const weekday = el('span', `day-weekday${date.getDay() === 0 ? ' sun' : date.getDay() === 6 ? ' sat' : ''}`,
+    `(${WEEKDAYS[date.getDay()]})`);
+  head.append(weekday);
+  if (day.isToday) head.append(el('span', 'day-today-pill', '今日'));
+  head.append(el('span', 'day-open', '詳細 ›'));
+  card.append(head);
+
+  // これからの日と今日は、「予定○分／使える○分」を出す。
+  if (!day.isPast) {
+    const line = timeLine(day, time);
+    if (line) card.append(line);
+  }
+
+  // 何もない日は、2段を並べずに1行で済ませる（1週間ぶんが読みやすいように）。
+  const nothing = !day.attempts.length && !day.plannedItems.length
+    && !day.challenges.length && !day.plannedChallenges.length;
+  if (nothing) {
+    card.append(el('div', 'day-empty', day.isFuture ? '予定なし' : day.isToday ? '記録も予定もなし' : '記録なし'));
+    return card;
+  }
+
+  // 例題の段（EXERCISES など、チャレンジ以外の取り組みはすべてここに入る）。
+  const questionSquares = [
+    ...day.attempts.map((record) => attemptSquare(record, { label: qLabel(record.questionId) })),
+    ...day.plannedItems.map(({ item }) => plannedSquare({
+      label: qLabel(item.questionId),
+      carriedOver: Boolean(item.originalDate && item.originalDate !== day.date),
+    })),
+  ];
+  const doneCount = day.attempts.length;
+  const planCount = day.plannedItems.length;
+  card.append(daySection(
+    '例題',
+    day.isFuture ? `予定 ${planCount}` : planCount ? `実施 ${doneCount} ・ 予定 ${planCount}` : `実施 ${doneCount}`,
+    questionSquares,
+    day.isFuture ? '予定なし' : day.isToday ? 'なし' : '記録なし',
+  ));
+
+  // チャレンジの段。1回で1マス。合計の問題数も添える。
+  const challengeSquares = [
+    ...day.challenges.map((result) => challengeSquare(result, { title: 'チャレンジ' })),
+    ...day.plannedChallenges.map((task) => plannedChallengeSquare(task)),
+  ];
+  const challengeQuestions = day.challenges.reduce((sum, result) => sum + (result.laps?.length ?? 0), 0)
+    + day.plannedChallenges.reduce((sum, task) => sum + (task.questionIds?.length ?? 0), 0);
+  card.append(daySection(
+    'チャレンジ',
+    challengeSquares.length ? `${challengeSquares.length}回 ・ 計${challengeQuestions}問` : '0回',
+    challengeSquares,
+    day.isFuture ? '予定なし' : day.isToday ? 'なし' : '記録なし',
+  ));
+
+  return card;
+}
+
+/* ------------------------------------------------------------------ */
+
+function shiftWeek(direction) {
+  const start = parse(state.schedule.weekStart);
+  state.schedule.weekStart = key(addDays(start, 7 * direction));
   render();
 }
 
-/* ------------------------------------------------------------------ */
-/* 達成率                                                              */
-/* ------------------------------------------------------------------ */
-
-/** 日付 -> { total, done, rate }。タスクが無い日は null を返す。 */
-function buildRates(tasks, recorded) {
-  const byDate = {};
-  for (const task of tasks) {
-    const bucket = (byDate[task.date] ??= { total: 0, done: 0 });
-    const doneSet = recorded[task.date] ?? new Set();
-    for (const qid of task.questionIds) {
-      bucket.total += 1;
-      if (doneSet.has(qid)) bucket.done += 1;
-    }
-  }
-  Object.values(byDate).forEach((b) => {
-    b.rate = b.total ? b.done / b.total : 0;
-  });
-  return byDate;
-}
-
-const rateTone = (rate) => (rate >= 0.8 ? 'success' : rate >= 0.4 ? 'warning' : 'danger');
-
-// 塗り型の色相。設定のカラーバリエーションで決まり方が変わる。
-function dayHue(dateKey) {
-  const d = parse(dateKey);
-  switch (state.settings.fillVariation) {
-    case 'month':
-      return (d.getMonth() * 30 + 200) % 360;
-    case 'week': {
-      const week = Math.floor((d - new Date(d.getFullYear(), 0, 1)) / (7 * 86400000));
-      return (week * 14 + 200) % 360;
-    }
-    default: {
-      // 黄金角ずつ回すと、連続する日でも色相がよく散る
-      const dayIndex = Math.floor(d.getTime() / 86400000);
-      return Math.round(((dayIndex * 137.508) % 360 + 360) % 360);
-    }
-  }
-}
-
-/** 日付マス（リング型 / 塗り型）。 */
-function dayCell(dateKey, label, info, { muted = false } = {}) {
-  const today = todayKey();
-  const isToday = dateKey === today;
-  const isFuture = dateKey > today;
-  const cell = el('button', 'cal-cell');
-  if (muted) cell.classList.add('muted');
-  if (isToday) cell.classList.add('today');
-  if (state.schedule.selectedDate === dateKey) cell.classList.add('selected');
-
-  if (state.settings.calendarStyle === 'fill') {
-    if (info && !isFuture) {
-      const alpha = (0.15 + 0.6 * info.rate).toFixed(2);
-      cell.style.background = `hsl(${dayHue(dateKey)} 60% 50% / ${alpha})`;
-    } else if (info) {
-      cell.classList.add('planned');
-    }
-    cell.append(el('span', 'cal-num', label));
-  } else {
-    if (info) {
-      const rate = isFuture ? 0 : info.rate;
-      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      svg.setAttribute('viewBox', '0 0 40 40');
-      svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-      svg.setAttribute('class', `ring rtone-${isFuture ? 'idle' : rateTone(rate)}`);
-      const circle = (cls, dash) => {
-        const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-        c.setAttribute('cx', '20');
-        c.setAttribute('cy', '20');
-        c.setAttribute('r', '15.9155');
-        c.setAttribute('class', cls);
-        if (dash) c.setAttribute('stroke-dasharray', dash);
-        return c;
-      };
-      const track = circle('ring-track');
-      // 過去の0%は未来（手つかず）と見分けがつくよう、枠線自体に色を残す
-      if (!isFuture && !isToday && rate === 0) track.classList.add('ring-track-miss');
-      svg.append(track);
-      if (!isFuture && rate > 0) svg.append(circle('ring-value', `${(rate * 100).toFixed(1)} 100`));
-      cell.append(svg);
-    }
-    cell.append(el('span', 'cal-num', label));
-  }
-
-  cell.onclick = () => {
-    state.schedule.selectedDate = state.schedule.selectedDate === dateKey ? null : dateKey;
-    render();
-  };
-  return cell;
-}
-
-/* ------------------------------------------------------------------ */
-/* カレンダー本体                                                      */
-/* ------------------------------------------------------------------ */
-
-function monthGrid(rates) {
-  const anchor = parse(state.schedule.anchor);
-  const grid = el('div', 'cal-grid');
-  WEEKDAYS.forEach((w) => grid.append(el('div', 'cal-weekday', w)));
-  const first = startOfMonth(anchor);
-  const start = startOfWeek(first);
-  const last = endOfMonth(anchor);
-  for (let d = start; d <= last || d.getDay() !== 0; d = addDays(d, 1)) {
-    const k = key(d);
-    grid.append(dayCell(k, String(d.getDate()), rates[k], { muted: d.getMonth() !== anchor.getMonth() }));
-  }
-  return grid;
-}
-
-function weekGrid(rates) {
-  const start = startOfWeek(parse(state.schedule.anchor));
-  const grid = el('div', 'cal-grid week');
-  WEEKDAYS.forEach((w) => grid.append(el('div', 'cal-weekday', w)));
-  for (let i = 0; i < 7; i++) {
-    const d = addDays(start, i);
-    const k = key(d);
-    grid.append(dayCell(k, String(d.getDate()), rates[k]));
-  }
-  return grid;
-}
-
-function yearGrid(rates) {
-  const year = parse(state.schedule.anchor).getFullYear();
-  const grid = el('div', 'cal-grid year');
-  for (let m = 0; m < 12; m++) {
-    const prefix = `${year}-${String(m + 1).padStart(2, '0')}`;
-    const days = Object.entries(rates).filter(([k]) => k.startsWith(prefix));
-    const total = days.reduce((n, [, v]) => n + v.total, 0);
-    const done = days.reduce((n, [, v]) => n + v.done, 0);
-    const info = total ? { total, done, rate: done / total } : null;
-    const cell = dayCell(`${prefix}-01`, MONTHS[m], info);
-    cell.onclick = () => {
-      state.schedule.anchor = `${prefix}-01`;
-      state.schedule.unit = 'month';
-      state.schedule.selectedDate = null;
-      render();
-    };
-    grid.append(cell);
-  }
-  return grid;
-}
-
-/* ------------------------------------------------------------------ */
-/* 下半分：進捗バー                                                    */
-/* ------------------------------------------------------------------ */
-
-/** 問題を1目盛りとするバー。目盛りの色は最新の評価で決まる。 */
-function progressBar(questionIds, latest) {
-  const bar = el('div', 'bar');
-  for (const qid of questionIds) {
-    const ev = latest[qid] ? EVAL_MAP[latest[qid]] : null;
-    const seg = el('i', `seg${ev ? ` tone-${ev.tone}` : ''}`);
-    seg.title = `${qLabel(qid)}${ev ? ` ${ev.symbol}` : ' 未着手'}`;
-    bar.append(seg);
-  }
-  return bar;
-}
-
-function barItem(dateText, title, questionIds, latest) {
-  const item = el('div', 'bar-item');
-  const head = el('div', 'bar-head');
-  if (dateText) head.append(el('span', 'bar-date', dateText));
-  head.append(el('span', 'bar-title', title));
-  const done = questionIds.filter((id) => latest[id]).length;
-  head.append(el('span', 'bar-count', `${done}/${questionIds.length}`));
-  item.append(head, progressBar(questionIds, latest));
-  return item;
-}
-
-// 連続する番号は「30〜38」のようにまとめ、飛んでいる箇所だけ区切る
-function compressRuns(nums) {
-  const parts = [];
-  let start = nums[0];
-  let prev = nums[0];
-  for (let i = 1; i <= nums.length; i++) {
-    const n = nums[i];
-    if (n === prev + 1) {
-      prev = n;
-      continue;
-    }
-    parts.push(start === prev ? `${start}` : `${start}〜${prev}`);
-    start = prev = n;
-  }
-  return parts;
-}
-
-function rangeLabel(questionIds) {
-  const qs = questionIds.map(q).filter(Boolean);
-  if (!qs.length) return `${questionIds.length}問`;
-  if (qs.length === 1) return qs[0].label;
-  const nums = [...new Set(qs.map((x) => x.number))].sort((a, b) => a - b);
-  const types = new Set(qs.map((x) => x.type));
-  // 例題 / 基本例題 が混ざる場合は共通する「例題」でまとめる
-  const prefix =
-    types.size === 1 ? [...types][0] : qs.every((x) => x.type.endsWith('例題')) ? '例題' : '';
-  const list = compressRuns(nums).join('、');
-  return prefix ? `${prefix} ${list}` : list;
-}
-
-function uniqueIds(taskList) {
-  return [...new Set(taskList.flatMap((t) => t.questionIds))];
-}
-
-function progressList(tasks, latest) {
-  const list = el('div', 'list');
-  if (!tasks.length) {
-    list.append(emptyState('この期間のタスクはありません'));
-    return list;
-  }
-
-  if (state.schedule.unit === 'year') {
-    // 年表示では月ごとに1本のバーへまとめる
-    const byMonth = {};
-    tasks.forEach((t) => ((byMonth[t.date.slice(0, 7)] ??= []).push(t)));
-    for (const [month, monthTasks] of Object.entries(byMonth).sort()) {
-      const ids = monthTasks.flatMap((t) => t.questionIds);
-      list.append(barItem(`${Number(month.slice(5))}月`, rangeLabel(ids), ids, latest));
-    }
-    return list;
-  }
-
-  // 週/月表示では、例題とチャレンジをそれぞれ1本のバーにまとめる
-  const sorted = [...tasks].sort((a, b) => a.date.localeCompare(b.date));
-  const plainTasks = sorted.filter((t) => t.kind !== 'challenge');
-  const challengeTasks = sorted.filter((t) => t.kind === 'challenge');
-
-  if (plainTasks.length) {
-    const ids = uniqueIds(plainTasks);
-    list.append(barItem(null, rangeLabel(ids), ids, latest));
-  }
-  if (challengeTasks.length) {
-    const titles = new Set(challengeTasks.map((t) => t.title ?? 'チャレンジ'));
-    const title = titles.size === 1 ? [...titles][0] : 'チャレンジ';
-    const ids = uniqueIds(challengeTasks);
-    list.append(barItem(null, title, ids, latest));
-  }
-  return list;
-}
-
-/* ------------------------------------------------------------------ */
-/* 下半分：日付をタップしたときの表示                                  */
-/* ------------------------------------------------------------------ */
-
-function dayDetail(dateKey, tasks, latest, recorded) {
-  const list = el('div', 'list');
-  const past = dateKey < todayKey();
-  list.append(
-    row({
-      title: '← 期間の一覧に戻る',
-      onClick: () => {
-        state.schedule.selectedDate = null;
-        render();
-      },
-      classes: ['row-back'],
-    })
-  );
-  list.append(el('div', 'section-head', `${fmtDate(dateKey)} のTODO`));
-
-  const dayTasks = tasks.filter((t) => t.date === dateKey);
-  if (!dayTasks.length) {
-    list.append(emptyState('この日のタスクはありません'));
-    return list;
-  }
-
-  const doneToday = recorded[dateKey] ?? new Set();
-  for (const task of dayTasks) {
-    if (task.kind === 'challenge') list.append(el('div', 'section-head', task.title ?? 'チャレンジ'));
-    for (const qid of task.questionIds) {
-      const finished = doneToday.has(qid);
-      const ev = finished && latest[qid] ? EVAL_MAP[latest[qid]] : null;
-      const node = row({
-        title: qLabel(qid),
-        sub: q(qid) ? `${q(qid).chapter} ・ ${q(qid).section}` : null,
-        right: el('span', 'state-pill', finished ? '完了' : past ? '未達成' : '未着手'),
-      });
-      node.prepend(ev ? el('span', `eval-mark tone-${ev.tone}`, ev.symbol) : el('span', 'eval-mark', '・'));
-      list.append(node);
-    }
-  }
-  return list;
-}
-
-/* ------------------------------------------------------------------ */
-
 export async function renderSchedule(screen) {
   screen.innerHTML = '';
+
+  // 日付を押したときは、別の画面として詳細を出す。
+  // 戻ったときに同じ週・同じ位置へ帰れるよう、週とスクロール位置はそのまま持っておく。
+  if (state.schedule.selectedDate) {
+    await renderDayDetail(screen, state.schedule.selectedDate);
+    return;
+  }
 
   const head = el('div', 'view-head');
   head.append(el('div', 'view-title', 'スケジュール'));
   screen.append(head);
 
-  if (state.schedule.selectedDate) {
-    const { from, to } = periodRange();
-    const [tasks, recorded, latest] = await Promise.all([
-      api.getTasksInRange(from, to),
-      api.getRecordedByDate(),
-      api.getLatestEvaluations(),
-    ]);
-    const bottom = el('div', 'panel');
-    bottom.append(dayDetail(state.schedule.selectedDate, tasks, latest, recorded));
-    screen.append(bottom);
-    return;
-  }
+  const weekStart = state.schedule.weekStart;
+  const days = weekDays(weekStart);
+  const from = days[0];
+  const to = days[6];
+  const today = todayKey();
 
-  const { from, to } = periodRange();
-  const [tasks, recorded, latest] = await Promise.all([
-    api.getTasksInRange(from, to),
-    api.getRecordedByDate(),
-    api.getLatestEvaluations(),
+  const [tasksByDate, attemptsByDate, challenges] = await Promise.all([
+    api.getTasksByDate(from, to),
+    api.getAttemptsByDate(from, to),
+    api.getChallengeResults(200),
   ]);
-  const rates = buildRates(tasks, recorded);
+  // 各日の「使える時間」と「予定の見積もり」。過ぎた日は出さないので今日から先だけ。
+  const timeByDate = {};
+  for (const dateKey of days) {
+    if (dateKey < today) continue;
+    const info = await api.availabilityForDay(dateKey);
+    timeByDate[dateKey] = { available: info.available, plannedMinutes: await api.plannedMinutesFor(dateKey) };
+  }
+  const challengesWithDate = challenges.map((result) => ({ ...result, date: api.dayOf(result.timestamp) }));
 
-  screen.append(
-    segmented([['week', '週'], ['month', '月'], ['year', '年']], state.schedule.unit, (v) => {
-      state.schedule.unit = v;
-      state.schedule.selectedDate = null;
-      render();
-    })
-  );
-
-  const nav = el('div', 'cal-nav');
+  const nav = el('div', 'week-nav');
   const prev = el('button', 'cal-arrow', '◀');
-  prev.onclick = () => shiftPeriod(-1);
+  prev.setAttribute('aria-label', '前の週');
+  prev.onclick = () => shiftWeek(-1);
   const next = el('button', 'cal-arrow', '▶');
-  next.onclick = () => shiftPeriod(1);
-  const today = el('button', 'link-btn', '今日');
-  today.onclick = () => {
-    state.schedule.anchor = todayKey();
-    state.schedule.selectedDate = null;
+  next.setAttribute('aria-label', '次の週');
+  next.onclick = () => shiftWeek(1);
+  const now = el('button', 'link-btn', '今週');
+  now.onclick = () => {
+    state.schedule.weekStart = startOfWeekKey(today);
     render();
   };
-  nav.append(prev, el('div', 'cal-period', periodLabel()), next, today);
+  nav.append(prev, el('div', 'week-period', `${shortDate(from)} 〜 ${shortDate(to)}`), next, now);
   screen.append(nav);
 
-  const cal = el('div', 'cal-wrap');
-  cal.append(
-    state.schedule.unit === 'week' ? weekGrid(rates)
-      : state.schedule.unit === 'year' ? yearGrid(rates)
-        : monthGrid(rates)
-  );
-  screen.append(cal);
+  const list = el('div', 'week-list');
+  for (const dateKey of days) {
+    const day = buildDay(dateKey, {
+      tasks: tasksByDate[dateKey] ?? [],
+      records: attemptsByDate[dateKey] ?? [],
+      challenges: challengesWithDate,
+      today,
+    });
+    list.append(dayCard(day, () => {
+      // 戻ったときのために、いまのスクロール位置を覚えておく。
+      state.schedule.scrollY = window.scrollY;
+      state.schedule.selectedDate = dateKey;
+      render();
+    }, timeByDate[dateKey]));
+  }
+  screen.append(list);
+  screen.append(legend());
 
-  const bottom = el('div', 'panel');
-  bottom.append(progressList(tasks, latest));
-  screen.append(bottom);
+  // 週を移った直後でなければ、元の位置へ戻す。
+  if (state.schedule.restoreScroll != null) {
+    const y = state.schedule.restoreScroll;
+    state.schedule.restoreScroll = null;
+    requestAnimationFrame(() => window.scrollTo(0, y));
+  }
 }
+
+// 記録タブなどから使えるように、日付の道具を出しておく。
+export { parse as parseDateKey, shortDate };
