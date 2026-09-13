@@ -240,13 +240,13 @@ export async function pushPin(date, taskId, pinned) {
  * サーバーが知っている実行中の状態は「オンラインの端末のぶんだけ」である。
  * 届かなくても学習は止めないし、ローカルのタイマーも記録も一切変わらない。
  */
-export async function reportActivity(date, taskId, questionId = null) {
+export async function reportActivity(date, taskId, questionId = null, sessionId = null) {
   const config = await getCloudConfig();
   if (!isActive(config)) return { ok: false, reason: 'disabled' };
   try {
     return await request(config, '/api/sync/activity', {
       method: 'POST',
-      body: { date, taskId, questionId },
+      body: { date, taskId, questionId, sessionId },
       token: config.deviceKey,
     });
   } catch {
@@ -312,6 +312,24 @@ async function buildPayload(config) {
   const challengesToSend = first ? challenges : challenges.filter((c) => queuedChallengeIds.has(c.id));
   // 繰り越しの記録も追加専用。同じ id を何度送っても増えない。
   const movesToSend = first ? moves : moves.filter((m) => queuedMoveIds.has(m.id));
+  // First-sync overflow must survive after lastPulledAtMs advances.
+  // Only acknowledged chunks may be removed from the outbox.
+  if (first) {
+    for (const [type, entries, limit] of [
+      ['record', recordsToSend, PUSH_CHUNK], ['challenge', challengesToSend, 100], ['move', movesToSend, 200],
+    ]) {
+      await idb.putAll(STORES.outbox, entries.slice(limit).map((entry) => ({
+        key: `${type}:${entry.id}`, type, id: entry.id, queuedAt: Date.now(),
+      })));
+    }
+  }
+  const sentKeys = new Set([
+    ...recordsToSend.slice(0, PUSH_CHUNK).map((r) => `record:${r.id}`),
+    ...challengesToSend.slice(0, 100).map((r) => `challenge:${r.id}`),
+    ...movesToSend.slice(0, 200).map((r) => `move:${r.id}`),
+    ...deletedRecordIds.slice(0, 200).map((id) => `record_deleted:${id}`),
+    ...deletedChallengeIds.slice(0, 200).map((id) => `challenge_deleted:${id}`),
+  ]);
 
   // 予定は、この端末で変更した日ぶん（初回はローカルにある全日ぶん）。
   const tasks = await idb.all(STORES.tasks);
@@ -338,13 +356,8 @@ async function buildPayload(config) {
   return {
     first,
     localHash,
-    outboxKeys: outbox
-      .filter((e) => (e.type === 'record' && queuedRecordIds.has(e.id))
-        || (e.type === 'challenge' && queuedChallengeIds.has(e.id))
-        || (e.type === 'move' && queuedMoveIds.has(e.id))
-        || e.type === 'record_deleted'
-        || e.type === 'challenge_deleted')
-      .map((e) => e.key),
+    outboxEntries: outbox.filter((e) => sentKeys.has(e.key)),
+    replanEvents: outbox.filter((e) => e.type === 'replan'),
     pushedDates: dirtyDates,
     payload: {
       since: config.lastPulledAtMs ?? null,
@@ -368,7 +381,10 @@ async function buildPayload(config) {
         ? { hash: localHash, masterVersion, questions }
         : { hash: localHash, masterVersion },
     },
-    remainingRecords: Math.max(0, recordsToSend.length - PUSH_CHUNK),
+    remainingRecords: Math.max(0, recordsToSend.length - PUSH_CHUNK)
+      + Math.max(0, challengesToSend.length - 100) + Math.max(0, movesToSend.length - 200)
+      + Math.max(0, deletedRecordIds.length - 200) + Math.max(0, deletedChallengeIds.length - 200)
+      + Math.max(0, taskPlans.length - 120),
   };
 }
 
@@ -540,6 +556,44 @@ async function applySnapshot(snapshot) {
 }
 
 let running = null;
+let syncAgain = false;
+
+/** Planning failure stays separate from study-data synchronization. */
+async function deliverStudyEnds(config, events) {
+  const pending = await idb.all(STORES.outbox);
+  if (pending.some((entry) => entry.type !== 'replan')) return;
+  const liveKeys = new Set(pending.map((entry) => entry.key));
+  for (const entry of events.filter((entry) => liveKeys.has(entry.key))) {
+    try {
+      const response = await request(config, '/api/sync/study-end', {
+        method: 'POST', body: entry.event, token: config.deviceKey,
+      });
+      await idb.put(STORES.meta, { key: 'lastReplan', value: { ...response.replan, sessionId: entry.event.sessionId } });
+      if (!response.replan?.retryable) await idb.del(STORES.outbox, entry.key);
+    } catch {
+      // Keep exactly the same event for the next online/startup/schedule refresh.
+      await idb.put(STORES.meta, { key: 'lastReplan', value: {
+        eventId: entry.event.eventId, sessionId: entry.event.sessionId,
+        state: 'failed', error: 'backend_unavailable', retryable: true,
+      } });
+    }
+  }
+}
+
+async function refreshReplanStatus(config) {
+  const stored = await idb.get(STORES.meta, 'lastReplan');
+  if (!stored?.value?.sessionId || stored.value.state !== 'pending') return;
+  const replan = await request(config, `/api/sync/replan?sessionId=${encodeURIComponent(stored.value.sessionId)}`, {
+    token: config.deviceKey, timeoutMs: 8000,
+  });
+  await idb.put(STORES.meta, { key: 'lastReplan', value: { ...replan, sessionId: stored.value.sessionId } });
+}
+
+export async function getReplanStatus(sessionId) {
+  const config = await getCloudConfig();
+  if (!isActive(config)) return null;
+  return request(config, `/api/sync/replan?sessionId=${encodeURIComponent(sessionId)}`, { token: config.deviceKey });
+}
 
 /**
  * 一度だけ同期する。
@@ -561,7 +615,7 @@ export async function syncNow({ force = false } = {}) {
         timeoutMs: 60000,
       });
       const applied = await applySnapshot(response.snapshot ?? {});
-      if (built.outboxKeys.length) await api.clearOutboxEntries(built.outboxKeys);
+      if (built.outboxEntries.length) await idb.acknowledgeOutbox(built.outboxEntries);
       await saveCloudConfig({
         lastSyncedAt: new Date().toISOString(),
         // ほかの端末の「すべて削除」を受けて手元を消したときは、続きからではなく
@@ -576,6 +630,12 @@ export async function syncNow({ force = false } = {}) {
         deviceName: response.device?.deviceName ?? config.deviceName,
         lastError: null,
       });
+      if (!applied.purged && !built.remainingRecords) {
+        await refreshReplanStatus(config).catch(() => {});
+        await deliverStudyEnds(config, built.replanEvents).catch(() => {});
+      }
+      if (built.remainingRecords) syncAgain = true;
+      if (typeof window !== 'undefined') window.dispatchEvent(new Event('study-todo-synced'));
       return {
         ok: true,
         pushed: response.accepted,
@@ -589,12 +649,16 @@ export async function syncNow({ force = false } = {}) {
       await saveCloudConfig({ lastError: message });
       return { ok: false, reason: error?.offline ? 'offline' : 'error', message };
     }
-  })().finally(() => { running = null; });
+  })().finally(() => {
+    running = null;
+    if (syncAgain) { syncAgain = false; syncInBackground(); }
+  });
   return running;
 }
 
 /** 学習記録・チャレンジ結果を保存したあとなど、静かに同期を試みる。 */
 export function syncInBackground() {
+  if (running) { syncAgain = true; return; }
   getCloudConfig().then((config) => {
     if (!isActive(config)) return;
     syncNow().catch(() => {});

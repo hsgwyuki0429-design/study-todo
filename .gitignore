@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+.dev.vars
+.dev.vars.*
 
 # Node で動かしたときの保存先
 .study-todo-data/

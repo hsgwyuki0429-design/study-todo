@@ -8,6 +8,7 @@
 # （.github/workflows/deploy.yml）。手で配るのは最初の1回だけでよい。
 #
 # 秘密（STUDY_TODO_OWNER_KEY）は必ず secret として入れること。
+# Routine 接続も Worker Secrets のみ: CLAUDE_ROUTINE_FIRE_URL / CLAUDE_ROUTINE_API_TOKEN
 # このファイルへ直接書くとGitHubへ公開されてしまう。
 
 name = "study-todo-mcp"

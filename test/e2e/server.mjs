@@ -35,10 +35,14 @@ const isApi = (pathname) => pathname === "/mcp"
  * テスト用のサーバーを立てる。
  * offline を true にすると、静的ファイルもAPIも返さなくなる（機内モードの代わり）。
  */
-export async function startTestServer() {
+export async function startTestServer({ env = {}, routineFetch } = {}) {
+  const storage = createMemoryDriver();
+  const jobs = [];
   const app = createStudyTodoMcpApp({
-    storage: createMemoryDriver(),
-    env: { STUDY_TODO_OWNER_KEY: OWNER_KEY },
+    storage,
+    env: { STUDY_TODO_OWNER_KEY: OWNER_KEY, ...env },
+    routineFetch,
+    waitUntil: (promise) => jobs.push(promise),
   });
   const state = { offline: false };
 
@@ -82,6 +86,8 @@ export async function startTestServer() {
   await new Promise((resolve) => server.listen(0, resolve));
   const { port } = server.address();
   return {
+    app, storage,
+    flushJobs: () => Promise.all(jobs),
     origin: `http://localhost:${port}`,
     goOffline() { state.offline = true; },
     goOnline() { state.offline = false; },

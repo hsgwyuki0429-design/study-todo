@@ -91,6 +91,41 @@ function tx(store, mode, fn) {
 }
 
 export const idb = {
+  /** Do not acknowledge an edit queued while a previous version was in flight. */
+  acknowledgeOutbox(entries) {
+    return open().then((db) => new Promise((resolve, reject) => {
+      const t = db.transaction(STORES.outbox, 'readwrite');
+      const store = t.objectStore(STORES.outbox);
+      for (const entry of entries) {
+        const request = store.get(entry.key);
+        request.onsuccess = () => {
+          if (JSON.stringify(request.result) === JSON.stringify(entry)) store.delete(entry.key);
+        };
+      }
+      t.oncomplete = () => resolve();
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error);
+    }));
+  },
+  /** Session and its study_end outbox entry commit together, including across tabs. */
+  updateSession(mutate) {
+    return open().then((db) => new Promise((resolve, reject) => {
+      const t = db.transaction([STORES.meta, STORES.outbox], 'readwrite');
+      const meta = t.objectStore(STORES.meta);
+      const request = meta.get('session');
+      let result;
+      request.onsuccess = () => {
+        try {
+          result = mutate(request.result?.value ?? null);
+          if (result.session) meta.put({ key: 'session', value: result.session });
+          if (result.event) t.objectStore(STORES.outbox).put(result.event);
+        } catch (error) { t.abort(); reject(error); }
+      };
+      t.oncomplete = () => resolve(result);
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error);
+    }));
+  },
   get: (store, key) => tx(store, 'readonly', (s) => s.get(key)),
   all: (store) => tx(store, 'readonly', (s) => s.getAll()),
   put: (store, value) => tx(store, 'readwrite', (s) => s.put(value)),

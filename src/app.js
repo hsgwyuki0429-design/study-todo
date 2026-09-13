@@ -9,7 +9,7 @@ import { heartbeatActivity, renderHome, tickHome } from './home.js';
 import { renderRecords } from './records.js';
 import { renderSchedule } from './schedule.js';
 import { renderSettings, applyTheme } from './settings.js';
-import { startCloudSync } from './cloud-sync.js';
+import { startCloudSync, syncInBackground } from './cloud-sync.js';
 
 const TABS = [
   ['home', 'ホーム', '■'],
@@ -73,6 +73,7 @@ function buildTabBar() {
       }
       state.tab = name;
       render();
+      if (name === 'schedule') syncInBackground();
     };
     bar.append(b);
   }
@@ -140,6 +141,11 @@ async function boot() {
 
   // クラウド同期は「追加の機能」。設定していなければ何も起きず、
   // 失敗しても学習機能には影響しない。
+  window.addEventListener('study-todo-synced', async () => {
+    await loadTasks();
+    await refreshToday();
+    render();
+  });
   startCloudSync();
 }
 

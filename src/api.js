@@ -200,7 +200,7 @@ export async function getAppInfo() {
  */
 export async function enqueueOutbox(type, id) {
   try {
-    await idb.put(STORES.outbox, { key: `${type}:${id}`, type, id, queuedAt: Date.now() });
+    await idb.put(STORES.outbox, { key: `${type}:${id}`, type, id, queuedAt: Date.now(), version: crypto.randomUUID() });
   } catch {
     // 控えに失敗しても学習の記録自体は成功させる（次回の全体同期で拾える）。
   }
@@ -933,6 +933,7 @@ export async function plannedMinutesFor(dateKey) {
 
 export const EMPTY_SESSION = {
   active: false,
+  sessionId: null,
   mode: 'idle',
   currentQuestionId: null,
   // いま解いているのが「どの予定の、どの1回ぶん」か。予定外に解いたときは null。
@@ -978,8 +979,28 @@ export async function saveSettings(settings) {
 }
 
 export async function getSessionState() {
-  const row = await idb.get(STORES.meta, 'session');
-  return row ? { ...EMPTY_SESSION, ...row.value } : { ...EMPTY_SESSION };
+  const result = await idb.updateSession((stored) => {
+    const session = { ...EMPTY_SESSION, ...stored };
+    // Upgrade a running legacy session once, under the same cross-tab transaction.
+    if (session.active && !session.sessionId) session.sessionId = crypto.randomUUID();
+    return { session };
+  });
+  return result.session;
+}
+
+/** No evaluations/times are invented: existing records have already been saved. */
+export async function finishStudySession(sessionId) {
+  const endedAt = new Date().toISOString();
+  return idb.updateSession((stored) => {
+    if (!stored?.active || stored.sessionId !== sessionId) return { ended: false };
+    const eventId = `study_end_${sessionId}`;
+    return {
+      ended: true,
+      session: { ...EMPTY_SESSION, questionElapsed: {} },
+      event: { key: `replan:${eventId}`, type: 'replan', id: eventId, queuedAt: Date.now(),
+        event: { eventId, sessionId, date: dateKeyOf(endedAt), endedAt } },
+    };
+  });
 }
 
 export async function setSessionState(value) {

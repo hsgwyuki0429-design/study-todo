@@ -171,6 +171,7 @@ export function normalizeActive(raw) {
     taskId: raw.taskId.slice(0, 80),
     ...(typeof raw.questionId === "string" && raw.questionId ? { questionId: raw.questionId.slice(0, 120) } : {}),
     ...(typeof raw.deviceId === "string" && raw.deviceId ? { deviceId: raw.deviceId.slice(0, 80) } : {}),
+    ...(typeof raw.sessionId === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(raw.sessionId) ? { sessionId: raw.sessionId } : {}),
     startedAt: typeof raw.startedAt === "string" ? raw.startedAt : null,
     expiresAt: typeof raw.expiresAt === "string" ? raw.expiresAt : null,
   };
