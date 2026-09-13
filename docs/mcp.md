@@ -6,7 +6,7 @@ study-todo の学習データを Cloudflare に預けて、Claude などの MCP 
 ```
 study-todo（PWA・IndexedDB）
       ↓↑  端末キーで守られた同期
-Cloudflare Worker + KV
+Cloudflare Worker + Durable Object（+ KV は引っ越し元として残る）
       ↓↑  接続トークン（read / write）
 MCP Server（/mcp）
       ↓↑
@@ -171,17 +171,147 @@ OAuth 2.1 + PKCE（S256）に対応しているので、Bearer を直接設定�
 | `getGoals` | 長期の目標 |
 | `getRecentAiChanges` | AIが行った変更の記録 |
 
+| `getPlanChanges` | 予定の変更履歴（いつ・誰が・どの日の・どのタスクを・なぜ） |
+
 ### 変える（`write` の権限が要る）
 
 | Tool | 何をするか |
 |---|---|
-| `updateTodayTasks` | 今日の予定を**置き換える** |
-| `updateTasksForDate` | 指定した日の予定を**置き換える** |
+| `applyTaskChanges` | 予定を**タスク単位で**変える（追加・編集・削除・並べ替え・別の日へ移動） |
+| `undoTaskChanges` | 予定の変更を取り消す（取り消しも新しい変更として記録される） |
+| `updateTodayTasks` | 【古い形】今日の予定を置き換える |
+| `updateTasksForDate` | 【古い形】指定した日の予定を置き換える |
 | `addGoal` | 長期の目標を足す |
 | `updateGoal` | 長期の目標を書き換える |
 
-`updateTodayTasks` / `updateTasksForDate` は追加ではなく置き換えです。
-残したい予定がある場合は、先に `getTodayTasks` で取得して、残す分も含めて渡します。
+---
+
+## 予定の変え方（applyTaskChanges）
+
+AIが予定を変えるときの流れは、いつも同じ4段です。
+
+1. `getTodayTasks` / `getTasksInRange` で、**いまの予定・`task.id`・`revision`・`locked`** を取る
+2. 変えたい**タスクだけ**を `changes` に並べる
+3. 変える**すべての日**（移動元と移動先の両方）の `revision` を `expectedRevisions` に入れる
+4. `operationId`（自分で決める文字列）と `reason`（理由）を付けて呼ぶ
+
+```jsonc
+{
+  "operationId": "2026-09-12-shorten-today",
+  "reason": "今日は30分しか取れないため、2件を明日へ移した",
+  "expectedRevisions": [
+    { "date": "2026-09-12", "revision": 7 },
+    { "date": "2026-09-13", "revision": 2 }
+  ],
+  "changes": [
+    { "op": "move", "taskId": "task_ab12", "fromDate": "2026-09-12", "toDate": "2026-09-13" },
+    { "op": "move", "taskId": "task_cd34", "fromDate": "2026-09-12", "toDate": "2026-09-13" },
+    { "op": "update", "taskId": "task_ef56", "patch": { "questionIds": ["数学I-例題-90"] } },
+    { "op": "add", "date": "2026-09-13", "tempId": "review1",
+      "task": { "questionIds": ["数学I-例題-88"], "kind": "review", "title": "復習" } },
+    { "op": "reorder", "date": "2026-09-13", "taskIds": ["task_ab12", "task_cd34"] }
+  ]
+}
+```
+
+成功すると、変更ID・確定した内容・更新後の revision が返ります。
+
+```jsonc
+{
+  "ok": true,
+  "changeId": "chg_...",
+  "revisions": { "2026-09-12": 8, "2026-09-13": 3 },
+  "summary": {
+    "dates": ["2026-09-12", "2026-09-13"],
+    "moved": [{ "taskId": "task_ab12", "from": "2026-09-12", "to": "2026-09-13" }],
+    "created": [{ "date": "2026-09-13", "taskId": "task_9xyz", "tempId": "review1" }],
+    "removed": [], "updated": [{ "date": "2026-09-12", "taskId": "task_ef56" }]
+  },
+  "days": [ /* 変更後のその日の予定 */ ]
+}
+```
+
+決めごとは次のとおりです。
+
+- **IDは作るときだけ発行**します。編集しても、別の日へ移しても `task.id` は変わりません。
+- **指定しなかったタスクと項目はそのまま**残ります（`patch` に入れた項目だけが変わります）。
+- **全部成功か、全部未反映か**のどちらかです。1つでも通らなければ1件も変わりません。
+- **同じ `operationId` を送り直しても二重になりません**（前回と同じ結果が `replayed: true` で返ります）。
+  同じ `operationId` で内容だけ違う要求は断られます。
+- 存在しないタスクID・問題ID・不正な操作は、**変更を始める前に**確かめて断ります。
+
+### 断られたときの読み方
+
+| `error` | 意味 | 次にすること |
+|---|---|---|
+| `revision_conflict` | ほかの端末かAIが先に変更した | `getTasksInRange` で取り直して組み立て直す |
+| `missing_revision` | 変える日の revision が渡されていない | その日を `expectedRevisions` に足す |
+| `task_not_found` | タスクIDが古い／その日にない | 取り直す |
+| `protected_task` | 完了済み・実行中・固定のタスク | 触らずに、ほかのタスクで調整する |
+| `unknown_question` | 問題IDが問題マスタにない | `listQuestions` で確かめる |
+| `operation_conflict` | 同じ `operationId` で内容が違う | 新しい `operationId` を付ける |
+| `invalid_input` | 形が正しくない | メッセージの `field` を直す |
+| `permission_denied` | 利用者が「予定を変更する」を許可していない | 設定画面での許可を促す |
+| `storage_not_atomic` | サーバーの保存先の設定が古い | 下の「保存先の移行」を利用者に伝える |
+
+### 古い形（updateTodayTasks / updateTasksForDate）
+
+残してありますが、**その日の全置き換え**です。いまは中でタスク単位の変更へ直されるので、
+
+- 内容が同じタスクのIDは保たれます（`id` を渡せば確実です）
+- 完了済み・実行中・固定のタスクは、この経路でも消えず・変わりません
+- `expectedRevision` を渡せば、古い内容で新しい内容を上書きしません（強く推奨）
+- `completed: true` は渡せません（完了になるのは実際に学習したときだけ）
+
+新しく書くときは `applyTaskChanges` を使ってください。
+
+---
+
+## 守られるタスク（AIが動かせないもの）
+
+`getTodayTasks` / `getTasksInRange` が返すタスクには `locked` と `lockedReason` が付きます。
+
+| `lockedReason` | 何か | 解除できる人 |
+|---|---|---|
+| `completed` | もう終わったタスク | （学習の結果なので解除しない） |
+| `running` | いま解いているタスク | 端末が知らせるのをやめれば自然に外れる |
+| `pinned` | 利用者が固定したタスク | **利用者だけ**（study-todo のホーム画面の「固定」ボタン） |
+
+固定の付け外しは `/api/sync/pin`（端末キーが要る）だけで行えます。MCPには固定を付けるツールも
+外すツールもないので、AIが自分で保護を外すことはできません。
+
+### 「実行中」の限界（できていないこと）
+
+実行中かどうかは、**アプリがオンラインのときに知らせてきた範囲**でしか分かりません。
+
+- 端末は学習を始めたとき・問題を切り替えたとき、それに5分ごとに知らせます（期限つき・既定15分）。
+- **圏外・機内モード・アプリを閉じている**あいだは知らせが届かないので、
+  その端末で解いているタスクをAIが移したり消したりできてしまいます。
+- ただし、そのときも**学習記録・チャレンジ結果・タイマーは壊れません**。
+  記録は追加専用のイベントで、予定の変更とは別に `id` で重ね合わされます。
+  端末のタイマーはその端末の中だけで動いていて、同期で止まることも消えることもありません。
+  予定から消えたタスクの問題を解いた記録も、そのまま残ります。
+
+つまり「実行中の保護」は**完全ではありません**。確実に守りたいタスクは「固定」を使ってください。
+
+---
+
+## 変更履歴と取り消し
+
+一括変更ごとに、変更前後・対象のタスク・対象の日・実行者・日時・理由を残しています。
+
+- AIからは `getPlanChanges`（`includeDetail: true` で変更前後の中身も）
+- アプリからは **設定 → AI連携 / 同期 → 最近の予定の変更**
+- 取り消しは、アプリの「取り消す」ボタンか、AIの `undoTaskChanges`
+
+取り消しは履歴を消す操作ではなく、**打ち消す変更を新しく1件作って記録**します。
+次のときは何も変えずに `undo_conflict` を返します。
+
+- そのあとに学習が進んだ（完了になった）
+- そのあとに別の変更が入って、対象のタスクの中身が変わった
+- 対象のタスクが固定された／いま解かれている
+
+学習記録とチャレンジ結果は取り消しの対象になりません（予定だけが戻ります）。
 
 ### 同期されるもの・されないもの
 
@@ -189,7 +319,10 @@ OAuth 2.1 + PKCE（S256）に対応しているので、Bearer を直接設定�
 |---|---|---|
 | 学習記録（StudyRecord） | する | 追加専用イベント。`id` で重複排除。合計はサーバーで数え直す |
 | チャレンジ結果 | する | 追加専用イベント。`id` で重複排除 |
-| その日の予定（TaskPlan） | する | 日付ごとに `revision` と `updatedAt` で新しいほうを採る |
+| その日の予定（TaskPlan） | する | 日付ごとに `revision` と `updatedAt` で新しいほうを採る。別の日へ移したタスクは、移動を知らない端末が送ってきても元の日へ戻さない |
+| 固定（pinned） | する | サーバー側の固定は、端末の同期では消えない（`/api/sync/pin` だけが付け外しできる） |
+| 実行中の知らせ | する（片道・期限つき） | 端末 → サーバーのみ。オフラインの端末のぶんは分からない |
+| 予定の変更履歴 | する | 直近50件。取り消しに使う |
 | 目標（Goal） | する | `id` ごとに `updatedAt` が新しいほうを採る |
 | 問題マスタ | する | 指紋（hash）が変わったときだけ送り直す |
 | セッション状態（タイマー） | **しない** | 計測中の状態はその端末だけのもの |
@@ -198,12 +331,56 @@ OAuth 2.1 + PKCE（S256）に対応しているので、Bearer を直接設定�
 
 ---
 
+## 保存先の移行（KV → Durable Object）
+
+**なぜ必要か。** Cloudflare KV は「最後に書いた人が勝つ」保存先で、
+「読んだときから変わっていなければ書く」（compare-and-swap）ができません。
+世界中に配られるまでの遅れもあります。そのため、
+
+- 期待した revision を確かめてから書く
+- 複数の日を、途中を見せずにまとめて書く
+
+という処理を KV **だけ**では正しく行えません。Durable Object は1つだけ存在する
+オブジェクトで、その中の保存先はトランザクションに対応しているため、
+study-todo（利用者は1人）は Durable Object を1つ（名前 `study-todo`）作り、
+すべての読み書きをそこへ集めます。
+
+**手順。** `wrangler.toml` には設定済みなので、デプロイし直すだけです。
+
+```sh
+npx wrangler deploy
+```
+
+`main` へ push して GitHub Actions に配らせる場合も同じです（`wrangler.toml` に
+`[[migrations]]` が入っているので、Durable Object は配るときに自動で用意されます）。
+
+- 初回アクセスのときに、KV にあった `studytodo:` で始まるデータが
+  自動で Durable Object へ写されます（一度だけ。`server/storage/do-driver.js`）。
+- 写し終えても **KV のデータは消しません**。元の設定に戻すこともできます。
+- 移行できたかは `/health` で分かります。
+
+```sh
+curl -s https://＜あなたのWorkerのURL＞/health
+# {"ok":true,...,"storage":{"driver":"durable-object","atomicBatchUpdates":true,...}}
+```
+
+**移行前（KVのみ）はどうなるか。** 読み取り・端末どうしの同期・目標の変更は
+これまでどおり動きます。予定の変更（`applyTaskChanges` / `updateTodayTasks` /
+`updateTasksForDate` / 取り消し）は、**黙って書かずに** `storage_not_atomic` を返し、
+AIが利用者へ更新を促します。設定画面にも同じ案内が出ます。
+
+手元（Node）で動かすときの保存先はファイルで、1つのプロセスの中で順番待ちをするので
+まとめ書きができます。同じフォルダを複数のプロセスから同時に書く使い方は想定していません。
+
+---
+
 ## 会話の例
 
 - 「今日の青チャートは何をやる予定？」 → `getTodayTasks`
 - 「最近の△と✕を見て弱点を教えて」 → `getRecentMistakes` ＋ `getStudyStats`
-- 「今日30分しかないから、やる問題を減らして」 → `getTodayTasks` → `updateTodayTasks`
-- 「例題50〜65を3日間に分けて」 → `listQuestions` → `updateTasksForDate` を3回
+- 「今日30分しかないから、一部を明日に回して」 → `getTasksInRange`（今日・明日）→ `applyTaskChanges`（`move` を並べる）
+- 「例題50〜65を3日間に分けて」 → `listQuestions` → `applyTaskChanges` 1回（3日ぶんの `add`）
+- 「さっきの変更を取り消して」 → `getPlanChanges` → `undoTaskChanges`
 - 「最近、計算ミスと方針ミスはどちらが多い？」 → `getRecentMistakes`（`calcErrors` / `wrongApproaches`）
 - 「明日は例題84〜92と復習3問に変更して」 → `listQuestions` → `updateTasksForDate`
 
@@ -238,5 +415,8 @@ npm test        # = node --test
 | AIが「接続トークンが正しくありません」と言う | 設定画面でトークンを再発行して入れ直す |
 | AIが「権限がありません」と言う | 設定画面の「権限：予定を変更する」を許可する |
 | 予定を変えたのに端末へ反映されない | その端末で「いますぐ同期」を押す（起動時とオンライン復帰時にも同期します） |
+| AIが「storage_not_atomic」と言う | 「保存先の移行」に従って `npx wrangler deploy` をやり直す |
+| AIが「このタスクは変更できません」と言う | 完了済み・実行中・固定のタスク。固定はホーム画面の「固定」ボタンで外せる |
+| AIが予定を変えすぎた | 設定 → AI連携 / 同期 → 最近の予定の変更 → 「取り消す」 |
 | 端末を無くした | 設定画面で同期コードを発行しなおし、接続トークンも再発行する |
 | Claude.ai で「認証に失敗しました」と出る | Worker を最新版にデプロイし直す（claude.ai からの呼び出しを許可し、`/mcp` 付きの案内と `resource` に対応したのは新しい版）。そのうえで、コネクタを一度削除してから登録しなおす |

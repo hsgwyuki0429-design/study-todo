@@ -5,9 +5,43 @@ import * as api from './api.js';
 import { EVALUATIONS, EVAL_MAP } from './api.js';
 import { state, q, qLabel, render, refreshToday } from './state.js';
 import { $, el, fmtMS, fmtShort, row, segmented, emptyState } from './ui.js';
-import { syncInBackground } from './cloud-sync.js';
+import { pushPin, reportActivity, syncInBackground } from './cloud-sync.js';
 
 const persist = () => api.setSessionState(state.session);
+
+/* ================================================================== */
+/* 実行中であることの知らせ                                            */
+/* ================================================================== */
+
+/**
+ * 「いまこのタスクを解いている」ことをクラウドへ知らせる。
+ *
+ * AIが実行中のタスクを勝手に動かさないようにするための情報で、
+ * 送れなくても学習は止めない（圏外なら保護が効かないだけ）。
+ * タイマーそのものはこの端末の中だけで動いており、同期で壊れることはない。
+ */
+function announceActivity(questionId) {
+  const task = questionId
+    ? state.tasks.find((t) => (t.questionIds ?? []).includes(questionId) && !t.completed)
+    : null;
+  const date = api.todayKey();
+  reportActivity(date, task?.id ?? null, questionId ?? null).catch(() => {});
+}
+
+/**
+ * 学習中のあいだ、ときどき同じ知らせを送り直す。
+ * サーバーは期限つきで預かるので、送り直さないと実行中ではなくなる。
+ */
+export function heartbeatActivity() {
+  const s = state.session;
+  if (!s.currentStartedAt || !s.currentQuestionId) return;
+  announceActivity(s.currentQuestionId);
+}
+
+/** 学習をやめた・止めたときに、実行中の知らせを取り下げる。 */
+function clearActivity() {
+  reportActivity(api.todayKey(), null).catch(() => {});
+}
 
 /* ================================================================== */
 /* タイマー（絶対時刻ベース）                                          */
@@ -57,6 +91,7 @@ function startQuestion(questionId) {
   s.currentQuestionId = questionId;
   s.currentStartedAt = new Date().toISOString();
   if (!s.sessionStartedAt) s.sessionStartedAt = new Date().toISOString();
+  announceActivity(questionId);
 }
 
 const isPaused = () => !state.session.sessionStartedAt;
@@ -128,6 +163,7 @@ async function startSession() {
 async function endSession() {
   commitCurrent();
   commitSession();
+  clearActivity();
   state.session = { ...api.EMPTY_SESSION, questionElapsed: {} };
   await persist();
   render();
@@ -141,6 +177,7 @@ async function togglePause() {
   } else {
     commitCurrent();
     commitSession();
+    clearActivity();
   }
   await persist();
   render();
@@ -186,6 +223,7 @@ async function openChallenge(task) {
   s.challengeFinishedElapsed = null;
   if (!s.sessionStartedAt) s.sessionStartedAt = new Date().toISOString();
   startQuestion(task.questionIds[0]);
+  reportActivity(api.todayKey(), task.id, task.questionIds[0]).catch(() => {});
   await persist();
   render();
 }
@@ -418,6 +456,28 @@ function stateCells(questionId) {
   return [pill, time];
 }
 
+/**
+ * 固定（ピン留め）の切り替えボタン。
+ * 固定したタスクはAIから変更・削除・移動されない。外せるのはここからだけで、
+ * AI側には固定を外す手段がない。
+ */
+function pinButton(task) {
+  const pinned = task.pinned === true;
+  const node = el('button', `pin-btn${pinned ? ' pinned' : ''}`, pinned ? '固定中' : '固定');
+  node.title = pinned
+    ? 'AIが動かさないように固定しています。押すと解除します。'
+    : '押すと固定します。固定したタスクはAIが変更・削除・移動できません。';
+  node.onclick = async (event) => {
+    event.stopPropagation();
+    await api.setTaskPinned(task.id, !pinned);
+    // クラウドにも伝える（届かなくても、次の同期で送られる）。
+    pushPin(task.date, task.id, !pinned).catch(() => {});
+    state.tasks = await api.getTodayTasks();
+    render();
+  };
+  return node;
+}
+
 const challengeSub = (task) =>
   `${task.questionIds.length}問 / ${Math.round((task.timeLimitSeconds ?? 0) / 60)}分`;
 
@@ -444,6 +504,7 @@ function idlePanel(panel) {
         row({
           title: task.kind === 'challenge' ? task.title ?? 'チャレンジ' : groupLabel(task.questionIds),
           sub: task.kind === 'challenge' ? challengeSub(task) : first ? `${first.chapter} ・ ${first.section}` : null,
+          right: pinButton(task),
         })
       );
     }

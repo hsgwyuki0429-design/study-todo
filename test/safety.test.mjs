@@ -68,3 +68,37 @@ test("読み取りツールには readOnlyHint が付いている", () => {
     if (tool.scope === "write") assert.equal(tool.annotations.readOnlyHint, false);
   }
 });
+
+test("AIは完了の印を付けられない", async () => {
+  const { app } = createTestApp();
+  const token = await enableAiLink(app);
+  const device = await joinDevice(app);
+  await call(app, "/api/sync/push", {
+    method: "POST",
+    token: device.deviceKey,
+    body: { questions: { questions: QUESTIONS } },
+  });
+  const result = await callTool(app, token, "updateTasksForDate", {
+    date: "2026-09-13",
+    tasks: [{ questionIds: [QUESTIONS[0].id], kind: "new", completed: true }],
+  });
+  assert.equal(result.error, "invalid_input");
+  // 新しい経路には completed そのものが無い。
+  const apply = createTools().find((tool) => tool.name === "applyTaskChanges");
+  const body = apply.inputSchema.properties.changes.items.properties.patch;
+  assert.ok(!("completed" in body.properties));
+  assert.ok(!("pinned" in body.properties));
+});
+
+test("予定を変えるツールには、保護と競合の説明が入っている", () => {
+  const tools = createTools();
+  const apply = tools.find((tool) => tool.name === "applyTaskChanges");
+  assert.match(apply.description, /固定/);
+  assert.match(apply.description, /operationId/);
+  assert.equal(apply.inputSchema.required.includes("expectedRevisions"), true);
+  assert.equal(apply.inputSchema.required.includes("operationId"), true);
+  for (const name of ["updateTodayTasks", "updateTasksForDate"]) {
+    const tool = tools.find((entry) => entry.name === name);
+    assert.match(tool.description, /完了済み・実行中・固定/);
+  }
+});

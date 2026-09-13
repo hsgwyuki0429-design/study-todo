@@ -158,6 +158,70 @@ export async function leaveDevice() {
 }
 
 /* ------------------------------------------------------------------ */
+/* 予定まわりの個別の操作（端末キーで呼ぶ）                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 固定（ピン留め）をサーバーへも伝える。
+ * 固定はAIから外せない印なので、付け外しはこの端末からの操作でしか起きない。
+ * 同期していない・オフラインのときは、ローカルの印だけが残り、次の同期で送られる。
+ */
+export async function pushPin(date, taskId, pinned) {
+  const config = await getCloudConfig();
+  if (!isActive(config)) return { ok: false, reason: 'disabled' };
+  try {
+    return await request(config, '/api/sync/pin', {
+      method: 'POST',
+      body: { date, taskId, pinned },
+      token: config.deviceKey,
+    });
+  } catch (error) {
+    return { ok: false, reason: 'error', message: error.message };
+  }
+}
+
+/**
+ * 「いまこのタスクを解いている」ことをサーバーへ知らせる。
+ *
+ * これはAIが実行中のタスクを動かさないようにするための情報で、
+ * 期限つき（既定15分）で預けられる。圏外のときは届かないので、
+ * サーバーが知っている実行中の状態は「オンラインの端末のぶんだけ」である。
+ * 届かなくても学習は止めないし、ローカルのタイマーも記録も一切変わらない。
+ */
+export async function reportActivity(date, taskId, questionId = null) {
+  const config = await getCloudConfig();
+  if (!isActive(config)) return { ok: false, reason: 'disabled' };
+  try {
+    return await request(config, '/api/sync/activity', {
+      method: 'POST',
+      body: { date, taskId, questionId },
+      token: config.deviceKey,
+    });
+  } catch {
+    // 知らせられなくても学習は続く（保護が効かないだけ）。
+    return { ok: false, reason: 'offline' };
+  }
+}
+
+/** 予定の変更履歴を取る（設定画面の「最近の予定の変更」に出す）。 */
+export async function fetchPlanChanges(limit = 10) {
+  const config = await getCloudConfig();
+  if (!isLinked(config)) return { entries: [] };
+  return request(config, `/api/sync/changes?limit=${limit}`, { token: config.deviceKey });
+}
+
+/** 変更を取り消す。安全に戻せないときはサーバーが断り、何も変わらない。 */
+export async function undoPlanChange(changeId) {
+  const config = await getCloudConfig();
+  if (!isLinked(config)) throw new CloudError('この端末はまだ同期に参加していません。');
+  return request(config, '/api/sync/undo', {
+    method: 'POST',
+    body: { changeId, operationId: `undo_${changeId}_${Date.now().toString(36)}` },
+    token: config.deviceKey,
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* 同期                                                                */
 /* ------------------------------------------------------------------ */
 

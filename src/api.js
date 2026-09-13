@@ -268,7 +268,9 @@ export async function setPlanMeta(date, patch) {
 export async function updateTodayTasks(tasks, date = todayKey(), { markDirty = true, updatedBy = 'app' } = {}) {
   const existing = await idb.byIndex(STORES.tasks, 'date', date);
   await Promise.all(existing.map((t) => idb.del(STORES.tasks, t.id)));
+  const now = new Date().toISOString();
   const normalized = tasks.map((t, i) => ({
+    // IDは渡されたものを必ず残す。作り直すと、クラウド側の同じタスクと結び付かなくなる。
     id: t.id || uid('task'),
     date,
     questionIds: t.questionIds || [],
@@ -276,6 +278,11 @@ export async function updateTodayTasks(tasks, date = todayKey(), { markDirty = t
     order: t.order ?? i,
     ...(t.timeLimitSeconds ? { timeLimitSeconds: t.timeLimitSeconds } : {}),
     completed: !!t.completed,
+    // 利用者が固定した印。古いデータには無いので false として補う。
+    pinned: t.pinned === true,
+    createdAt: t.createdAt ?? now,
+    updatedAt: t.updatedAt ?? now,
+    ...(t.source ? { source: t.source } : {}),
     ...(t.title ? { title: t.title } : {}),
   }));
   await idb.putAll(STORES.tasks, normalized);
@@ -313,6 +320,16 @@ export async function getRecordedByDate() {
     (map[day] ??= new Set()).add(r.questionId);
   });
   return map;
+}
+
+/** 固定（ピン留め）の付け外し。利用者だけが行える操作。 */
+export async function setTaskPinned(taskId, pinned) {
+  const task = await idb.get(STORES.tasks, taskId);
+  if (!task) return null;
+  const next = { ...task, pinned: pinned === true, updatedAt: new Date().toISOString() };
+  await idb.put(STORES.tasks, next);
+  await setPlanMeta(task.date, { updatedAt: next.updatedAt, dirty: true, updatedBy: 'app' });
+  return next;
 }
 
 export async function saveTask(task) {

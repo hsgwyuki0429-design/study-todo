@@ -90,60 +90,142 @@ export function normalizeTaskPlan(raw, { date = null, updatedBy = "app", now = D
   const planDate = date ?? source.date;
   if (!isDateKey(planDate)) return null;
   const tasks = Array.isArray(source.tasks) ? source.tasks : [];
+  const at = new Date(now).toISOString();
   return {
     date: planDate,
-    tasks: tasks.slice(0, 100).map((task, index) => normalizeTask(task, index)).filter(Boolean),
+    tasks: tasks.slice(0, 100).map((task, index) => normalizeTask(task, index, { now: at })).filter(Boolean),
     updatedAt: typeof source.updatedAt === "string" && Number.isFinite(Date.parse(source.updatedAt))
       ? source.updatedAt
-      : new Date(now).toISOString(),
+      : at,
     revision: Number.isFinite(Number(source.revision)) ? Math.max(0, Math.floor(Number(source.revision))) : 0,
     updatedBy: typeof source.updatedBy === "string" ? source.updatedBy.slice(0, 60) : updatedBy,
+    ...(isObject(source.active) ? { active: normalizeActive(source.active) } : {}),
   };
 }
 
-export function normalizeTask(raw, index = 0) {
+/** 端末が知らせてきた「いま解いている」状態。期限つきで預かる。 */
+export function normalizeActive(raw) {
+  if (!isObject(raw) || typeof raw.taskId !== "string" || !raw.taskId) return null;
+  return {
+    taskId: raw.taskId.slice(0, 80),
+    ...(typeof raw.questionId === "string" && raw.questionId ? { questionId: raw.questionId.slice(0, 120) } : {}),
+    ...(typeof raw.deviceId === "string" && raw.deviceId ? { deviceId: raw.deviceId.slice(0, 80) } : {}),
+    startedAt: typeof raw.startedAt === "string" ? raw.startedAt : null,
+    expiresAt: typeof raw.expiresAt === "string" ? raw.expiresAt : null,
+  };
+}
+
+/**
+ * タスク1件を整える。
+ *
+ * ID は渡されたものを必ず残す。渡されていないときだけ新しく作る。
+ * （毎回作り直すと、同じタスクを指し示せなくなり、部分更新も履歴もできなくなる。）
+ * pinned（利用者が固定した印）は、無ければ false として補う。古いデータもそのまま読める。
+ */
+export function normalizeTask(raw, index = 0, { now = null } = {}) {
   if (!isObject(raw)) return null;
   const questionIds = Array.isArray(raw.questionIds)
     ? raw.questionIds.filter((value) => typeof value === "string" && value).slice(0, 100)
     : [];
   const kind = TASK_KINDS.includes(raw.kind) ? raw.kind : "new";
   if (!questionIds.length && !raw.title) return null;
+  const at = now ?? new Date().toISOString();
   return {
     id: typeof raw.id === "string" && raw.id ? raw.id.slice(0, 80) : `task_${index}_${Math.random().toString(36).slice(2, 8)}`,
     questionIds,
     kind,
     order: Number.isFinite(Number(raw.order)) ? Number(raw.order) : index,
     completed: raw.completed === true,
+    pinned: raw.pinned === true,
     ...(Number.isFinite(Number(raw.timeLimitSeconds)) && Number(raw.timeLimitSeconds) > 0
       ? { timeLimitSeconds: Math.round(Number(raw.timeLimitSeconds)) }
       : {}),
     ...(typeof raw.title === "string" && raw.title ? { title: raw.title.slice(0, 120) } : {}),
+    createdAt: typeof raw.createdAt === "string" ? raw.createdAt : at,
+    updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : at,
+    ...(typeof raw.source === "string" ? { source: raw.source.slice(0, 20) } : {}),
   };
 }
 
 /**
- * その日の予定を重ね合わせる。
+ * 端末から届いた予定を、サーバーに預かっているものへ重ねる。
  *
  *   ・サーバーに無ければ、そのまま受け入れる
  *   ・端末が見ていた版（revision）がサーバーと同じなら、受け入れて版を1つ進める
  *   ・食い違っていたら、更新時刻が新しいほうを残す（古い内容で新しい内容を消さない）
+ *
+ * 受け入れるときも、次のものは端末の内容で上書きしない。
+ * 旧い端末や旧いAPIから、保護と競合制御を回り込めないようにするため。
+ *
+ *   ・固定（pinned） … サーバーに固定の印があるタスクは固定のまま
+ *   ・作った時刻     … 端末が知らない場合に消えないように引き継ぐ
+ *   ・別の日へ移したタスク … placements（配置の記録）で弾く。
+ *     移動を知らない端末が、移動前の日の予定を送ってきても復活させない。
  */
-export function mergeTaskPlan(stored, incoming) {
+export function mergeTaskPlan(stored, incoming, { placements = null, now = Date.now() } = {}) {
   if (!incoming) return { plan: stored, outcome: "ignored" };
+  // 端末がサーバーと同じ版を見ていれば、移動を知ったうえでの内容として扱う。
+  // 版が食い違う端末（圏外だった端末など）は、移したタスクを戻せない。
+  const upToDate = Number(incoming.revision ?? 0) === Number(stored?.revision ?? 0);
+  const filtered = upToDate ? incoming : applyPlacements(incoming, placements);
+  const revived = (incoming.tasks ?? []).length - (filtered.tasks ?? []).length;
   if (!stored) {
-    return { plan: { ...incoming, revision: Math.max(1, incoming.revision || 1) }, outcome: "created" };
+    return {
+      plan: { ...filtered, revision: Math.max(1, filtered.revision || 1) },
+      outcome: "created",
+      droppedTasks: revived,
+    };
   }
-  const sameRevision = Number(incoming.revision ?? 0) === Number(stored.revision ?? 0);
-  if (sameRevision) {
-    return { plan: { ...incoming, revision: Number(stored.revision ?? 0) + 1 }, outcome: "applied" };
+  const carry = (plan) => carryProtections(stored, plan, now);
+  if (upToDate) {
+    return {
+      plan: { ...carry(filtered), revision: Number(stored.revision ?? 0) + 1 },
+      outcome: "applied",
+      droppedTasks: revived,
+    };
   }
-  const incomingAt = Date.parse(incoming.updatedAt ?? "") || 0;
+  const incomingAt = Date.parse(filtered.updatedAt ?? "") || 0;
   const storedAt = Date.parse(stored.updatedAt ?? "") || 0;
   if (incomingAt > storedAt) {
-    return { plan: { ...incoming, revision: Number(stored.revision ?? 0) + 1 }, outcome: "applied-newer" };
+    return {
+      plan: { ...carry(filtered), revision: Number(stored.revision ?? 0) + 1 },
+      outcome: "applied-newer",
+      droppedTasks: revived,
+    };
   }
   // 端末側が古い。サーバーの内容を残し、そのまま返して端末に取り込ませる。
-  return { plan: stored, outcome: "kept-server" };
+  return { plan: stored, outcome: "kept-server", droppedTasks: revived };
+}
+
+/**
+ * 「このタスクは今どの日にあるか」の記録で、届いた予定をふるいにかける。
+ * 別の日へ移したタスクを、移動を知らない端末が元の日へ戻すのを防ぐ。
+ * 最新の版を見ている端末（upToDate）には、このふるいをかけない。
+ */
+export function applyPlacements(plan, placements) {
+  if (!placements || !plan) return plan;
+  const tasks = (plan.tasks ?? []).filter((task) => {
+    const placement = placements[task.id];
+    return !placement || placement.date === plan.date;
+  });
+  return { ...plan, tasks };
+}
+
+/** 保護に関わる項目は、端末の内容で消させない。 */
+function carryProtections(stored, incoming, now) {
+  const storedById = new Map((stored.tasks ?? []).map((task) => [task.id, task]));
+  const tasks = (incoming.tasks ?? []).map((task) => {
+    const before = storedById.get(task.id);
+    if (!before) return task;
+    return {
+      ...task,
+      // 固定はサーバー側を正とする。外せるのは専用の操作（/api/sync/pin）だけ。
+      pinned: before.pinned === true ? true : task.pinned === true,
+      createdAt: before.createdAt ?? task.createdAt,
+    };
+  });
+  const active = stored.active && Date.parse(stored.active.expiresAt ?? "") > now ? stored.active : undefined;
+  return { ...incoming, tasks, ...(active ? { active } : {}) };
 }
 
 /** 目標は id ごとに、更新時刻が新しいほうを採る。消した印（deletedAt）も引き継ぐ。 */

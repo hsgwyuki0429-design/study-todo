@@ -13,6 +13,7 @@ import { PermissionError, requireScope } from "./auth/tokens.js";
 import { ValidationError } from "./core/validate.js";
 import { SERVICE_LIMITS } from "./service/study-service.js";
 import { EVALUATIONS, MISTAKE_EVALUATIONS, TASK_KINDS } from "./service/merge.js";
+import { CHANGE_LIMITS } from "./service/task-changes.js";
 
 const TIMEZONE_PROPERTY = {
   type: "integer",
@@ -33,6 +34,11 @@ const TASK_ITEM_SCHEMA = {
   additionalProperties: false,
   description: "予定1件。「例題90〜92を解く」のようなまとまりを1件とする。",
   properties: {
+    id: {
+      type: "string",
+      maxLength: 80,
+      description: "すでにある予定を残すときは、その task.id をそのまま渡す。渡すとIDが保たれ、学習中の状態や固定も引き継がれる。新しく作る予定では渡さない。",
+    },
     questionIds: {
       type: "array",
       items: { type: "string" },
@@ -55,17 +61,89 @@ const TASK_ITEM_SCHEMA = {
       maximum: 21600,
       description: "制限時間（秒）。主に kind=challenge で使う。省略するとカウントアップ（制限なし）になる。",
     },
-    order: { type: "integer", minimum: 0, maximum: 999, description: "並び順。省略すると配列の順番になる。" },
-    completed: { type: "boolean", description: "すでに終わったものとして置く場合だけ true。ふつうは指定しない（学習の実績は study-todo 本体が記録する）。" },
+    order: { type: "integer", minimum: 0, maximum: 999, description: "並び順。渡された tasks の並びがそのまま順番になるので、ふつうは指定しなくてよい。" },
+    completed: { type: "boolean", description: "指定できない。完了になるのは study-todo で実際に学習したときだけで、AIからは付けられない（true を渡すと断られる）。" },
   },
 };
 
 const REPLACE_NOTE = [
+  "【古い形。ふつうは applyTaskChanges を使うこと】",
   "この操作は、その日の予定を **まるごと置き換える**（追加ではない）。",
   "いま入っている予定を残したい場合は、先に getTodayTasks / getTasksInRange で取得し、",
   "残す予定も含めた全体を tasks に渡すこと。tasks に空配列を渡すとその日の予定は空になる。",
+  "渡された内容は中でタスク単位の変更へ直され、内容が同じタスクのIDは保たれる。",
+  "完了済み・実行中・固定（locked が true）のタスクは、この操作でも変更・削除できず、そのまま残る。",
   "この操作で学習記録が消えることはない。変えられるのは「これからやる予定」だけ。",
 ].join("");
+
+/** 変更の対象になる日と、その日の revision。 */
+const EXPECTED_REVISIONS_SCHEMA = {
+  type: "array",
+  minItems: 1,
+  maxItems: CHANGE_LIMITS.datesPerRequest,
+  description: "変更する日すべての「今の revision」。移動するときは移動元と移動先の両方が必要。"
+    + " getTodayTasks / getTasksInRange が返した revision をそのまま渡す。まだ予定が無い日は 0。"
+    + " 1日でも食い違うと、1件も変更せずに競合として返す。",
+  items: {
+    type: "object",
+    additionalProperties: false,
+    required: ["date", "revision"],
+    properties: {
+      date: DATE_PROPERTY,
+      revision: { type: "integer", minimum: 0, description: "その日の予定の版。予定がまだ無い日は 0。" },
+    },
+  },
+};
+
+const TASK_BODY_PROPERTIES = {
+  questionIds: {
+    type: "array",
+    items: { type: "string" },
+    maxItems: CHANGE_LIMITS.questionIdsPerTask,
+    description: "この予定で解く問題のID（listQuestions が返す question.id）。空にする場合は title が必要。",
+  },
+  kind: { type: "string", enum: [...TASK_KINDS], description: "予定の種類。省略すると new。" },
+  title: { type: "string", maxLength: 120, description: "画面に出す見出し。問題IDを伴わない予定では必須。" },
+  timeLimitSeconds: { type: "integer", minimum: 60, maximum: 21600, description: "制限時間（秒）。主に kind=challenge で使う。" },
+  position: { type: "integer", minimum: 0, maximum: CHANGE_LIMITS.tasksPerDay, description: "その日の中での位置（0が先頭）。省略すると最後。" },
+};
+
+const CHANGE_SCHEMA = {
+  type: "object",
+  description: "変更1つ。op で何をするかを決め、必要な項目だけを渡す。",
+  required: ["op"],
+  properties: {
+    op: {
+      type: "string",
+      enum: ["add", "update", "remove", "move", "reorder"],
+      description: "add=タスクを足す / update=既存のタスクの項目を変える / remove=消す / move=別の日へ移す（IDは変わらない） / reorder=その日の並びを決める。",
+    },
+    date: { ...DATE_PROPERTY, description: "add・reorder では必須。update・remove では省略でき、その場合は expectedRevisions の日から探す。" },
+    taskId: { type: "string", maxLength: 80, description: "update・remove・move の対象。getTodayTasks が返す task.id。" },
+    tempId: { type: "string", maxLength: 80, description: "add のときの目印。結果の created で、発行された本当のIDと対応が分かる。" },
+    task: {
+      type: "object",
+      additionalProperties: false,
+      description: "add で作る予定の中身。",
+      properties: TASK_BODY_PROPERTIES,
+    },
+    patch: {
+      type: "object",
+      additionalProperties: false,
+      description: "update で変える項目だけ。渡さなかった項目はそのまま残る。",
+      properties: TASK_BODY_PROPERTIES,
+    },
+    fromDate: { ...DATE_PROPERTY, description: "move の移動元。省略すると expectedRevisions の日から探す。" },
+    toDate: { ...DATE_PROPERTY, description: "move の移動先。必須。" },
+    position: { type: "integer", minimum: 0, maximum: CHANGE_LIMITS.tasksPerDay, description: "move したあとの位置。省略すると最後。" },
+    taskIds: {
+      type: "array",
+      items: { type: "string", maxLength: 80 },
+      maxItems: CHANGE_LIMITS.tasksPerDay,
+      description: "reorder のときの、その日のタスクIDを希望する順に並べたもの。過不足があると断られる。",
+    },
+  },
+};
 
 /**
  * ツールを定義する。権限の確認と、失敗したときの伝え方をここで揃える。
@@ -307,6 +385,84 @@ export function createTools() {
     }),
 
     defineTool({
+      name: "applyTaskChanges",
+      title: "予定をタスク単位で変更",
+      description: [
+        "予定を、タスク単位で安全に変更する。予定を変えるときはこれを使う（updateTodayTasks は古い形）。",
+        "流れは 1) getTodayTasks / getTasksInRange で今の予定・task.id・revision・locked を取る",
+        "2) 変えたいタスクだけを changes に並べる 3) 変える日すべての revision を expectedRevisions に入れる。",
+        "複数の日の変更（「今日から2件消して明日に足す」など）も1回で渡すこと。",
+        "すべての確認を通ったときだけ適用され、1つでも通らなければ1件も変更しない。",
+        "移動（move）ではタスクIDは変わらない。追加のときだけ新しいIDが発行される。",
+        "完了済み・実行中・利用者が固定したタスク（locked が true）は変更・削除・移動できない。",
+        "通信が切れて同じ要求を送り直すときは、同じ operationId を使えば二重に適用されない。",
+        "学習記録とチャレンジ結果はこの操作では一切変わらない。",
+      ].join(""),
+      scope: "write",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          operationId: {
+            type: "string",
+            maxLength: CHANGE_LIMITS.operationIdLength,
+            description: "この一括変更を表す、自分で決める文字列。送り直すときは同じ値にする（同じ値・同じ内容なら前回の結果が返るだけで、二重に適用されない）。同じ値で内容が違うと断られる。",
+          },
+          expectedRevisions: EXPECTED_REVISIONS_SCHEMA,
+          changes: {
+            type: "array",
+            minItems: 1,
+            maxItems: CHANGE_LIMITS.changesPerRequest,
+            description: "行う変更の並び。上から順に適用される。",
+            items: CHANGE_SCHEMA,
+          },
+          reason: {
+            type: "string",
+            maxLength: CHANGE_LIMITS.reasonLength,
+            description: "なぜこの変更をするか（例: 今日は30分しか時間が取れないため、2件を明日へ移した）。履歴に残り、利用者が画面で確認できる。",
+          },
+        },
+        required: ["operationId", "expectedRevisions", "changes"],
+      },
+      run: (args, { service, actor }) => service.applyTaskChanges(args, actor),
+    }),
+
+    defineTool({
+      name: "getPlanChanges",
+      title: "予定の変更履歴",
+      description: "予定の一括変更の履歴（いつ・誰が・どの日の・どのタスクを・なぜ変えたか）を新しい順に返す。changeId は undoTaskChanges に渡せる。学習記録は履歴の対象ではない。",
+      scope: "read",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          limit: { type: "integer", minimum: 1, maximum: 50, description: "返す件数。既定は10。" },
+          includeDetail: { type: "boolean", description: "true にすると、変更前後の予定そのものも返す。" },
+        },
+      },
+      run: (args, { service }) => service.getPlanChanges(args),
+    }),
+
+    defineTool({
+      name: "undoTaskChanges",
+      title: "予定の変更を取り消す",
+      description: [
+        "getPlanChanges で分かる変更を取り消す。changeId を省くといちばん新しい変更が対象。",
+        "取り消しは履歴を消す操作ではなく、打ち消す変更を新しく1件作って記録する。",
+        "その変更のあとに学習が進んだ・別の変更が入った・対象が固定されたなどで安全に戻せない場合は、",
+        "何も変えずに undo_conflict を返す。学習記録とチャレンジ結果は取り消しの対象にならない。",
+      ].join(""),
+      scope: "write",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          changeId: { type: "string", maxLength: 80, description: "取り消す変更のID。省略するといちばん新しい変更。" },
+          operationId: { type: "string", maxLength: CHANGE_LIMITS.operationIdLength, description: "送り直しても二重にならないようにするための、自分で決める文字列。" },
+          reason: { type: "string", maxLength: CHANGE_LIMITS.reasonLength, description: "取り消す理由。履歴に残る。" },
+        },
+      },
+      run: (args, { service, actor }) => service.undoTaskChanges(args, actor),
+    }),
+
+    defineTool({
       name: "updateTodayTasks",
       title: "今日の予定を変更",
       description: `今日（date を渡せばその日）の予定を書き換える。${REPLACE_NOTE} 「30分しかないから減らして」のような依頼では、先に getTodayTasks で今の予定を取り、残す問題だけを tasks に入れて渡す。`,
@@ -321,6 +477,9 @@ export function createTools() {
             items: TASK_ITEM_SCHEMA,
           },
           date: { ...DATE_PROPERTY, description: "変更する日。省略すると今日（日本時間 UTC+9 で判定）。" },
+          expectedRevision: { type: "integer", minimum: 0, description: "この日の予定について、直前に読み取った revision。渡すと、その間に他の変更が入っていた場合は何も変えずに競合として返す。強く推奨。" },
+          operationId: { type: "string", maxLength: CHANGE_LIMITS.operationIdLength, description: "送り直しても二重にならないようにするための、自分で決める文字列。" },
+          reason: { type: "string", maxLength: CHANGE_LIMITS.reasonLength, description: "変更の理由。履歴に残る。" },
           timezoneOffsetMinutes: TIMEZONE_PROPERTY,
         },
         required: ["tasks"],
@@ -337,6 +496,10 @@ export function createTools() {
       inputSchema: {
         properties: {
           date: { ...DATE_PROPERTY, description: "変更する日（YYYY-MM-DD、日本時間）。必須。" },
+          expectedRevision: { type: "integer", minimum: 0, description: "この日の予定について、直前に読み取った revision。渡すと、その間に他の変更が入っていた場合は何も変えずに競合として返す。強く推奨。" },
+          operationId: { type: "string", maxLength: CHANGE_LIMITS.operationIdLength, description: "送り直しても二重にならないようにするための、自分で決める文字列。" },
+          reason: { type: "string", maxLength: CHANGE_LIMITS.reasonLength, description: "変更の理由。履歴に残る。" },
+
           tasks: {
             type: "array",
             maxItems: SERVICE_LIMITS.tasksPerDay,
@@ -408,11 +571,37 @@ export const SERVER_INSTRUCTIONS = `study-todo は、青チャート（数学の
 - 評価は5段階です。perfect(◯完璧) / better_solution(解もっと良い解法) /
   weak_writing(記記述が甘い) / calc_error(△計算ミス) / wrong_approach(✕方針が違った)。
   「弱点」を聞かれたら getRecentMistakes と getStudyStats の weakChapters を見てください。
-- 予定を変えるときは、必ず先に getTodayTasks / getTasksInRange でいまの予定を取得してから、
-  残す予定も含めた全体を updateTodayTasks / updateTasksForDate に渡してください。
-  これらは「置き換え」であり、追加ではありません。
+- 予定を変えるときは、必ず先に getTodayTasks / getTasksInRange で、いまの予定・
+  各タスクの task.id・その日の revision・locked（変更できないタスク）を取得してください。
+  そのうえで applyTaskChanges に「変えたいタスクだけ」を渡します。全体を組み直す必要はありません。
+
+    1. getTasksInRange で today と tomorrow の tasks と revision を取る
+    2. changes に、移したいタスクの { op: "move", taskId, fromDate, toDate } などを並べる
+    3. expectedRevisions に、変える日すべての { date, revision } を入れる
+    4. operationId（自分で決める文字列）と reason（変更の理由）を付けて呼ぶ
+
+  複数の日にまたがる変更も、1回の applyTaskChanges にまとめて渡してください。
+  すべての確認を通ったときだけ適用され、1つでも通らなければ1件も変わりません。
+  通信が切れて送り直すときは、同じ operationId を使えば二重になりません。
+- 変更が断られたときは error を見て次を決めます。
+  revision_conflict＝誰かが先に変更した（取り直してやり直す） /
+  protected_task＝完了済み・実行中・利用者が固定したタスク（触らずに他で調整する） /
+  task_not_found＝IDが古い（取り直す） / unknown_question＝問題IDが違う（listQuestions で確かめる） /
+  operation_conflict＝同じ operationId で違う内容（新しい operationId を付ける） /
+  permission_denied＝利用者が権限を許していない（設定を促す） /
+  storage_not_atomic＝サーバーの保存先の設定が古い（利用者に更新を促す）。
+- 変更したあとは、何をなぜ変えたかを利用者に伝えてください。結果には changeId・
+  確定した内容・更新後の revision が入っています。過去の変更は getPlanChanges で見られ、
+  undoTaskChanges で取り消せます（取り消しも新しい変更として記録されます）。
+- updateTodayTasks / updateTasksForDate は古い形（その日の全置き換え）です。
+  中ではタスク単位の変更へ直され、同じ保護と競合の確認を通りますが、
+  IDや並びを確実に保ちたいときは applyTaskChanges を使ってください。
 - 問題は questionIds に問題ID（listQuestions が返す id）で指定します。「例題90」という
   表示名ではありません。
+- 完了済み・実行中・利用者が固定したタスクは変更できません（locked が true）。
+  固定の付け外しができるのは利用者だけで、AIからは外せません。
+  「実行中」はアプリが知らせてきた範囲でしか分からないため、圏外の端末で解いている
+  タスクまでは守れません。時間帯によっては、利用者に確認してから変えてください。
 - 学習記録とチャレンジ結果は、このサーバーからは作れません。実際に study-todo で
   学習したときだけ記録されます。実績を推測で書き込むことはできません。
 - 予定・目標の変更は、利用者が study-todo の設定画面で「予定を変更する」権限を

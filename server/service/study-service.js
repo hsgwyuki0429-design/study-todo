@@ -16,6 +16,15 @@ import {
 } from "../core/validate.js";
 import { dateKeyOf, isDateKey, normalizeOffset, startOfDayMs, todayKeyOf } from "../../src/datetime.js";
 import { EVALUATIONS, MISTAKE_EVALUATIONS, TASK_KINDS, computeStats } from "./merge.js";
+import {
+  CHANGE_LIMITS,
+  activeStateOf,
+  emptyPlan,
+  parseChangeRequest,
+  planRevisionOf,
+  protectionOf,
+} from "./task-changes.js";
+import { StorageCapabilityError } from "../storage/driver.js";
 import { buildOutline, compareQuestions, questionHaystack } from "../../src/question-order.js";
 
 export const DATA_VERSION = "1.3.0";
@@ -79,7 +88,7 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
         fail(`tasks[${index}] はオブジェクトで渡してください。`, "tasks");
       }
-      rejectUnknownKeys(raw, ["questionIds", "kind", "title", "timeLimitSeconds", "order", "completed"], `tasks[${index}]`);
+      rejectUnknownKeys(raw, ["id", "questionIds", "kind", "title", "timeLimitSeconds", "order", "completed"], `tasks[${index}]`);
       const questionIds = raw.questionIds === undefined
         ? []
         : readArray(raw.questionIds, `tasks[${index}].questionIds`, { max: SERVICE_LIMITS.questionIdsPerTask })
@@ -90,50 +99,226 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         fail(`tasks[${index}] には questionIds か title のどちらかが必要です。`, "tasks");
       }
       const timeLimitSeconds = readInteger(raw.timeLimitSeconds, `tasks[${index}].timeLimitSeconds`, { min: 60, max: 6 * 3600 });
-      if (kind === "challenge" && !timeLimitSeconds && raw.timeLimitSeconds !== null) {
-        // 制限時間なしのチャレンジ（カウントアップ）も許すが、意図を分かるようにしておく。
+      // 「終わったことにする」のは実際に学習した端末だけの仕事。
+      if (raw.completed === true) {
+        fail(`tasks[${index}].completed は指定できません。完了になるのは、study-todo で実際に学習したときだけです。`, "tasks");
       }
       questionIds.forEach((id) => { if (!questions.has(id)) unknown.add(id); });
       return {
-        id: uid("task"),
+        // ID を渡してもらえたら、そのタスクとして扱う（IDは作り直さない）。
+        id: readString(raw.id, `tasks[${index}].id`, { max: 80 }),
         questionIds,
         kind,
-        order: readInteger(raw.order, `tasks[${index}].order`, { min: 0, max: 999, fallback: index }),
-        completed: raw.completed === true,
-        ...(timeLimitSeconds ? { timeLimitSeconds } : {}),
-        ...(title ? { title } : {}),
+        title: title ?? "",
+        timeLimitSeconds: timeLimitSeconds ?? null,
       };
     });
     return { tasks, unknownQuestionIds: [...unknown] };
   }
 
+  const signatureOf = (task) => JSON.stringify([
+    task.kind,
+    task.title ?? "",
+    [...(task.questionIds ?? [])],
+    task.timeLimitSeconds ?? null,
+  ]);
+
+  const sameContent = (stored, incoming) => signatureOf({
+    kind: stored.kind,
+    title: stored.title ?? "",
+    questionIds: stored.questionIds ?? [],
+    timeLimitSeconds: stored.timeLimitSeconds ?? null,
+  }) === signatureOf(incoming);
+
+  /**
+   * 「その日の予定をまるごと置き換える」という古い形の要求を、
+   * タスク単位の変更（追加・変更・削除）へ翻訳する。
+   *
+   * こうする理由は3つある。
+   *   ・同じ内容のタスクはIDを保てる（毎回作り直さない）
+   *   ・完了済み・実行中・固定のタスクを、置き換えでは消せないようにする
+   *   ・新しい経路と同じ競合の確認と履歴の記録を、必ず通す
+   */
+  function planReplacementChanges(stored, incoming, { now: at }) {
+    const storedTasks = [...(stored.tasks ?? [])];
+    const used = new Set();
+    const pairs = new Map();
+
+    incoming.forEach((task, index) => {
+      if (!task.id) return;
+      const match = storedTasks.find((entry) => entry.id === task.id);
+      if (match && !used.has(match.id)) {
+        used.add(match.id);
+        pairs.set(index, match);
+      }
+    });
+    incoming.forEach((task, index) => {
+      if (pairs.has(index)) return;
+      const match = storedTasks.find((entry) => !used.has(entry.id) && sameContent(entry, task));
+      if (match) {
+        used.add(match.id);
+        pairs.set(index, match);
+      }
+    });
+
+    const changes = [];
+    const keptProtected = [];
+    const ignored = [];
+    for (const task of storedTasks) {
+      if (used.has(task.id)) continue;
+      const protection = protectionOf(task, stored, at);
+      if (protection) {
+        keptProtected.push({ taskId: task.id, protection });
+        continue;
+      }
+      changes.push({ op: "remove", taskId: task.id, date: stored.date });
+    }
+
+    incoming.forEach((task, index) => {
+      const match = pairs.get(index);
+      if (!match) {
+        changes.push({
+          op: "add",
+          date: stored.date,
+          task: {
+            questionIds: task.questionIds,
+            kind: task.kind,
+            ...(task.title ? { title: task.title } : {}),
+            ...(task.timeLimitSeconds ? { timeLimitSeconds: task.timeLimitSeconds } : {}),
+            position: index,
+          },
+        });
+        return;
+      }
+      const protection = protectionOf(match, stored, at);
+      if (protection) {
+        if (!sameContent(match, task)) ignored.push({ taskId: match.id, protection });
+        return;
+      }
+      const patch = { position: index };
+      if (!sameContent(match, task)) {
+        patch.questionIds = task.questionIds;
+        patch.kind = task.kind;
+        patch.title = task.title ?? "";
+        patch.timeLimitSeconds = task.timeLimitSeconds ?? null;
+      }
+      if (match.order !== index || Object.keys(patch).length > 1) {
+        changes.push({ op: "update", taskId: match.id, date: stored.date, patch });
+      }
+    });
+
+    return { changes, keptProtected, ignored };
+  }
+
   async function replacePlan({ date, tasks, actor, toolName, args }) {
     const questions = await questionMap();
-    const { tasks: normalized, unknownQuestionIds } = readTasks(tasks, questions);
-    const before = await sync.readTaskPlan(date);
-    const updatedBy = actor?.clientName ? `ai:${actor.clientName}` : "ai";
-    const { plan } = await sync.writeTaskPlan(date, normalized, { updatedBy });
-    await sync.appendLog({
-      clientName: actor?.clientName ?? actor?.tokenLabel ?? "AI",
-      tool: toolName,
-      summary: `${date} の予定を${normalized.length}件に変更（前は${(before?.tasks ?? []).length}件）`,
+    const { tasks: incoming, unknownQuestionIds } = readTasks(tasks, questions);
+    if (unknownQuestionIds.length) {
+      return {
+        ok: false,
+        error: "unknown_question",
+        unknownQuestionIds,
+        message: "問題マスタに無い問題IDが含まれています。予定は変更していません。",
+        nextAction: "listQuestions / searchQuestions で正しい question.id を確かめてください。",
+      };
+    }
+    const stored = (await sync.readTaskPlan(date)) ?? emptyPlan(date);
+    const expectedRevision = args?.expectedRevision === undefined || args?.expectedRevision === null
+      ? planRevisionOf(stored)
+      : readInteger(args.expectedRevision, "expectedRevision", { min: 0, required: true });
+    if (expectedRevision !== planRevisionOf(stored)) {
+      return {
+        ok: false,
+        error: "revision_conflict",
+        conflicts: [{ date, expectedRevision, currentRevision: planRevisionOf(stored) }],
+        message: "渡された expectedRevision が、保存されている予定と食い違っています。",
+        nextAction: "getTodayTasks / getTasksInRange で今の revision を取り直してください。",
+      };
+    }
+
+    const { changes, keptProtected, ignored } = planReplacementChanges(stored, incoming, { now: now() });
+    const protectedNote = keptProtected.length || ignored.length
+      ? "完了済み・実行中・固定のタスクは置き換えでは変えられないため、そのまま残しました。"
+      : null;
+
+    if (!changes.length) {
+      return {
+        ok: true,
+        date,
+        changed: false,
+        revision: planRevisionOf(stored),
+        taskCount: (stored.tasks ?? []).length,
+        keptProtectedTasks: keptProtected,
+        ignoredTasks: ignored,
+        note: protectedNote ?? "変更はありませんでした（渡された内容が今の予定と同じです）。",
+      };
+    }
+
+    const request = {
+      operationId: readString(args?.operationId, "operationId", { max: CHANGE_LIMITS.operationIdLength })
+        ?? uid("op"),
+      reason: readString(args?.reason, "reason", { max: CHANGE_LIMITS.reasonLength }) ?? "",
+      expectedRevisions: new Map([[date, expectedRevision]]),
+      changes,
+    };
+    const result = await runChanges({
+      request,
+      actor,
+      toolName,
+      knownQuestionIds: new Set(questions.keys()),
     });
+    if (!result.ok) return result;
+    const plan = result.days.find((day) => day.date === date);
     return {
-      ok: true,
+      ...result,
       date,
+      changed: true,
       replaced: true,
-      taskCount: normalized.length,
-      previousTaskCount: (before?.tasks ?? []).length,
-      revision: plan.revision,
-      updatedAt: plan.updatedAt,
-      plan,
-      unknownQuestionIds,
-      note: unknownQuestionIds.length
-        ? "問題マスタに無いIDが含まれています。listQuestions で正しいIDを確かめてください（予定自体は保存しました）。"
-        : null,
-      ...(args?.timezoneOffsetMinutes !== undefined
-        ? { timezoneOffsetMinutes: normalizeOffset(args.timezoneOffsetMinutes) }
-        : {}),
+      taskCount: plan?.taskCount ?? 0,
+      previousTaskCount: (stored.tasks ?? []).length,
+      revision: result.revisions[date],
+      keptProtectedTasks: keptProtected,
+      ignoredTasks: ignored,
+      note: protectedNote,
+    };
+  }
+
+  /** 保存先が保証できないときは、黙って書かずに理由を返す。 */
+  async function runChanges({ request, actor, toolName, knownQuestionIds, actorKind = "ai" }) {
+    const actorName = actor?.clientName ?? actor?.tokenLabel ?? "AI";
+    try {
+      return await sync.applyTaskChanges({
+        request,
+        actorKind,
+        actorName,
+        updatedBy: actorKind === "ai" ? `ai:${actorName}` : "app",
+        tool: toolName,
+        knownQuestionIds,
+      });
+    } catch (error) {
+      if (error instanceof StorageCapabilityError) {
+        return {
+          ok: false,
+          error: "storage_not_atomic",
+          message: error.message,
+          nextAction: "利用者に、Durable Object を有効にしてサーバーをデプロイしなおすよう伝えてください（docs/mcp.md の「保存先の移行」）。予定は変更していません。",
+        };
+      }
+      throw error;
+    }
+  }
+
+  /** 予定1件を、AIが読める形（保護の状態つき）にする。 */
+  function decorateTask(task, plan, questions) {
+    const protection = protectionOf(task, plan, now());
+    return {
+      ...task,
+      pinned: task.pinned === true,
+      completed: task.completed === true,
+      running: activeStateOf(plan, now())?.taskId === task.id,
+      locked: Boolean(protection),
+      lockedReason: protection,
+      labels: (task.questionIds ?? []).map((id) => questions.get(id)?.label ?? id),
     };
   }
 
@@ -175,6 +360,12 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         lastSyncedAt: status.lastSyncedAt,
         evaluations: EVALUATIONS.map((value) => ({ value, label: EVALUATION_LABELS[value] })),
         taskKinds: [...TASK_KINDS],
+        storage: sync.storageCapabilities(),
+        taskProtection: {
+          reasons: ["completed", "running", "pinned"],
+          note: "完了済み・実行中・固定のタスクはAIからは変更できません。固定の付け外しは study-todo の画面からだけ行えます。"
+            + " 実行中はアプリが知らせてきた範囲でしか分からないため、圏外の端末で解いているタスクは守れません。",
+        },
         // 教科 → 章 → 節 を、教科書の掲載順のまま返す（名前の文字列順ではない）。
         subjects: buildOutline(questions),
         note: questions.length
@@ -391,20 +582,23 @@ export function createStudyService({ sync, now = () => Date.now() }) {
 
     async getTasksForDate(args = {}) {
       const date = readDateArg(args.date, "date", args);
-      const [plan, questions] = await Promise.all([sync.readTaskPlan(date), questionMap()]);
-      const tasks = (plan?.tasks ?? []).map((task) => ({
-        ...task,
-        labels: task.questionIds.map((id) => questions.get(id)?.label ?? id),
-      }));
+      const [stored, questions] = await Promise.all([sync.readTaskPlan(date), questionMap()]);
+      const plan = stored ?? emptyPlan(date);
+      const tasks = (plan.tasks ?? []).map((task) => decorateTask(task, plan, questions));
+      const active = activeStateOf(plan, now());
       return {
         date,
         isToday: date === today(args),
         taskCount: tasks.length,
         tasks,
-        revision: plan?.revision ?? 0,
-        updatedAt: plan?.updatedAt ?? null,
-        updatedBy: plan?.updatedBy ?? null,
+        // 予定を変えるときは、この revision をそのまま expectedRevisions へ渡す。
+        revision: planRevisionOf(plan),
+        updatedAt: plan.updatedAt ?? null,
+        updatedBy: plan.updatedBy ?? null,
+        active: active ? { taskId: active.taskId, questionId: active.questionId ?? null, startedAt: active.startedAt } : null,
+        lockedTaskIds: tasks.filter((task) => task.locked).map((task) => task.id),
         note: tasks.length ? null : `${date} の予定はまだありません。`,
+        protectionNote: "locked が true のタスク（完了済み・実行中・固定）は、AIからは変更・削除・移動できません。",
       };
     },
 
@@ -416,17 +610,20 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       return {
         from,
         to,
-        days: plans.map((plan) => ({
-          date: plan.date,
-          taskCount: (plan.tasks ?? []).length,
-          revision: plan.revision,
-          updatedAt: plan.updatedAt,
-          updatedBy: plan.updatedBy,
-          tasks: (plan.tasks ?? []).map((task) => ({
-            ...task,
-            labels: task.questionIds.map((id) => questions.get(id)?.label ?? id),
-          })),
-        })),
+        days: plans.map((plan) => {
+          const active = activeStateOf(plan, now());
+          return {
+            date: plan.date,
+            taskCount: (plan.tasks ?? []).length,
+            revision: planRevisionOf(plan),
+            updatedAt: plan.updatedAt,
+            updatedBy: plan.updatedBy,
+            active: active ? { taskId: active.taskId, questionId: active.questionId ?? null } : null,
+            tasks: (plan.tasks ?? []).map((task) => decorateTask(task, plan, questions)),
+          };
+        }),
+        protectionNote: "locked が true のタスク（完了済み・実行中・固定）は、AIからは変更・削除・移動できません。",
+        changeNote: "予定を変えるときは、変える日すべての date と revision を expectedRevisions に入れて applyTaskChanges を呼んでください。",
       };
     },
 
@@ -447,6 +644,73 @@ export function createStudyService({ sync, now = () => Date.now() }) {
     async updateTasksForDate(args = {}, actor = {}) {
       const date = readDateArg(args.date, "date", args);
       return replacePlan({ date, tasks: args.tasks, actor, toolName: "updateTasksForDate", args });
+    },
+
+    /**
+     * タスク単位の一括変更。予定を変えるときの本来の入口。
+     * 全部成功か、全部未反映かのどちらかにしかならない。
+     */
+    async applyTaskChanges(args = {}, actor = {}) {
+      const request = parseChangeRequest(args);
+      const questions = await questionMap();
+      return runChanges({
+        request,
+        actor,
+        toolName: "applyTaskChanges",
+        knownQuestionIds: new Set(questions.keys()),
+      });
+    },
+
+    /** 予定の変更履歴（変更前後・対象・実行者・理由）。 */
+    async getPlanChanges(args = {}) {
+      const limit = readInteger(args.limit, "limit", { min: 1, max: 50, fallback: 10 });
+      const includeDetail = args.includeDetail === true;
+      const { total, entries } = await sync.readChanges({ limit });
+      return {
+        total,
+        count: entries.length,
+        changes: entries.map((entry) => ({
+          changeId: entry.id,
+          at: entry.at,
+          by: entry.actorKind === "ai" ? `AI（${entry.actorName}）` : entry.actorName,
+          actorKind: entry.actorKind,
+          tool: entry.tool,
+          reason: entry.reason,
+          dates: entry.dates,
+          summary: entry.summary,
+          revisions: entry.revisions,
+          undoOf: entry.undoOf ?? null,
+          undoneBy: entry.undoneBy ?? null,
+          ...(includeDetail ? { before: entry.before, after: entry.after } : {}),
+        })),
+        note: "学習記録とチャレンジ結果は、この履歴の対象ではありません（取り消しても実績は変わりません）。",
+      };
+    },
+
+    /** 記録してある変更を取り消す。取り消しも新しい変更として記録する。 */
+    async undoTaskChanges(args = {}, actor = {}) {
+      const changeId = readString(args.changeId, "changeId", { max: 80 });
+      const operationId = readString(args.operationId, "operationId", { max: CHANGE_LIMITS.operationIdLength });
+      const reason = readString(args.reason, "reason", { max: CHANGE_LIMITS.reasonLength });
+      try {
+        return await sync.undoTaskChange({
+          changeId,
+          operationId,
+          actorKind: "ai",
+          actorName: actor?.clientName ?? actor?.tokenLabel ?? "AI",
+          reason,
+        });
+      } catch (error) {
+        if (error instanceof StorageCapabilityError) {
+          return {
+            ok: false,
+            error: "storage_not_atomic",
+            message: error.message,
+            nextAction: "利用者に、Durable Object を有効にしてサーバーをデプロイしなおすよう伝えてください。予定は変更していません。",
+          };
+        }
+        throw error;
+      }
     },
 
     async addGoal(args = {}, actor = {}) {

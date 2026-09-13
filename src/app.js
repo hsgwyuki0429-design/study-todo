@@ -5,7 +5,7 @@ import * as api from './api.js';
 import { seedIfEmpty } from './seed.js';
 import { state, setRenderer, render, refreshToday, loadTasks } from './state.js';
 import { $ } from './ui.js';
-import { renderHome, tickHome } from './home.js';
+import { heartbeatActivity, renderHome, tickHome } from './home.js';
 import { renderRecords } from './records.js';
 import { renderSchedule } from './schedule.js';
 import { renderSettings, applyTheme } from './settings.js';
@@ -111,6 +111,9 @@ async function boot() {
   render();
 
   setInterval(tickHome, 250);
+  // 学習中であることを、ときどきクラウドへ送り直す（AIに動かされないため）。
+  // 送れなくても学習は止まらない。
+  setInterval(heartbeatActivity, 5 * 60 * 1000);
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) tickHome();
   });

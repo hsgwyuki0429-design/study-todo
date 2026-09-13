@@ -14,7 +14,15 @@
 
 import { fail, readString } from "../core/validate.js";
 import { generateToken, hashToken, timingSafeEqual } from "../auth/tokens.js";
-import { updateDocument } from "../storage/driver.js";
+import { runTransaction, supportsTransactions, updateDocument } from "../storage/driver.js";
+import {
+  applyChanges,
+  buildUndoChanges,
+  emptyPlan,
+  fingerprintOf,
+  planRevisionOf,
+  protectionOf,
+} from "./task-changes.js";
 import { dateKeyOf, isDateKey, monthKeyOf, todayKeyOf } from "../../src/datetime.js";
 import {
   hashQuestions,
@@ -38,6 +46,10 @@ export const SYNC_KEYS = Object.freeze({
   goals: "studytodo:goals",
   questions: "studytodo:questions",
   log: "studytodo:log",
+  // 予定の一括変更の記録（取り消しのために変更前後を持つ）。
+  changes: "studytodo:changes",
+  // タスクIDごとの「今どの日にあるか」。古い端末が移動前の日へ戻すのを防ぐ。
+  placements: "studytodo:placements",
 });
 
 export const SYNC_LIMITS = Object.freeze({
@@ -51,6 +63,12 @@ export const SYNC_LIMITS = Object.freeze({
   // 予定を読み取る範囲。過ぎた予定も残すが、毎回すべてを読み直さない。
   planLookbackDays: 400,
   planLookaheadDays: 400,
+  // 変更の記録（取り消しに使う）を何件残すか。
+  changeEntries: 50,
+  // 「いま解いている」の記録を何件覚えておくか／どれだけで期限切れにするか。
+  placements: 2000,
+  activityTtlSeconds: 15 * 60,
+  activityMaxTtlSeconds: 60 * 60,
 });
 
 // 見間違えやすい文字（0とO、1とIとl）を除いた並び。紙に書いて渡せるようにする。
@@ -80,6 +98,8 @@ const DEFAULT_CHALLENGES = { results: {} };
 const DEFAULT_GOALS = { goals: [] };
 const DEFAULT_QUESTIONS = { version: 0, hash: null, updatedAt: null, questions: [] };
 const DEFAULT_LOG = { entries: [] };
+const DEFAULT_CHANGES = { entries: [] };
+const DEFAULT_PLACEMENTS = { tasks: {} };
 
 export function createSyncService({ storage, now = () => Date.now() }) {
   async function readDoc(key, defaults) {
@@ -138,29 +158,6 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     return plans.filter(Boolean);
   }
 
-  /**
-   * その日の予定を書き込む。競合したときは新しいほうを残す。
-   * 誰が変えたか（updatedBy）を必ず残し、AIの操作をあとから追えるようにする。
-   */
-  async function writeTaskPlan(date, tasks, { updatedBy = "app", baseRevision = null } = {}) {
-    const at = new Date(now()).toISOString();
-    const incoming = normalizeTaskPlan({ date, tasks, updatedAt: at, updatedBy, revision: baseRevision ?? 0 }, { date, now: now() });
-    if (!incoming) fail("予定の形が正しくありません。", "tasks");
-    let outcome = "applied";
-    const { document } = await updateDocument(storage, SYNC_KEYS.taskPlan(date), (draft) => {
-      const stored = draft.date ? draft : null;
-      // baseRevision を渡さない書き込み（設定画面やAIからの直接指定）は、
-      // いまの版を見てから書くので、常に最新の上へ重ねる。
-      const base = baseRevision === null && stored
-        ? { ...incoming, revision: Number(stored.revision ?? 0) }
-        : incoming;
-      const merged = mergeTaskPlan(stored, base);
-      outcome = merged.outcome;
-      Object.assign(draft, merged.plan);
-    }, { defaults: {} });
-    return { plan: { ...document, revision: document.revision }, outcome };
-  }
-
   /** 目標を id ごとに重ねて書く。消した印（deletedAt）も引き継ぐ。 */
   async function writeGoals(incoming = []) {
     const normalized = incoming.map((goal) => normalizeGoal(goal, { now: now() })).filter(Boolean);
@@ -189,6 +186,324 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     return { entries: (document.entries ?? []).slice(0, Math.max(1, Math.min(limit, SYNC_LIMITS.logEntries))) };
   }
 
+  /* ------------------------------------------------------------------ */
+  /* 予定のタスク単位の変更                                               */
+  /* ------------------------------------------------------------------ */
+
+  const uid = (prefix) => `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+  /**
+   * 予定1日ぶんを、他の書き込みと混ざらないように読んで書く。
+   * transaction を持つ保存先ではその中で行い、持たない保存先（KV）では
+   * そのまま読み書きする（KV は比較して書き込む仕組みを持たないため、
+   * ここでの保証は「同時更新が無ければ正しい」までである）。
+   */
+  async function mutatePlan(date, mutate) {
+    const key = SYNC_KEYS.taskPlan(date);
+    if (supportsTransactions(storage)) {
+      return runTransaction(storage, async (tx) => {
+        const stored = await tx.get(key);
+        const outcome = await mutate(stored);
+        if (outcome?.plan) await tx.put(key, outcome.plan);
+        return outcome;
+      });
+    }
+    const stored = await storage.get(key);
+    const outcome = await mutate(stored);
+    if (outcome?.plan) await storage.put(key, outcome.plan);
+    return outcome;
+  }
+
+  /** transaction の中から、操作の記録を1件足す。 */
+  async function appendLogTx(tx, entry) {
+    const document = (await tx.get(SYNC_KEYS.log)) ?? structuredClone(DEFAULT_LOG);
+    document.entries = [
+      {
+        timestamp: new Date(now()).toISOString(),
+        clientName: entry.clientName ?? null,
+        tool: entry.tool,
+        summary: entry.summary,
+        ...(entry.changeId ? { changeId: entry.changeId } : {}),
+      },
+      ...(document.entries ?? []),
+    ].slice(0, SYNC_LIMITS.logEntries);
+    await tx.put(SYNC_KEYS.log, document);
+  }
+
+  /** 「このタスクは今どの日にあるか」を書き留める。古い端末の巻き戻しを防ぐ。 */
+  function recordPlacements(document, plans, at) {
+    const tasks = document.tasks ?? {};
+    for (const [date, plan] of Object.entries(plans)) {
+      for (const task of plan.tasks ?? []) tasks[task.id] = { date, at };
+    }
+    // 増えすぎたら古いものから捨てる（捨てても最新の予定そのものは残る）。
+    const entries = Object.entries(tasks);
+    if (entries.length > SYNC_LIMITS.placements) {
+      entries.sort((left, right) => String(right[1].at).localeCompare(String(left[1].at)));
+      document.tasks = Object.fromEntries(entries.slice(0, SYNC_LIMITS.placements));
+    } else {
+      document.tasks = tasks;
+    }
+    return document;
+  }
+
+  async function readPlacements() {
+    const document = await readDoc(SYNC_KEYS.placements, DEFAULT_PLACEMENTS);
+    return document.tasks ?? {};
+  }
+
+  /** 予定の一括変更の記録。新しい順。 */
+  async function readChanges({ limit = 20 } = {}) {
+    const document = await readDoc(SYNC_KEYS.changes, DEFAULT_CHANGES);
+    const entries = (document.entries ?? []).slice(0, Math.max(1, Math.min(limit, SYNC_LIMITS.changeEntries)));
+    return { total: (document.entries ?? []).length, entries };
+  }
+
+  const summarizePlan = (plan) => ({
+    date: plan.date,
+    revision: planRevisionOf(plan),
+    taskCount: (plan.tasks ?? []).length,
+    tasks: (plan.tasks ?? []).map((task) => ({
+      id: task.id,
+      kind: task.kind,
+      questionIds: task.questionIds ?? [],
+      ...(task.title ? { title: task.title } : {}),
+      completed: task.completed === true,
+      pinned: task.pinned === true,
+    })),
+  });
+
+  /**
+   * タスク単位の一括変更を、まとめて（全部成功か、全部未反映で）適用する。
+   *
+   * ・operationId が同じで内容も同じ要求は、前回の結果をそのまま返す（重複しない）
+   * ・operationId が同じで内容が違う要求は断る
+   * ・期待した revision と食い違えば、1つも変更せずに競合として返す
+   */
+  async function applyTaskChanges({
+    request,
+    actorKind = "ai",
+    actorName = "AI",
+    updatedBy = "ai",
+    tool = "applyTaskChanges",
+    knownQuestionIds = null,
+    undoOf = null,
+  }) {
+    const fingerprint = fingerprintOf(request);
+    const at = new Date(now()).toISOString();
+
+    return runTransaction(storage, async (tx) => {
+      const changesDoc = (await tx.get(SYNC_KEYS.changes)) ?? structuredClone(DEFAULT_CHANGES);
+      const entries = changesDoc.entries ?? [];
+      const already = entries.find((entry) => entry.operationId === request.operationId);
+      if (already) {
+        if (already.fingerprint !== fingerprint) {
+          return {
+            ok: false,
+            error: "operation_conflict",
+            changeId: already.id,
+            message: "同じ operationId で、内容の違う変更がすでに実行されています。別の operationId を使ってください。",
+            nextAction: "やり直すなら新しい operationId を付け直し、getTasksInRange で今の revision を取り直してください。",
+          };
+        }
+        // 同じ要求の再送。前と同じ結果を返すだけで、予定は動かさない。
+        return { ...already.result, replayed: true };
+      }
+
+      const dates = [...request.expectedRevisions.keys()];
+      const plans = {};
+      for (const date of dates) plans[date] = (await tx.get(SYNC_KEYS.taskPlan(date))) ?? null;
+
+      const outcome = applyChanges({
+        plans,
+        request,
+        now: now(),
+        actorKind,
+        updatedBy,
+        knownQuestionIds,
+        newId: () => uid("task"),
+      });
+      if (!outcome.ok) {
+        return {
+          ...outcome,
+          plans: dates.map((date) => summarizePlan(plans[date] ?? emptyPlan(date))),
+        };
+      }
+
+      for (const [date, plan] of Object.entries(outcome.plans)) {
+        await tx.put(SYNC_KEYS.taskPlan(date), plan);
+      }
+
+      const placements = (await tx.get(SYNC_KEYS.placements)) ?? structuredClone(DEFAULT_PLACEMENTS);
+      await tx.put(SYNC_KEYS.placements, recordPlacements(placements, outcome.plans, at));
+
+      const changeId = uid("chg");
+      const result = {
+        ok: true,
+        changeId,
+        appliedAt: at,
+        reason: request.reason || null,
+        revisions: outcome.revisions,
+        summary: outcome.summary,
+        days: Object.values(outcome.plans).map(summarizePlan),
+      };
+      const record = {
+        id: changeId,
+        operationId: request.operationId,
+        fingerprint,
+        at,
+        actorKind,
+        actorName,
+        tool,
+        reason: request.reason || null,
+        dates: outcome.summary.dates,
+        before: outcome.before,
+        after: outcome.after,
+        revisions: outcome.revisions,
+        summary: outcome.summary,
+        undoOf,
+        undoneBy: null,
+        result,
+      };
+      changesDoc.entries = [record, ...entries].slice(0, SYNC_LIMITS.changeEntries);
+      if (undoOf) {
+        const target = changesDoc.entries.find((entry) => entry.id === undoOf);
+        if (target) target.undoneBy = changeId;
+      }
+      await tx.put(SYNC_KEYS.changes, changesDoc);
+
+      await appendLogTx(tx, {
+        clientName: actorName,
+        tool,
+        changeId,
+        summary: describeChange(outcome.summary, request.reason),
+      });
+
+      return result;
+    });
+  }
+
+  /** 変更の概要を、人が読める1行にする。 */
+  function describeChange(summary, reason) {
+    const parts = [];
+    if (summary.created.length) parts.push(`追加${summary.created.length}件`);
+    if (summary.removed.length) parts.push(`削除${summary.removed.length}件`);
+    if (summary.moved.length) parts.push(`移動${summary.moved.length}件`);
+    if (summary.updated.length) parts.push(`変更${summary.updated.length}件`);
+    const what = parts.length ? parts.join("・") : "変更なし";
+    return `${summary.dates.join("・")} の予定を${what}${reason ? `（理由: ${reason}）` : ""}`;
+  }
+
+  /**
+   * 記録してある変更を取り消す。
+   * 履歴は消さず、「打ち消す変更」を新しく1件作って記録する。
+   * そのあとで学習が進んだり、別の変更が入っていたら、何も変えずに競合として返す。
+   */
+  async function undoTaskChange({ changeId, operationId, actorKind = "user", actorName = "study-todo", reason = null }) {
+    const { entries } = await readChanges({ limit: SYNC_LIMITS.changeEntries });
+    const record = entries.find((entry) => entry.id === changeId) ?? (changeId ? null : entries[0]);
+    if (!record) {
+      return { ok: false, error: "not_found", message: "その変更は記録に残っていません。", changeId };
+    }
+    if (record.undoneBy) {
+      return { ok: false, error: "already_undone", changeId: record.id, undoneBy: record.undoneBy, message: "この変更はすでに取り消されています。" };
+    }
+
+    const dates = [...new Set([...Object.keys(record.before ?? {}), ...Object.keys(record.after ?? {})])];
+    const current = {};
+    for (const date of dates) current[date] = (await readTaskPlan(date)) ?? emptyPlan(date);
+
+    const undo = buildUndoChanges(record, current, { now: now() });
+    if (undo.blocked.length) {
+      return {
+        ok: false,
+        error: "undo_conflict",
+        changeId: record.id,
+        blocked: undo.blocked,
+        message: "この変更のあとに学習が進んだか、別の変更が入っています。安全に取り消せないので何も変えていません。",
+        nextAction: "今の予定を確かめて、必要な変更だけをやり直してください。",
+      };
+    }
+    if (!undo.changes.length) {
+      return { ok: false, error: "nothing_to_undo", changeId: record.id, message: "戻すものがありません（すでに元の状態です）。" };
+    }
+
+    const request = {
+      operationId: operationId ?? `undo_${record.id}`,
+      reason: reason ?? `変更 ${record.id} の取り消し`,
+      expectedRevisions: new Map(dates.map((date) => [date, planRevisionOf(current[date])])),
+      changes: undo.changes,
+    };
+    const result = await applyTaskChanges({
+      request,
+      // 取り消しはアプリからの操作として扱う。ただし保護は buildUndoChanges で見ている。
+      actorKind,
+      actorName,
+      updatedBy: `${actorKind}:undo`,
+      tool: "undoTaskChanges",
+      undoOf: record.id,
+    });
+    return result.ok ? { ...result, undoOf: record.id } : result;
+  }
+
+  /** 固定（ピン留め）の付け外し。アプリ（端末）だけが行える。 */
+  async function setTaskPinned({ date, taskId, pinned, deviceId = null }) {
+    const outcome = await mutatePlan(date, (stored) => {
+      if (!stored) return { ok: false, error: "not_found", message: `${date} の予定はありません。` };
+      const task = (stored.tasks ?? []).find((entry) => entry.id === taskId);
+      if (!task) return { ok: false, error: "not_found", message: `タスク ${taskId} が見つかりません。` };
+      const plan = structuredClone(stored);
+      const target = plan.tasks.find((entry) => entry.id === taskId);
+      target.pinned = pinned === true;
+      target.updatedAt = new Date(now()).toISOString();
+      plan.revision = planRevisionOf(stored) + 1;
+      plan.updatedAt = new Date(now()).toISOString();
+      plan.updatedBy = deviceId ? `app:${deviceId}` : "app";
+      return { ok: true, plan };
+    });
+    if (!outcome.ok) return outcome;
+    return { ok: true, date, taskId, pinned: pinned === true, revision: outcome.plan.revision };
+  }
+
+  /**
+   * 端末から「いまこのタスクを解いている」と知らせてもらう。
+   * 期限つきで預かり、期限を過ぎたら実行中ではなくなる。
+   * 圏外の端末は知らせられないので、この情報は「サーバーが知っている範囲」でしかない。
+   */
+  async function reportActivity({ date, taskId, questionId = null, deviceId = null, ttlSeconds = null }) {
+    const ttl = Math.max(60, Math.min(Number(ttlSeconds) || SYNC_LIMITS.activityTtlSeconds, SYNC_LIMITS.activityMaxTtlSeconds));
+    const at = new Date(now()).toISOString();
+    const expiresAt = new Date(now() + ttl * 1000).toISOString();
+    const outcome = await mutatePlan(date, (stored) => {
+      const base = stored ?? { ...emptyPlan(date), updatedAt: at, updatedBy: "app" };
+      const plan = structuredClone(base);
+      if (taskId === null) {
+        delete plan.active;
+      } else {
+        if (!(plan.tasks ?? []).some((task) => task.id === taskId)) {
+          return { ok: false, error: "not_found", message: `タスク ${taskId} が ${date} にありません。` };
+        }
+        plan.active = { taskId, ...(questionId ? { questionId } : {}), deviceId, startedAt: at, expiresAt };
+      }
+      // 実行中の知らせは予定の中身を変えないので、revision は進めない
+      // （進めると、端末とAIが持っている revision が理由なく古くなってしまう）。
+      return { ok: true, plan };
+    });
+    if (!outcome.ok) return outcome;
+    return { ok: true, date, taskId, expiresAt: taskId === null ? null : expiresAt };
+  }
+
+  /** 保存先が何を保証できるか。画面とAIへ正直に返すために使う。 */
+  function storageCapabilities() {
+    return {
+      driver: storage.name ?? "unknown",
+      atomicBatchUpdates: supportsTransactions(storage),
+      note: supportsTransactions(storage)
+        ? "複数の日の予定をまとめて安全に書き換えられます。"
+        : "この保存先（Cloudflare KV 単体）では、まとめての安全な書き換えができません。Durable Object を有効にしてください。",
+    };
+  }
+
   return {
     limits: SYNC_LIMITS,
     keys: SYNC_KEYS,
@@ -199,9 +514,15 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     readQuestions,
     readTaskPlan,
     readTaskPlansInRange,
-    writeTaskPlan,
     appendLog,
     readLog,
+    applyTaskChanges,
+    undoTaskChange,
+    readChanges,
+    readPlacements,
+    setTaskPinned,
+    reportActivity,
+    storageCapabilities,
 
     // ----------------------------------------------------------------
     // 同期コードと端末
@@ -361,18 +682,32 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       }
 
       // 予定は日ごとに版を見て重ねる。古い内容で新しい内容を消さない。
+      //
+      // さらに placements（タスクがいまどの日にあるかの記録）でふるいにかける。
+      // 移動を知らない端末が、移動前の日の予定をそのまま送ってきても、
+      // 移したタスクを元の日へ復活させない。
+      const placements = await readPlacements();
       const planOutcomes = [];
+      const acceptedPlans = {};
       for (const raw of taskPlans) {
         const plan = normalizeTaskPlan(raw, { updatedBy: raw?.updatedBy ?? "app", now: at });
         if (!plan) continue;
-        let outcome = "ignored";
-        await updateDocument(storage, SYNC_KEYS.taskPlan(plan.date), (draft) => {
-          const stored = draft.date ? draft : null;
-          const merged = mergeTaskPlan(stored, plan);
-          outcome = merged.outcome;
-          Object.assign(draft, merged.plan);
-        }, { defaults: {} });
-        planOutcomes.push({ date: plan.date, outcome });
+        const merged = await mutatePlan(plan.date, (stored) => {
+          const result = mergeTaskPlan(stored ?? null, plan, { placements, now: at });
+          return { ok: true, plan: result.plan, outcome: result.outcome, droppedTasks: result.droppedTasks ?? 0 };
+        });
+        planOutcomes.push({
+          date: plan.date,
+          outcome: merged.outcome,
+          ...(merged.droppedTasks ? { droppedMovedTasks: merged.droppedTasks } : {}),
+        });
+        if (merged.outcome !== "kept-server" && merged.plan) acceptedPlans[plan.date] = merged.plan;
+      }
+      if (Object.keys(acceptedPlans).length) {
+        // 端末が動かした結果も配置の記録へ反映する（AIの記録と同じ扱い）。
+        await updateDocument(storage, SYNC_KEYS.placements, (document) => {
+          recordPlacements(document, acceptedPlans, atIso);
+        }, { defaults: structuredClone(DEFAULT_PLACEMENTS) });
       }
 
       if (goals.length) {

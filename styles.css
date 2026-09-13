@@ -499,3 +499,21 @@ input[type='password'] { width: 100%; }
 
 .dialog-check { display:flex; align-items:center; gap:8px; margin:8px 0; font-size:13px; color:var(--muted); }
 .dialog-check input { width:18px; height:18px; }
+
+
+/* 固定（ピン留め）の切り替え。固定したタスクはAIが動かせない。 */
+.pin-btn {
+  border: 1px solid var(--line, #d2d2d7);
+  background: transparent;
+  color: inherit;
+  border-radius: 999px;
+  padding: 6px 12px;
+  min-height: 44px;
+  font-size: 13px;
+  opacity: .6;
+}
+.pin-btn.pinned {
+  opacity: 1;
+  border-color: currentColor;
+  font-weight: 600;
+}

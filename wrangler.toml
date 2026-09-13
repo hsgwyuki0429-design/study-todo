@@ -22,3 +22,21 @@ STUDY_TODO_ALLOWED_ORIGINS = "https://hsgwyuki0429-design.github.io"
 [[kv_namespaces]]
 binding = "STUDY_TODO_KV"
 id = "6323230941a246aabb65915bddc0be94"
+
+# 予定をタスク単位で安全に書き換えるための保存先。
+#
+# KV は「最後に書いた人が勝つ」保存先で、「読んだときから変わっていなければ書く」
+# ということができない。そのため、複数の日の予定をまとめて確かめてから書く処理を
+# KV だけで正しく行えない。Durable Object は1つだけ存在するオブジェクトで、
+# その中の保存先はトランザクションに対応しているため、ここへ読み書きを集める。
+#
+# すでに KV でデータを預けている場合は、初回アクセスのときに一度だけ
+# 自動で写される（server/storage/do-driver.js の migrateFromKv）。
+# 写し終えても KV のデータは消さないので、元に戻すこともできる。
+[[durable_objects.bindings]]
+name = "STUDY_TODO_STORE"
+class_name = "StudyTodoStore"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["StudyTodoStore"]
