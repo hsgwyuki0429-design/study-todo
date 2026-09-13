@@ -132,7 +132,9 @@ const DEFAULT_RECORDS = { records: {} };
 const DEFAULT_CHALLENGES = { results: {} };
 const DEFAULT_DELETIONS = { records: {}, challenges: {} };
 const DEFAULT_GOALS = { goals: [] };
-const DEFAULT_QUESTIONS = { version: 0, hash: null, updatedAt: null, questions: [] };
+// masterVersion は「どちらが新しいか」を決める数（ハッシュでは分からない）。
+// version は書き換えた回数で、こちらは同期の目安にしか使わない。
+const DEFAULT_QUESTIONS = { version: 0, masterVersion: 0, hash: null, updatedAt: null, questions: [] };
 const DEFAULT_LOG = { entries: [] };
 const DEFAULT_CHANGES = { entries: [] };
 const DEFAULT_PLACEMENTS = { tasks: {} };
@@ -153,7 +155,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
 
   /**
    * 保存してある学習記録（月ごとに分けて持っている）。
-   * 取り消した記録は、ふだんの集計に混ざらないよう既定では返さない。
+   * 消した記録はそもそも残っていない。古い版で「取り消し」にした記録だけ、ここで外す。
    */
   async function readAllRecords() {
     const keys = await storage.list(SYNC_KEYS.recordsPrefix);
@@ -173,7 +175,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     ));
   }
 
-  /** 1件の記録を id から引く（訂正・取り消しの対象を確かめるため）。 */
+  /** 1件の記録を id から引く（訂正・削除の対象を確かめるため）。 */
   async function findRecord(recordId) {
     const keys = await storage.list(SYNC_KEYS.recordsPrefix);
     for (const key of keys) {
@@ -767,12 +769,12 @@ export function createSyncService({ storage, now = () => Date.now() }) {
   const recordsKeyFor = (record) => SYNC_KEYS.records(recordDateOf(record).slice(0, 7));
 
   /**
-   * 学習記録をまとめて追加・訂正・取り消しする。
+   * 学習記録をまとめて追加・訂正・削除する。
    *
    * ・全部の確認を通ったときだけ書き込む（1つでも通らなければ1件も変えない）
    * ・同じ operationId の送り直しでは、前回の結果を返すだけで二重にならない
    * ・訂正は revision を1つ進め、変更前後を履歴に残す
-   * ・取り消しは消さずに印をつける（ふだんの集計からは外れる）
+   * ・削除は本当に消す。消したIDだけを墓標に残し、送り直されても復活させない
    *
    * 実際の中身の確かめ（問題IDが正しいか、日付が未来でないかなど）は、
    * 呼び出し側（study-service）が先に済ませている前提。ここでは保存の正しさだけを見る。
@@ -1373,6 +1375,14 @@ export function createSyncService({ storage, now = () => Date.now() }) {
 
       // 問題マスタは、中身が変わったときだけ入れ替える。同じものは送り直させない。
       let questionsStored = false;
+      // 問題マスタは、版（masterVersion）が今より大きいときだけ受け取る。
+      //
+      // ハッシュは「違う」ことしか言えないので、それだけで置き換えると、
+      // 古い問題マスタを持ったままの端末が久しぶりに同期したときに、
+      // 新しいマスタを古いほうへ巻き戻してしまう。
+      // 版を知らない（この仕組みより前の）端末は 0 として扱うので、
+      // 何も送り込めないかわりに、pull で新しいマスタを受け取る。
+      let questionsIgnored = null;
       if (payload.questions && Array.isArray(payload.questions.questions)) {
         const list = payload.questions.questions.map(normalizeQuestion).filter(Boolean);
         if (list.length > SYNC_LIMITS.questions) {
@@ -1380,14 +1390,29 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         }
         const hash = await hashQuestions(list);
         const current = await readQuestions();
+        const incomingVersion = Math.max(0, Math.floor(Number(payload.questions.masterVersion) || 0));
+        const currentVersion = Math.max(0, Math.floor(Number(current.masterVersion) || 0));
+        // サーバーに1問も無いときは、版に関わらず受け取る（最初の1台ぶん）。
+        const first = !(current.questions ?? []).length;
         if (list.length && hash !== current.hash) {
-          await updateDocument(storage, SYNC_KEYS.questions, (document) => {
-            document.questions = list;
-            document.hash = hash;
-            document.version = Number(document.version ?? 0) + 1;
-            document.updatedAt = atIso;
-          }, { defaults: structuredClone(DEFAULT_QUESTIONS) });
-          questionsStored = true;
+          if (first || incomingVersion > currentVersion) {
+            await updateDocument(storage, SYNC_KEYS.questions, (document) => {
+              document.questions = list;
+              document.hash = hash;
+              document.masterVersion = Math.max(incomingVersion, currentVersion);
+              document.version = Number(document.version ?? 0) + 1;
+              document.updatedAt = atIso;
+            }, { defaults: structuredClone(DEFAULT_QUESTIONS) });
+            questionsStored = true;
+          } else {
+            // 送ってきたほうが古い。受け取らず、pull で新しいマスタを返す。
+            questionsIgnored = {
+              reason: "older_master",
+              sentMasterVersion: incomingVersion,
+              currentMasterVersion: currentVersion,
+              message: "送られた問題マスタのほうが古いので受け取りませんでした。この端末には新しいマスタを配ります。",
+            };
+          }
         }
       }
 
@@ -1413,6 +1438,8 @@ export function createSyncService({ storage, now = () => Date.now() }) {
           goals: goals.length,
         },
         questionsStored,
+        // 古いマスタを送ってきたときは、その旨を返す（端末側で気づけるように）。
+        ...(questionsIgnored ? { questionsIgnored } : {}),
       };
     },
 
@@ -1466,6 +1493,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         goals,
         questions: {
           version: questions.version,
+          masterVersion: Math.max(0, Math.floor(Number(questions.masterVersion) || 0)),
           hash: questions.hash,
           count: (questions.questions ?? []).length,
           updatedAt: questions.updatedAt,

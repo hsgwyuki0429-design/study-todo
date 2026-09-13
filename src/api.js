@@ -74,13 +74,41 @@ export const dayOf = (timestamp) => dateKeyOf(timestamp);
 /* 問題マスタ                                                          */
 /* ------------------------------------------------------------------ */
 
-export async function importQuestions(questions, { replace = false } = {}) {
+/** 問題マスタの版を覚えておく meta の行。 */
+export const QUESTION_MASTER_KEY = 'questionMaster';
+
+export async function importQuestions(questions, { replace = false, masterVersion = null } = {}) {
   const normalized = questions.map(normalizeQuestion).filter(Boolean);
   // 問題マスタを丸ごと差し替えるときだけ、古い問題を消す。
   // 学習記録・予定・目標には手を触れない（questionId は残るので履歴は失われない）。
   if (replace) await idb.clear(STORES.questions);
   await idb.putAll(STORES.questions, normalized);
+  if (masterVersion !== null) await setQuestionMasterVersion(masterVersion);
   return normalized.length;
+}
+
+/**
+ * この端末が持っている問題マスタの版。
+ *
+ * ハッシュは「同じか違うか」しか言えないので、古いマスタを持ったままの端末が
+ * 新しいマスタを巻き戻さないよう、どちらが新しいかを表す数を別に持っている。
+ * 版を知らない（この仕組みより前の）マスタは 0 として扱う。
+ */
+export async function getQuestionMasterVersion() {
+  const row = await idb.get(STORES.meta, QUESTION_MASTER_KEY);
+  return Math.max(0, Math.floor(Number(row?.value?.masterVersion) || 0));
+}
+
+/** 版を上げる。下げることはしない（古い内容で新しい内容を上書きしないため）。 */
+export async function setQuestionMasterVersion(masterVersion) {
+  const next = Math.max(0, Math.floor(Number(masterVersion) || 0));
+  const current = await getQuestionMasterVersion();
+  if (next <= current) return current;
+  await idb.put(STORES.meta, {
+    key: QUESTION_MASTER_KEY,
+    value: { masterVersion: next, updatedAt: new Date().toISOString() },
+  });
+  return next;
 }
 
 export async function listQuestions(filter = {}) {
@@ -325,8 +353,6 @@ export async function setPlanMeta(date, patch) {
 }
 
 export async function updateTodayTasks(tasks, date = todayKey(), { markDirty = true, updatedBy = 'app' } = {}) {
-  const existing = await idb.byIndex(STORES.tasks, 'date', date);
-  await Promise.all(existing.map((t) => idb.del(STORES.tasks, t.id)));
   const now = new Date().toISOString();
   const normalized = tasks.map((t, i) => withItems({
     // IDは渡されたものを必ず残す。作り直すと、クラウド側の同じタスクと結び付かなくなる。
@@ -348,7 +374,10 @@ export async function updateTodayTasks(tasks, date = todayKey(), { markDirty = t
     // 古いデータには無いので questionIds から組み立てる（IDは決め打ちなので毎回同じ）。
     items: t.items,
   }));
-  await idb.putAll(STORES.tasks, normalized);
+  // その日の予定は「置き換え」なので、古いものを消すのと新しいものを入れるのを
+  // 1つのトランザクションでまとめて行う。途中で落ちても、その日の予定だけが
+  // 消えた状態にはならない（全部通るか、1つも通らないか）。
+  await idb.replaceByIndex(STORES.tasks, 'date', date, normalized);
   if (markDirty) {
     // この端末で変えた予定は、次の同期でクラウドへ送る。
     await setPlanMeta(date, { updatedAt: new Date().toISOString(), dirty: true, updatedBy });

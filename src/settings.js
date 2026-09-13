@@ -102,7 +102,10 @@ async function buildQuestions(list) {
     if (!confirm('data/questions.json の内容で問題マスタを置き換えます。学習記録・予定・目標は消えません。')) return;
     try {
       const master = await loadQuestionMaster();
-      const n = await api.importQuestions(master.questions, { replace: true });
+      const n = await api.importQuestions(master.questions, {
+        replace: true,
+        masterVersion: Number(master.masterVersion) || 0,
+      });
       alert(`${n}問を読み込みました`);
       render();
     } catch (err) {

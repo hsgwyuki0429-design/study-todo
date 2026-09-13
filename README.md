@@ -11,7 +11,17 @@ python3 -m http.server 8000
 # → http://localhost:8000/ をスマホのブラウザで開き、ホーム画面に追加
 ```
 
-初回起動時に `data/questions.json`（青チャート数学I+A の問題マスタ 591問）が投入される（`src/seed.js`）。
+初回起動時に `data/questions.json`（青チャート数学I+A の問題マスタ 593問）が投入される（`src/seed.js`）。
+
+問題マスタは `masterVersion`（単調増加の版）を持つ。中身を変えたら
+`tools/build-questions.mjs` の `MASTER_VERSION` を1つ上げること。この版は
+「どちらが新しいか」を決めるためだけのもので、ハッシュ（違うかどうか）とは役割が違う。
+
+- 起動時、同梱のマスタのほうが新しい版なら、端末のマスタを入れ替える
+  （古いマスタを持ったままの端末が、アプリだけ新しくなって取り残されない）
+- 同期では、版が今より大きいものだけを受け取る。端末→サーバーもサーバー→端末も
+  同じ決まりなので、片方向だけ置き換わって集合がずれることがない
+- 自分でインポートしたマスタは、いまの版より1つ上の版になる（本人が決めたことが勝つ）
 
 ## タブ構成
 
@@ -47,7 +57,7 @@ python3 -m http.server 8000
 | `src/settings.js` | 設定タブ |
 | `src/api.js` | データアクセス層（MCPツールと1:1対応） |
 | `src/question-order.js` | 問題マスタの項目と掲載順。PWAとサーバーで共有する |
-| `data/questions.json` | 問題マスタの実体（青チャート数学I+A 591問のメタデータ） |
+| `data/questions.json` | 問題マスタの実体（青チャート数学I+A 593問のメタデータ。`masterVersion` つき） |
 | `tools/build-questions.mjs` | `tools/source/` から問題マスタを生成・検証する |
 | `.github/workflows/test.yml` | push と Pull Request のたびにテストを走らせる |
 | `.github/workflows/deploy.yml` | `main` への push で Cloudflare Workers へ自動デプロイする |
@@ -56,11 +66,12 @@ python3 -m http.server 8000
 | `src/cloud-sync.js` | クラウド同期のクライアント（任意機能） |
 | `src/settings-cloud.js` | 設定タブの「AI連携 / 同期」カード |
 | `src/seed.js` | 初期データ |
-| `sw.js` | アプリシェルのキャッシュ（オフライン起動） |
+| `sw.js` | アプリシェルのキャッシュ（オフライン起動）。`src/*.js` を全部載せる。過不足は `test/shell.test.mjs` が見張る |
 | `server/` | MCP Server（Cloudflare Workers + Durable Object。詳細は `docs/mcp.md`） |
-| `server/service/task-changes.js` | 予定をタスク単位で安全に書き換える処理（ID維持・競合の確認・保護・取り消し） |
+| `server/service/task-changes.js` | 予定をタスク単位で安全に書き換える処理（ID維持・競合の確認・保護・変更の取り消し） |
 | `server/storage/do-driver.js` | Durable Object の保存先（まとめ書きに対応。KVからの引っ越しつき） |
-| `test/` | サーバー側の自動テスト（`npm test`） |
+| `test/` | 判定のしかたの自動テスト（`npm test`） |
+| `test/e2e/` | 実ブラウザでの通し確認（`npm run test:e2e`） |
 
 ## 予定と実績の考え方
 
@@ -236,7 +247,19 @@ AIからまとめて消すことはできない（1件ずつの削除だけ）�
 `getTodayTasks` / `getTasksInRange` / `getGoals` / `getRecentAiChanges` /
 `updateTodayTasks` / `updateTasksForDate` / `addGoal` / `updateGoal`
 
-サーバー側のテストは `npm test`（Node標準のテストのみ。PWA本体は引き続きビルド不要）。
+テストは2層ある（どちらも Node 標準のテスト。PWA本体は引き続きビルド不要）。
+
+```sh
+npm test          # 判定のしかた（記録・予定・目標・同期・MCP・認証）
+npm run test:e2e  # 実ブラウザでの通し確認（Playwright が要る）
+npm run test:all  # 両方
+```
+
+`npm test` は速く、ブラウザを要らない。`npm run test:e2e` は本物のブラウザと本物の
+同期サーバーで、**タップ → IndexedDB → Service Worker → 再起動 → オフライン → 同期**
+までを1本で通す。ここでしか分からないこと（オフライン起動でアプリシェルが足りているか、
+2台目に届くか、消したものが戻らないか、古い問題マスタが巻き戻さないか）を受け持つ。
+Playwright が入っていない環境では、E2E は落ちずに飛ばされる。
 
 ## 日付の扱い
 

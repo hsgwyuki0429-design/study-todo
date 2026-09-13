@@ -1,5 +1,6 @@
 {
   "schemaVersion": 3,
+  "masterVersion": 1,
   "book": "改訂版 チャート式基礎からの数学I+A",
   "source": "例題は数研出版が配布している「改訂版 チャート式基礎からの数学Ⅰ／Ａ 例題一覧」Excel が出典。EXERCISES は誌面から読み取った番号と難易度のみ（難易度は未確認、掲載ページは持たない）。問題文と解答は含まない。",
   "generatedBy": "tools/build-questions.mjs",

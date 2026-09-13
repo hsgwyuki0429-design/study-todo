@@ -98,6 +98,36 @@ export const idb = {
   clear: (store) => tx(store, 'readwrite', (s) => s.clear()),
   byIndex: (store, index, value) =>
     tx(store, 'readonly', (s) => s.index(index).getAll(value)),
+  /**
+   * 1つの索引にぶら下がるものを、まとめて入れ替える。
+   *
+   * 消すのと入れるのを別々のトランザクションでやると、その合間に落ちたときに
+   * 「消えただけ」の状態が残る。IndexedDB のトランザクションは全部通るか
+   * 1つも通らないかのどちらかなので、ここで1つにまとめておく。
+   */
+  replaceByIndex(store, index, value, values) {
+    return open().then(
+      (db) =>
+        new Promise((resolve, reject) => {
+          const t = db.transaction(store, 'readwrite');
+          const os = t.objectStore(store);
+          const cursorRequest = os.index(index).openCursor(IDBKeyRange.only(value));
+          cursorRequest.onsuccess = () => {
+            const cursor = cursorRequest.result;
+            if (cursor) {
+              cursor.delete();
+              cursor.continue();
+              return;
+            }
+            // 消し終わってから入れる。ここまでが同じトランザクションの中。
+            values.forEach((v) => os.put(v));
+          };
+          t.oncomplete = () => resolve(values.length);
+          t.onerror = () => reject(t.error);
+          t.onabort = () => reject(t.error);
+        })
+    );
+  },
   putAll(store, values) {
     return open().then(
       (db) =>

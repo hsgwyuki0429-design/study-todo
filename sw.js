@@ -25,6 +25,7 @@ const SHELL = [
   './src/settings-plan.js',
   './src/squares.js',
   './src/day-detail.js',
+  './src/day-model.js',
   './src/settings-cloud.js',
   './src/datetime.js',
   './src/hash.js',
@@ -59,6 +60,14 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   // 別のオリジン（同期サーバー）やAPIには、Service Worker は関与しない。
   if (url.origin !== self.location.origin || isApiRequest(url)) return;
+
+  // 画面そのものの読み込みかどうか。オフラインのときに index.html を代わりに返せるのは、
+  // これだけである。JS や JSON の代わりに HTML を返すと、
+  // 「モジュールのはずが HTML だった」という分かりにくい失敗になるため、
+  // 見つからなければ素直に失敗させる。
+  const isNavigation = e.request.mode === 'navigate'
+    || (e.request.destination === '' && (e.request.headers.get('accept') ?? '').includes('text/html'));
+
   e.respondWith(
     fetch(e.request)
       .then((res) => {
@@ -66,6 +75,14 @@ self.addEventListener('fetch', (e) => {
         caches.open(CACHE).then((c) => c.put(e.request, copy));
         return res;
       })
-      .catch(() => caches.match(e.request).then((r) => r || caches.match('./index.html')))
+      .catch(async () => {
+        const hit = await caches.match(e.request);
+        if (hit) return hit;
+        if (isNavigation) {
+          const shell = await caches.match('./index.html');
+          if (shell) return shell;
+        }
+        return new Response('', { status: 504, statusText: 'offline' });
+      })
   );
 });

@@ -327,6 +327,9 @@ async function buildPayload(config) {
   }));
 
   const localHash = questions.length ? await hashQuestions(questions) : null;
+  // 問題マスタは版を添えて送る。サーバーは版が今より大きいときだけ受け取るので、
+  // 古いマスタを持ったままの端末が、新しいマスタを巻き戻すことはない。
+  const masterVersion = await api.getQuestionMasterVersion();
   return {
     first,
     localHash,
@@ -354,8 +357,8 @@ async function buildPayload(config) {
       taskPlans: taskPlans.slice(0, 120),
       goals,
       questions: questions.length && localHash !== config.questionsHash
-        ? { hash: localHash, questions }
-        : { hash: localHash },
+        ? { hash: localHash, masterVersion, questions }
+        : { hash: localHash, masterVersion },
     },
     remainingRecords: Math.max(0, recordsToSend.length - PUSH_CHUNK),
   };
@@ -464,11 +467,22 @@ async function applySnapshot(snapshot) {
     applied.moves = newMoves.length;
   }
 
-  // 問題マスタは足すだけ。ローカルにしかない問題を消さない。
+  // 問題マスタは版で決める。送る側と同じ決まりにしておかないと、
+  // 「端末→サーバーは置き換え、サーバー→端末は足すだけ」のように意味が食い違い、
+  // 端末ごとに問題の集合がずれたままになる。
+  //
+  //   ・サーバーのほうが新しい版 … 丸ごと入れ替える（消された問題も消える）
+  //   ・この端末にまだ1問も無い   … そのまま入れる
+  //   ・それ以外（同じか古い）    … 何もしない。次の同期でこちらの版を送る
   const questions = snapshot.questions?.questions;
   if (Array.isArray(questions) && questions.length) {
-    await idb.putAll(STORES.questions, questions);
-    applied.questions = questions.length;
+    const incomingVersion = Math.max(0, Math.floor(Number(snapshot.questions?.masterVersion) || 0));
+    const localVersion = await api.getQuestionMasterVersion();
+    const localCount = (await idb.all(STORES.questions)).length;
+    if (!localCount || incomingVersion > localVersion) {
+      await api.importQuestions(questions, { replace: localCount > 0, masterVersion: incomingVersion });
+      applied.questions = questions.length;
+    }
   }
 
   for (const goal of snapshot.goals ?? []) {
@@ -522,7 +536,11 @@ export async function syncNow({ force = false } = {}) {
       await saveCloudConfig({
         lastSyncedAt: new Date().toISOString(),
         lastPulledAtMs: response.snapshot?.serverTimeMs ?? Date.now(),
-        questionsHash: built.localHash ?? null,
+        // 受け取ったマスタで入れ替わったなら、覚えておくのはサーバー側のハッシュ。
+        // 送ったときのハッシュのままだと、次の同期でいらない送り直しが起きる。
+        questionsHash: applied.questions
+          ? (response.snapshot?.questions?.hash ?? null)
+          : (built.localHash ?? null),
         deviceName: response.device?.deviceName ?? config.deviceName,
         lastError: null,
       });

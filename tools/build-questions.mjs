@@ -192,9 +192,22 @@ export function summarize(questions) {
 
 /* ------------------------------------------------------------------ */
 
+/**
+ * 問題マスタの版。中身を変えたら必ず1つ上げること。
+ *
+ * これは「どちらが新しいか」を決めるためだけの数で、ハッシュとは役割が違う。
+ * ハッシュは「違う」ことしか分からないので、古い問題マスタを持ったままの端末が
+ * 久しぶりに同期したときに、新しいマスタを古いほうへ巻き戻してしまう。
+ * 版が小さいものはサーバーが受け取らない、という決まりにしてそれを防いでいる。
+ *
+ *   1 … 593問（数学I+A。EXERCISES を含む）
+ */
+const MASTER_VERSION = 1;
+
 function buildDocument(questions) {
   return {
     schemaVersion: 3,
+    masterVersion: MASTER_VERSION,
     book: BOOK,
     source: SOURCE_NOTE,
     generatedBy: 'tools/build-questions.mjs',

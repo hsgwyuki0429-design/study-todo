@@ -753,7 +753,9 @@ node --env-file=.env server/adapters/node.js
 ## テスト
 
 ```sh
-npm test        # = node --test
+npm test          # 判定のしかた（Node標準のテスト）
+npm run test:e2e  # 実ブラウザでの通し確認（Playwright が要る）
+npm run test:all  # 両方
 ```
 
 ## 困ったとき

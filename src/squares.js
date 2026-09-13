@@ -136,7 +136,7 @@ export function attemptDetailCard(record, { planTitle = null, onDelete = null } 
   if (planTitle) card.append(el('div', null, `対応する予定: ${planTitle}`));
   else if (!record.planItemId) card.append(el('div', null, '対応する予定: 分かりません（以前の形式の記録）'));
   // 間違って入れた記録を、本人がここから取り消せるようにする。
-  // 消すのではなく「取り消した」印をつけるので、他の端末でも同じように外れる。
+
   // 間違って入った記録を、本人がここから消せるようにする。
   // 印をつけるのではなく本当に消し、他の端末からも消える。
   if (onDelete) {

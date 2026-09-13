@@ -79,7 +79,12 @@ function bindImportDialog() {
       const list = Array.isArray(parsed) ? parsed : parsed?.questions;
       if (!Array.isArray(list)) throw new Error('Question の配列か { questions: [...] } を貼り付けてください');
       const replace = $('#import-replace')?.checked === true;
-      const n = await api.importQuestions(list, { replace });
+      // 手で入れたマスタは、本人がそうと決めたものなので、いまの版より1つ上にする。
+      // こうしないと、同期のときサーバーの同じ版に負けて戻されてしまう。
+      const n = await api.importQuestions(list, {
+        replace,
+        masterVersion: (await api.getQuestionMasterVersion()) + 1,
+      });
       await loadQuestions();
       dlg.close();
       alert(`${n}問を取り込みました`);

@@ -10,7 +10,7 @@
 //   ・デモの学習記録・予定・目標は、利用者が設定画面で明示的に消す
 // という扱いにしている（勝手に消さない）。
 
-import { importQuestions, getGoals } from './api.js';
+import { importQuestions, getGoals, getQuestionMasterVersion } from './api.js';
 import { idb, STORES } from './idb.js';
 
 /** 旧サンプルの問題ID の接頭辞。これで本物のマスタと見分ける。 */
@@ -34,17 +34,33 @@ export async function loadQuestionMaster() {
 
 /**
  * 問題マスタを用意する。
- * 何も入っていないとき、または入っているのが旧サンプルだけのときに投入する。
- * 利用者が自分で入れたマスタは上書きしない。
+ *
+ * ・何も入っていないとき、入っているのが旧サンプルだけのときは投入する
+ * ・すでに入っていても、同梱のマスタのほうが新しい版なら入れ替える
+ *   （古いマスタを持ったままの端末が、アプリだけ新しくなって取り残されないように）
+ * ・利用者が自分で入れたマスタ（同梱より新しい版）は上書きしない
  */
 export async function seedIfEmpty() {
   const existing = await idb.all(STORES.questions);
   const onlyDemo = existing.length > 0 && existing.every((q) => isDemoQuestionId(q.id));
-  if (existing.length > 0 && !onlyDemo) return { imported: 0, replacedDemo: false };
+  const localVersion = await getQuestionMasterVersion();
+
+  if (existing.length > 0 && !onlyDemo) {
+    // 版だけ見て、同梱のほうが新しければ入れ替える。
+    // 中身を読むのはそのときだけなので、ふだんの起動は今までどおり速い。
+    const master = await loadQuestionMaster();
+    const bundled = Number(master.masterVersion) || 0;
+    if (bundled <= localVersion) return { imported: 0, replacedDemo: false, upgraded: false };
+    const imported = await importQuestions(master.questions, { replace: true, masterVersion: bundled });
+    return { imported, replacedDemo: false, upgraded: true, masterVersion: bundled };
+  }
 
   const master = await loadQuestionMaster();
-  const imported = await importQuestions(master.questions, { replace: onlyDemo });
-  return { imported, replacedDemo: onlyDemo };
+  const imported = await importQuestions(master.questions, {
+    replace: onlyDemo,
+    masterVersion: Number(master.masterVersion) || 0,
+  });
+  return { imported, replacedDemo: onlyDemo, upgraded: false };
 }
 
 /** 旧サンプルの学習記録・予定・目標が残っているかを数える。 */
