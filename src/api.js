@@ -20,7 +20,8 @@ export const DATA_VERSION = '1.4.0';
 export const EVALUATIONS = [
   { value: 'perfect', symbol: '◯', label: '完璧にできた', tone: 'success' },
   { value: 'better_solution', symbol: '解', label: '正解だが、もっと簡単な解法があった', tone: 'accent' },
-  { value: 'weak_writing', symbol: '記', label: '正解だが、記述が甘い', tone: 'accent' },
+  // 「解」と色がかぶらないようにする（マスは色だけで意味を表すため）。
+  { value: 'weak_writing', symbol: '記', label: '正解だが、記述が甘い', tone: 'teal' },
   { value: 'calc_error', symbol: '△', label: '計算ミス', tone: 'warning' },
   { value: 'wrong_approach', symbol: '✕', label: '方針が違った', tone: 'danger' },
 ];

@@ -7,6 +7,8 @@ import { startOfWeekKey } from './datetime.js';
 
 export const state = {
   tab: 'home',
+  // 設定タブで開いている区分（1つずつ開く）。null は全部たたんだ状態。
+  settingsOpen: null,
   idleTab: 'todo',
   session: { ...EMPTY_SESSION },
   settings: { ...DEFAULT_SETTINGS },
@@ -26,6 +28,8 @@ export const state = {
     selectedDate: null,
     scrollY: 0,
     restoreScroll: null,
+    // 右上の ℹ️ で開く「マスの見方」。
+    helpOpen: false,
   },
 };
 

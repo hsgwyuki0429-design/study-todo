@@ -72,8 +72,8 @@ test("今日は、実績と残りの予定が二重にならない", () => {
     tasks: [task()],
     records: [record({ planItemId: items[0].itemId })],
   });
-  assert.equal(day.attempts.length, 1);
-  assert.deepEqual(day.plannedItems.map((entry) => entry.item.questionId), ["q2"]);
+  assert.equal(day.attempts.example.length, 1);
+  assert.deepEqual(day.planned.example.map((entry) => entry.item.questionId), ["q2"]);
 });
 
 test("過ぎた日は、実際に取り組んだ記録だけを出す（予定にない分も出す）", () => {
@@ -82,8 +82,8 @@ test("過ぎた日は、実際に取り組んだ記録だけを出す（予定�
     tasks: [task({ date: "2026-09-11" })],
     records: [record({ questionId: "q9", timestamp: "2026-09-11T03:00:00Z" })],
   });
-  assert.deepEqual(day.attempts.map((entry) => entry.questionId), ["q9"], "予定に無かった問題も出る");
-  assert.equal(day.plannedItems.length, 0, "過ぎた日の未実施は実績マスに混ぜない");
+  assert.deepEqual(day.attempts.example.map((entry) => entry.questionId), ["q9"], "予定に無かった問題も出る");
+  assert.equal(day.plannedCount, 0, "過ぎた日の未実施は実績マスに混ぜない");
 });
 
 test("これからの日は、予定だけを出す", () => {
@@ -92,25 +92,39 @@ test("これからの日は、予定だけを出す", () => {
     tasks: [task({ date: "2026-09-13" })],
     records: [],
   });
-  assert.equal(day.attempts.length, 0);
-  assert.equal(day.plannedItems.length, 2);
+  assert.equal(day.attemptCount, 0);
+  assert.equal(day.planned.example.length, 2);
   assert.equal(day.isFuture, true);
 });
 
-test("チャレンジは1回で1マス。中の問題は例題の段に出さない", () => {
-  const challengeTask = task({ id: "c1", kind: "challenge", questionIds: ["q1", "q2"], title: "10分チャレンジ" });
+test("段は「例題」と「エクササイズ」に分かれる", () => {
+  const type = (id) => (id.startsWith("ex") ? "EXERCISES" : "基本例題");
+  const mixed = task({ questionIds: ["q1", "ex1", "ex2"] });
+  const day = buildDay("2026-09-13", {
+    today: "2026-09-12",
+    tasks: [mixed],
+    records: [],
+    questionType: type,
+  });
+  assert.deepEqual(day.planned.example.map((entry) => entry.item.questionId), ["q1"]);
+  assert.deepEqual(day.planned.exercise.map((entry) => entry.item.questionId), ["ex1", "ex2"]);
+});
+
+test("チャレンジで解いた分も、1問ずつエクササイズの段に並ぶ", () => {
+  const type = (id) => (id.startsWith("ex") ? "EXERCISES" : "基本例題");
+  const challengeTask = task({ id: "c1", kind: "challenge", questionIds: ["ex1", "ex2"], title: "10分チャレンジ", completed: true });
   const day = buildDay("2026-09-12", {
     today: "2026-09-12",
     tasks: [challengeTask],
     records: [
-      record({ questionId: "q1", challengeId: "chl1" }),
-      record({ questionId: "q2", challengeId: "chl1" }),
+      record({ questionId: "ex1", challengeId: "chl1" }),
+      record({ questionId: "ex2", challengeId: "chl1", evaluation: "calc_error" }),
     ],
-    challenges: [{ id: "chl1", taskId: "c1", date: "2026-09-12", laps: [{ questionId: "q1" }, { questionId: "q2" }] }],
+    questionType: type,
   });
-  assert.equal(day.attempts.length, 0, "チャレンジの中の記録は例題の段に出さない");
-  assert.equal(day.challenges.length, 1, "チャレンジは1マス");
-  assert.equal(day.plannedChallenges.length, 0, "実施済みのチャレンジは予定として残らない");
+  assert.equal(day.attempts.exercise.length, 2, "チャレンジは1マスにまとめず、問題の数だけ並べる");
+  assert.equal(day.attempts.example.length, 0);
+  assert.equal(day.plannedCount, 0, "終わったチャレンジは予定として残らない");
 });
 
 test("週は月曜はじまり", () => {
@@ -128,7 +142,7 @@ test("日本時間の日付境界でも、正しい日の記録になる", () =>
     tasks: [],
     records: [record({ timestamp: "2026-09-12T15:30:00Z" })],
   });
-  assert.equal(day.attempts.length, 1);
+  assert.equal(day.attemptCount, 1);
 });
 
 test("移動の記録は、理由が渡されなければ未入力のまま残る", () => {

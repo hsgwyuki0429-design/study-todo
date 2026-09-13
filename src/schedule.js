@@ -1,7 +1,7 @@
 // スケジュールタブ。
 //
-// 主役は「週間カレンダー」。月曜から日曜までの7日ぶんのカードを縦に並べ、
-// それぞれのカードに、その日の「例題」と「チャレンジ」を正方形のマスで出す。
+// 主役は「週間カレンダー」。月曜から日曜までの7日を、1画面に収まる高さで縦に並べる。
+// 1日は「例題」と「エクササイズ」の2段で、中身は正方形のマスだけで表す。
 //
 // マスの意味は日付で変わる。
 //
@@ -9,23 +9,16 @@
 //   今日     … 今日の実績 ＋ まだ残っている予定
 //   これから … その日にやる予定
 //
-// 数字や長い題名を並べず、マスの数で「どれだけやったか・やる予定か」が分かるようにする。
-// マスが多い日はカードが縦に伸びる（件数を黙って省かない）。
+// マスには文字を入れない。色の意味は右上の ℹ️ と、設定タブのいちばん下のヘルプで見られる。
+// 数や中身を詳しく見たいときは、日付を押して詳細へ移る。
 
 import * as api from './api.js';
 import { todayKey } from './api.js';
-import { buildDay } from './day-model.js';
+import { ROW_LABELS, buildDay } from './day-model.js';
 import { startOfWeekKey } from './datetime.js';
 import { state, q, qLabel, render } from './state.js';
-import { el, fmtDate, fmtMS, fmtTime, row, emptyState } from './ui.js';
-import {
-  attemptSquare,
-  challengeSquare,
-  legend,
-  plannedChallengeSquare,
-  plannedSquare,
-  squareRow,
-} from './squares.js';
+import { el } from './ui.js';
+import { attemptSquare, helpPanel, plannedSquare, squareRow } from './squares.js';
 import { renderDayDetail } from './day-detail.js';
 
 const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
@@ -54,96 +47,65 @@ const shortDate = (dateKey) => {
 };
 
 /* ------------------------------------------------------------------ */
-/* その日の中身を組み立てる                                            */
+/* 1日ぶんの行                                                         */
 /* ------------------------------------------------------------------ */
 
-function daySection(title, count, nodes, emptyText) {
-  const section = el('div', 'day-section');
-  const head = el('div', 'day-section-head');
-  head.append(el('span', null, title), el('span', null, count));
-  section.append(head);
-  if (nodes.length) section.append(squareRow(nodes));
-  else section.append(el('div', 'day-empty', emptyText));
-  return section;
-}
-
-function timeLine(day, time) {
-  if (!time) return null;
-  const available = time.available;
-  const line = el('div', 'day-time');
-  if (available === null) {
-    line.textContent = `予定 ${time.plannedMinutes}分 ／ 使える時間は未設定`;
-    return line;
-  }
-  const short = time.plannedMinutes > available;
-  if (short) line.classList.add('short');
-  line.textContent = `予定 ${time.plannedMinutes}分 ／ 使える ${available}分`
-    + (short ? `（${time.plannedMinutes - available}分オーバー）` : '');
-  return line;
-}
-
-function dayCard(day, onOpen, time) {
-  const date = parse(day.date);
-  const card = el('button', 'day-card');
-  if (day.isToday) card.classList.add('is-today');
-  if (day.isPast) card.classList.add('is-past');
-  card.onclick = onOpen;
-
-  const head = el('div', 'day-head');
-  head.append(el('span', 'day-date', shortDate(day.date)));
-  const weekday = el('span', `day-weekday${date.getDay() === 0 ? ' sun' : date.getDay() === 6 ? ' sat' : ''}`,
-    `(${WEEKDAYS[date.getDay()]})`);
-  head.append(weekday);
-  if (day.isToday) head.append(el('span', 'day-today-pill', '今日'));
-  head.append(el('span', 'day-open', '詳細 ›'));
-  card.append(head);
-
-  // これからの日と今日は、「予定○分／使える○分」を出す。
-  if (!day.isPast) {
-    const line = timeLine(day, time);
-    if (line) card.append(line);
-  }
-
-  // 何もない日は、2段を並べずに1行で済ませる（1週間ぶんが読みやすいように）。
-  const nothing = !day.attempts.length && !day.plannedItems.length
-    && !day.challenges.length && !day.plannedChallenges.length;
-  if (nothing) {
-    card.append(el('div', 'day-empty', day.isFuture ? '予定なし' : day.isToday ? '記録も予定もなし' : '記録なし'));
-    return card;
-  }
-
-  // 例題の段（EXERCISES など、チャレンジ以外の取り組みはすべてここに入る）。
-  const questionSquares = [
-    ...day.attempts.map((record) => attemptSquare(record, { label: qLabel(record.questionId) })),
-    ...day.plannedItems.map(({ item }) => plannedSquare({
+/** その段のマスを作る（実績が先、残りの予定があとに並ぶ）。 */
+function squaresFor(day, rowKey) {
+  return [
+    ...day.attempts[rowKey].map((record) => attemptSquare(record)),
+    ...day.planned[rowKey].map(({ item }) => plannedSquare({
       label: qLabel(item.questionId),
       carriedOver: Boolean(item.originalDate && item.originalDate !== day.date),
     })),
   ];
-  const doneCount = day.attempts.length;
-  const planCount = day.plannedItems.length;
-  card.append(daySection(
-    '例題',
-    day.isFuture ? `予定 ${planCount}` : planCount ? `実施 ${doneCount} ・ 予定 ${planCount}` : `実施 ${doneCount}`,
-    questionSquares,
-    day.isFuture ? '予定なし' : day.isToday ? 'なし' : '記録なし',
-  ));
+}
 
-  // チャレンジの段。1回で1マス。合計の問題数も添える。
-  const challengeSquares = [
-    ...day.challenges.map((result) => challengeSquare(result, { title: 'チャレンジ' })),
-    ...day.plannedChallenges.map((task) => plannedChallengeSquare(task)),
-  ];
-  const challengeQuestions = day.challenges.reduce((sum, result) => sum + (result.laps?.length ?? 0), 0)
-    + day.plannedChallenges.reduce((sum, task) => sum + (task.questionIds?.length ?? 0), 0);
-  card.append(daySection(
-    'チャレンジ',
-    challengeSquares.length ? `${challengeSquares.length}回 ・ 計${challengeQuestions}問` : '0回',
-    challengeSquares,
-    day.isFuture ? '予定なし' : day.isToday ? 'なし' : '記録なし',
-  ));
+/** 「45/60分」のような、その日の時間のやりくり。今日とこれからの日だけ。 */
+function timeBadge(time) {
+  if (!time) return null;
+  const badge = el('span', 'day-minutes');
+  if (time.available === null) {
+    badge.textContent = `${time.plannedMinutes}分`;
+    badge.title = '使える時間は未設定です';
+    return badge;
+  }
+  if (time.plannedMinutes > time.available) badge.classList.add('short');
+  badge.textContent = `${time.plannedMinutes}/${time.available}分`;
+  badge.title = `予定 ${time.plannedMinutes}分 ／ 使える ${time.available}分`;
+  return badge;
+}
 
-  return card;
+function dayRow(day, onOpen, time) {
+  const date = parse(day.date);
+  const node = el('button', 'day-row');
+  if (day.isToday) node.classList.add('is-today');
+  if (day.isPast) node.classList.add('is-past');
+  node.onclick = onOpen;
+
+  const column = el('div', 'day-col');
+  const label = el('div', 'day-label');
+  label.append(el('span', 'day-date', shortDate(day.date)));
+  label.append(el('span', `day-weekday${date.getDay() === 0 ? ' sun' : date.getDay() === 6 ? ' sat' : ''}`,
+    WEEKDAYS[date.getDay()]));
+  column.append(label);
+  if (!day.isPast) {
+    const badge = timeBadge(time);
+    if (badge) column.append(badge);
+  }
+  node.append(column);
+
+  const bars = el('div', 'day-bars');
+  for (const rowKey of ['example', 'exercise']) {
+    bars.append(squareRow(squaresFor(day, rowKey), { label: ROW_LABELS[rowKey] }));
+  }
+  node.append(bars);
+
+  const aria = `${shortDate(day.date)}（${WEEKDAYS[date.getDay()]}）`
+    + ` 例題 実績${day.attempts.example.length}・予定${day.planned.example.length}`
+    + ` エクササイズ 実績${day.attempts.exercise.length}・予定${day.planned.exercise.length}`;
+  node.setAttribute('aria-label', aria);
+  return node;
 }
 
 /* ------------------------------------------------------------------ */
@@ -164,8 +126,16 @@ export async function renderSchedule(screen) {
     return;
   }
 
-  const head = el('div', 'view-head');
+  const head = el('div', 'view-head view-head-row');
   head.append(el('div', 'view-title', 'スケジュール'));
+  const help = el('button', 'icon-btn', 'ⓘ');
+  help.setAttribute('aria-label', 'マスの見方');
+  help.title = 'マスの見方';
+  help.onclick = () => {
+    state.schedule.helpOpen = !state.schedule.helpOpen;
+    render();
+  };
+  head.append(help);
   screen.append(head);
 
   const weekStart = state.schedule.weekStart;
@@ -174,19 +144,17 @@ export async function renderSchedule(screen) {
   const to = days[6];
   const today = todayKey();
 
-  const [tasksByDate, attemptsByDate, challenges] = await Promise.all([
+  const [tasksByDate, attemptsByDate] = await Promise.all([
     api.getTasksByDate(from, to),
     api.getAttemptsByDate(from, to),
-    api.getChallengeResults(200),
   ]);
-  // 各日の「使える時間」と「予定の見積もり」。過ぎた日は出さないので今日から先だけ。
+  // 各日の「使える時間」と「予定の見積もり」。過ぎた日には出さないので今日から先だけ。
   const timeByDate = {};
   for (const dateKey of days) {
     if (dateKey < today) continue;
     const info = await api.availabilityForDay(dateKey);
     timeByDate[dateKey] = { available: info.available, plannedMinutes: await api.plannedMinutesFor(dateKey) };
   }
-  const challengesWithDate = challenges.map((result) => ({ ...result, date: api.dayOf(result.timestamp) }));
 
   const nav = el('div', 'week-nav');
   const prev = el('button', 'cal-arrow', '◀');
@@ -203,29 +171,33 @@ export async function renderSchedule(screen) {
   nav.append(prev, el('div', 'week-period', `${shortDate(from)} 〜 ${shortDate(to)}`), next, now);
   screen.append(nav);
 
+  if (state.schedule.helpOpen) screen.append(helpPanel());
+
+  // 問題の種類（例題かエクササイズか）は、読み込んである問題マスタから引く。
+  const questionType = (questionId) => q(questionId)?.type ?? null;
+
   const list = el('div', 'week-list');
   for (const dateKey of days) {
     const day = buildDay(dateKey, {
       tasks: tasksByDate[dateKey] ?? [],
       records: attemptsByDate[dateKey] ?? [],
-      challenges: challengesWithDate,
       today,
+      questionType,
     });
-    list.append(dayCard(day, () => {
+    list.append(dayRow(day, () => {
       // 戻ったときのために、いまのスクロール位置を覚えておく。
-      state.schedule.scrollY = window.scrollY;
+      state.schedule.scrollY = screen.scrollTop;
       state.schedule.selectedDate = dateKey;
       render();
     }, timeByDate[dateKey]));
   }
   screen.append(list);
-  screen.append(legend());
 
   // 週を移った直後でなければ、元の位置へ戻す。
   if (state.schedule.restoreScroll != null) {
     const y = state.schedule.restoreScroll;
     state.schedule.restoreScroll = null;
-    requestAnimationFrame(() => window.scrollTo(0, y));
+    requestAnimationFrame(() => { screen.scrollTop = y; });
   }
 }
 

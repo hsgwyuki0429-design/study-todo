@@ -15,7 +15,7 @@ import { MOVE_REASONS, MOVE_REASON_LABELS, MOVE_KIND_LABELS, todayKey } from './
 import { itemsOf, splitPlanItems } from './plan-items.js';
 import { state, q, qLabel, render, loadTasks } from './state.js';
 import { el, fmtDate, fmtMS, fmtTime, row, emptyState } from './ui.js';
-import { attemptDetailCard, attemptSquare, challengeSquare, plannedSquare, squareRow } from './squares.js';
+import { attemptDetailCard, attemptSquare, plannedSquare, squareRow } from './squares.js';
 import { syncInBackground } from './cloud-sync.js';
 
 // どのマスを開いているか（押すたびに開閉する）。
@@ -180,7 +180,16 @@ export async function renderDayDetail(screen, dateKey) {
         sub: `${result.succeeded ? '制限時間内' : '時間超過'} ・ ${fmtMS(result.totalElapsedSeconds)} / ${fmtMS(result.timeLimitSeconds)}`,
         right: fmtTime(result.timestamp),
       });
-      node.prepend(challengeSquare(result));
+      // チャレンジも、中の1問ずつをマスで並べる（カレンダーと同じ見方）。
+      node.prepend(squareRow((result.laps ?? []).map((lap) => {
+        const record = records.find((entry) => entry.challengeId === result.id && entry.questionId === lap.questionId);
+        return attemptSquare(record ?? {
+          questionId: lap.questionId,
+          evaluation: lap.evaluation,
+          durationSeconds: lap.durationSeconds,
+          challengeId: result.id,
+        });
+      })));
       list.append(node);
       // チャレンジの中の1問ずつ。カレンダーでは1マスにまとめているが、
       // ここでは中身が分かるようにする（各問題の履歴にも1回として残っている）。

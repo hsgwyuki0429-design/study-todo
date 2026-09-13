@@ -19,6 +19,8 @@
   --danger-bg: #fef2f2;
   --violet: #7c3aed;
   --violet-bg: #f5f3ff;
+  --teal: #0d9488;
+  --teal-bg: #f0fdfa;
   --on-accent: #ffffff;
 
   --tap: 44px;
@@ -30,7 +32,11 @@
   --tone-warning: var(--warning);
   --tone-danger: var(--danger);
   --tone-violet: var(--violet);
+  --tone-teal: var(--teal);
   --tone-idle: var(--fg-faint);
+
+  /* マスどうしの境目。すき間ではなく、同じ色が続いても数えられるようにするための細い線。 */
+  --sq-sep: rgba(255, 255, 255, .45);
 
   --sq: 30px;
 }
@@ -54,6 +60,9 @@
     --danger-bg: #2c1516;
     --violet: #a78bfa;
     --violet-bg: #221a38;
+    --teal: #2dd4bf;
+    --teal-bg: #0f2b28;
+    --sq-sep: rgba(0, 0, 0, .45);
     --on-accent: #0b0b0d;
   }
 }
@@ -76,6 +85,9 @@
   --danger-bg: #2c1516;
   --violet: #a78bfa;
   --violet-bg: #221a38;
+  --teal: #2dd4bf;
+  --teal-bg: #0f2b28;
+  --sq-sep: rgba(0, 0, 0, .45);
   --on-accent: #0b0b0d;
 }
 
@@ -105,7 +117,16 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   border-right: 1px solid var(--line);
 }
 
-.screen { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* 画面ごとにスクロールする。ここを指定しないと、中身がタブバーの裏へ回り込んで隠れる。 */
+.screen {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
 .screen[hidden] { display: none; }
 
 /* ---------- タブバー ---------- */
@@ -270,6 +291,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .tone-warning { color: var(--warning); background: var(--warning-bg); }
 .tone-danger { color: var(--danger); background: var(--danger-bg); }
 .tone-violet { color: var(--violet); background: var(--violet-bg); }
+.tone-teal { color: var(--teal); background: var(--teal-bg); }
 
 .section-head {
   padding: 8px 16px;
@@ -472,130 +494,99 @@ input[type='password'] { width: 100%; }
 /* 正方形のマス（スケジュール・日別の詳細・例題ごとの履歴で共通）      */
 /* ================================================================== */
 
+/* マスは色だけで表す。すき間なく並べるが、右と下に背景色の区切りを入れて数えられるようにする。 */
 .sq {
   flex: none;
   width: var(--sq);
   height: var(--sq);
-  border-radius: 6px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  line-height: 1;
-  position: relative;
+  border-radius: 0;
+  display: inline-block;
   box-sizing: border-box;
   background: var(--bg-sub);
-  border: 1px solid var(--line-strong);
-  color: var(--fg-sub);
-  overflow: hidden;
+  /* すき間は空けない。同じ色が並んでも数えられるよう、内側に細い境目だけ入れる。 */
+  box-shadow: inset -1px 0 0 var(--sq-sep), inset 0 -1px 0 var(--sq-sep);
 }
 
-/* 実績のマスは塗り、予定のマスは枠だけ。色が見えなくても見分けられるよう、
-   予定は破線にしておく。 */
-.sq-done { border-color: currentColor; }
-.sq-done.tone-success { color: var(--success); background: var(--success-bg); }
-.sq-done.tone-accent { color: var(--accent); background: var(--accent-bg); }
-.sq-done.tone-warning { color: var(--warning); background: var(--warning-bg); }
-.sq-done.tone-danger { color: var(--danger); background: var(--danger-bg); }
-.sq-done.tone-violet { color: var(--violet); background: var(--violet-bg); }
-.sq-done.tone-idle { color: var(--fg-sub); background: var(--bg-sub); border-style: dotted; }
+.sq-done.tone-success { background: var(--success); }
+.sq-done.tone-accent { background: var(--accent); }
+.sq-done.tone-warning { background: var(--warning); }
+.sq-done.tone-danger { background: var(--danger); }
+.sq-done.tone-violet { background: var(--violet); }
+.sq-done.tone-teal { background: var(--teal); }
+.sq-done.tone-idle { background: var(--fg-faint); }
 
+/* 予定は枠だけ。塗りつぶしの実績とはっきり分ける。 */
 .sq-plan {
   background: transparent;
-  border-style: dashed;
-  border-color: var(--line-strong);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
 }
-.sq-carried { border-color: var(--accent); }
-.sq-carried::after {
-  content: '→';
-  font-size: 11px;
-  color: var(--accent);
-}
-
-.sq-challenge { border-color: var(--violet); }
-.sq-badge {
-  position: absolute;
-  right: 1px;
-  bottom: 0;
-  font-size: 9px;
-  color: var(--fg);
-  background: var(--bg);
-  border-radius: 3px;
-  padding: 0 2px;
-  line-height: 1.3;
-}
-.sq-plan.sq-challenge .sq-badge { background: transparent; color: var(--fg-sub); }
+.sq-carried { box-shadow: inset 0 0 0 1px var(--accent); }
 
 .sq-tappable { cursor: pointer; }
-.sq-tappable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sq-tappable:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-/* マスが多い日は折り返して、カードのほうを縦に伸ばす（件数は省かない）。 */
-.sq-row { display: flex; flex-wrap: wrap; gap: 6px; }
+/* マスの並び。すき間なく、多い日は折り返す（件数は省かない）。 */
+.sq-row { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
+.sq-row-label { flex: none; width: 2.6em; font-size: 10px; color: var(--fg-sub); line-height: var(--sq); }
+.sq-row.is-empty .sq-row-label { color: var(--fg-faint); }
+/* 何も無い段は、細い点線で「ここは空」と分かるようにする（高さは揃える）。 */
+.sq-row.is-empty .sq-strip { border-bottom: 1px dotted var(--line-strong); height: calc(var(--sq) / 2); min-height: 0; }
+.sq-strip { display: flex; flex-wrap: wrap; gap: 0; min-width: 0; min-height: var(--sq); flex: 1; }
 
-.sq-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 14px;
-  padding: 10px 16px 14px;
-  font-size: 12px;
-  color: var(--fg-sub);
-}
-.sq-legend-item { display: inline-flex; align-items: center; gap: 6px; }
-.sq-legend .sq { --sq: 18px; font-size: 11px; border-radius: 4px; }
+/* ヘルプ（設定タブのいちばん下と、スケジュール右上の ℹ️ から開く） */
+.sq-help { padding: 10px 16px 16px; font-size: 13px; color: var(--fg-sub); background: var(--bg-sub); }
+.sq-help-lead { margin: 6px 0; line-height: 1.5; }
+.sq-help-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.sq-help-item { display: flex; align-items: center; gap: 8px; color: var(--fg); }
+.sq-help .sq { --sq: 16px; }
 
 /* ================================================================== */
-/* 週間カレンダー                                                      */
+/* 週間カレンダー（1画面に7日ぶんを収める）                            */
 /* ================================================================== */
 
-.week-list { display: flex; flex-direction: column; gap: 10px; padding: 0 12px 24px; }
+:root { --sq: 18px; }
 
-.day-card {
+.week-list { display: flex; flex-direction: column; padding: 0 10px 16px; }
+
+.day-row {
   width: 100%;
   box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 6px;
+  border-bottom: 1px solid var(--line);
   text-align: left;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 12px;
   color: inherit;
   font: inherit;
-  display: block;
+  background: transparent;
 }
-.day-card.is-today { border-color: var(--accent); }
-.day-card.is-past { background: var(--bg-sub); }
+.day-row.is-past { color: var(--fg-sub); }
+.day-row.is-today { background: var(--accent-bg); border-radius: 8px; }
 
-.day-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
-.day-date { font-size: 16px; font-weight: 600; }
-.day-weekday { font-size: 13px; color: var(--fg-sub); }
+.day-col { flex: none; width: 62px; }
+.day-label { display: flex; align-items: baseline; gap: 4px; }
+.day-date { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.day-weekday { font-size: 11px; color: var(--fg-sub); }
 .day-weekday.sat { color: var(--accent); }
 .day-weekday.sun { color: var(--danger); }
-.day-today-pill {
-  font-size: 11px;
-  color: var(--on-accent);
-  background: var(--accent);
-  border-radius: 999px;
-  padding: 2px 8px;
-}
-.day-open { margin-left: auto; font-size: 12px; color: var(--fg-sub); }
+.day-minutes { display: block; font-size: 10px; color: var(--fg-sub); font-variant-numeric: tabular-nums; }
+.day-minutes.short { color: var(--danger); }
 
-.day-section { margin-top: 8px; }
-.day-section-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--fg-sub);
-  margin-bottom: 6px;
-}
-.day-empty { font-size: 13px; color: var(--fg-faint); padding: 2px 0 4px; }
+.day-bars { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 
 .week-nav {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 6px 12px;
+  flex: none;
 }
 .week-period { flex: 1; text-align: center; font-size: 15px; font-weight: 600; }
+
+/* 見出しの右端に置く小さなボタン（ℹ️ など） */
+.view-head-row { display: flex; align-items: center; justify-content: space-between; }
+.icon-btn { font-size: 18px; min-width: var(--tap); min-height: var(--tap); }
 
 /* 日別の詳細 */
 .detail-item {
@@ -660,3 +651,41 @@ input[type='password'] { width: 100%; }
 /* 週間カレンダーの「予定○分／使える○分」 */
 .day-time { font-size: 12px; color: var(--fg-sub); margin-top: 6px; }
 .day-time.short { color: var(--danger); }
+
+
+/* ================================================================== */
+/* 設定タブの区分（押すと中身が開く）                                  */
+/* ================================================================== */
+
+.section-toggle {
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  min-height: var(--tap);
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+}
+.section-toggle .row-main { flex: 1; min-width: 0; }
+.section-toggle[aria-expanded='true'] { background: var(--bg-sub); }
+.section-toggle .section-mark { flex: none; color: var(--fg-faint); font-size: 13px; }
+.section-body { border-bottom: 1px solid var(--line); }
+
+.outline { padding: 8px 16px 12px; }
+.outline summary { min-height: var(--tap); display: flex; align-items: center; color: var(--accent); font-size: 14px; cursor: pointer; }
+.outline .row, .outline .section-head { padding-left: 0; padding-right: 0; }
+
+/* 画面が小さいときは、マスと余白を少し詰めて1週間ぶんを収める。
+   それでも入りきらないほど予定が多い日は、折り返して縦に伸びる（件数は省かない）。 */
+@media (max-width: 359px), (max-height: 720px) {
+  :root { --sq: 15px; }
+  .day-row { padding: 6px 4px; gap: 6px; }
+  .day-col { width: 56px; }
+  .week-nav { padding: 4px 10px; }
+  .week-list { padding: 0 8px 12px; }
+}

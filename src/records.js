@@ -4,7 +4,7 @@ import * as api from './api.js';
 import { EVALUATIONS, EVAL_MAP, dayOf } from './api.js';
 import { state, q, qLabel, render } from './state.js';
 import { el, fmtMS, fmtTime, fmtDate, row, segmented, emptyState } from './ui.js';
-import { attemptDetailCard, attemptSquare, legend, squareRow } from './squares.js';
+import { attemptDetailCard, attemptSquare, squareRow } from './squares.js';
 
 const CHEVRON = '›';
 
@@ -80,7 +80,6 @@ async function tocView(screen) {
       }
     }
     screen.append(list);
-    screen.append(legend());
     return;
   }
 

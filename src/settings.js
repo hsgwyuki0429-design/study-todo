@@ -1,10 +1,14 @@
 // 設定タブ。
+//
+// 項目が増えたので、ふだんは「大枠」だけを並べ、押したところだけ中身を開く。
+// 開くのは一度に1つ。どこに何があるかが、開かなくても分かることを優先している。
 
 import * as api from './api.js';
 import { state, render } from './state.js';
 import { el, row } from './ui.js';
 import { renderCloudCard } from './settings-cloud.js';
 import { renderAvailabilityCard, renderGoalCard } from './settings-plan.js';
+import { helpPanel } from './squares.js';
 import { countDemoStudyData, removeDemoStudyData, loadQuestionMaster } from './seed.js';
 
 async function update(patch) {
@@ -46,69 +50,48 @@ function download(name, text) {
   URL.revokeObjectURL(url);
 }
 
-export async function renderSettings(screen) {
-  screen.innerHTML = '';
-  const head = el('div', 'view-head');
-  head.append(el('div', 'view-title', '設定'));
-  screen.append(head);
+/**
+ * 大枠の見出し。押すと中身が開く（開いていれば閉じる）。
+ * 中身は open のときだけ組み立てるので、閉じているあいだは読み込みも起きない。
+ */
+async function section(screen, { id, title, sub, build }) {
+  const open = state.settingsOpen === id;
+  const toggle = el('button', 'section-toggle');
+  toggle.setAttribute('aria-expanded', String(open));
+  const main = el('div', 'row-main');
+  main.append(el('div', 'row-title', title));
+  if (sub) main.append(el('div', 'row-sub', sub));
+  toggle.append(main, el('span', 'section-mark', open ? '⌄' : '›'));
+  toggle.onclick = () => {
+    state.settingsOpen = open ? null : id;
+    render();
+  };
+  screen.append(toggle);
+  if (!open) return;
+  const body = el('div', 'section-body');
+  await build(body);
+  screen.append(body);
+}
 
-  const list = el('div', 'list');
+/* ------------------------------------------------------------------ */
+/* それぞれの中身                                                      */
+/* ------------------------------------------------------------------ */
 
-  // カレンダーは週ぎめの正方形のマスに統一したため、
-  // 月表示の「リング型／塗り型」の切り替えは無くなった。
-  // 保存済みの設定値は消さずに残してある（古いバックアップもそのまま読める）。
-  await renderGoalCard(list, render);
-  await renderAvailabilityCard(list, render);
-
-  list.append(el('div', 'section-head', '表示'));
-  list.append(
-    choiceRow('ダークモード', null,
-      [['auto', '自動'], ['light', 'ライト'], ['dark', 'ダーク']],
-      state.settings.theme,
-      (v) => update({ theme: v }))
-  );
-
-  list.append(el('div', 'section-head', '問題データの管理'));
+async function buildQuestions(list) {
   const info = await api.getAppInfo();
-  list.append(
-    row({
-      title: '問題マスタ',
-      sub: `${info.questionCount}問 ・ ${info.books.join('、') || '冊の情報なし'}`,
-    })
-  );
+  list.append(row({
+    title: '問題マスタ',
+    sub: `${info.questionCount}問 ・ ${info.books.join('、') || '冊の情報なし'}`,
+  }));
   if (info.courses?.length) {
-    list.append(
-      row({
-        title: 'SELECT STUDY',
-        sub: info.courses.join(' ・ '),
-        classes: ['row-indent'],
-      })
-    );
+    list.append(row({ title: 'SELECT STUDY', sub: info.courses.join(' ・ '), classes: ['row-indent'] }));
   }
   if (info.questionTypes.length) {
-    list.append(
-      row({
-        title: '種類ごとの問題数',
-        sub: info.questionTypes.map((t) => `${t.type} ${t.count}問`).join(' ・ '),
-        classes: ['row-indent'],
-      })
-    );
-  }
-  for (const subject of info.subjects) {
-    list.append(el('div', 'section-head', subject.subject));
-    for (const ch of subject.chapters) {
-      const total = ch.sectionDetails.reduce((sum, sd) => sum + sd.questionCount, 0);
-      list.append(row({ title: ch.chapter, sub: `${total}問` }));
-      for (const sd of ch.sectionDetails) {
-        list.append(
-          row({
-            title: sd.section,
-            sub: `${sd.questionCount}問${sd.page ? ` ・ p.${sd.page}〜` : ''}`,
-            classes: ['row-indent'],
-          })
-        );
-      }
-    }
+    list.append(row({
+      title: '種類ごとの問題数',
+      sub: info.questionTypes.map((t) => `${t.type} ${t.count}問`).join(' ・ '),
+      classes: ['row-indent'],
+    }));
   }
 
   const importBtn = el('button', 'btn', '問題をインポート');
@@ -129,17 +112,33 @@ export async function renderSettings(screen) {
   importWrap.append(importBtn, reloadBtn);
   list.append(importWrap);
 
+  // 章と単元の一覧は、いちばん下にたたんで置く（数が多いため）。
+  const outline = el('details', 'outline');
+  outline.append(el('summary', null, '章と単元の一覧'));
+  for (const subject of info.subjects) {
+    outline.append(el('div', 'section-head', subject.subject));
+    for (const ch of subject.chapters) {
+      const total = ch.sectionDetails.reduce((sum, sd) => sum + sd.questionCount, 0);
+      outline.append(row({ title: ch.chapter, sub: `${total}問` }));
+      for (const sd of ch.sectionDetails) {
+        outline.append(row({
+          title: sd.section,
+          sub: `${sd.questionCount}問${sd.page ? ` ・ p.${sd.page}〜` : ''}`,
+          classes: ['row-indent'],
+        }));
+      }
+    }
+  }
+  list.append(outline);
+
   // 以前の版が入れていた確認用のサンプル。本物の成績ではないので、明示的に消せるようにする。
   const demo = await countDemoStudyData();
-  const demoTotal = demo.records + demo.tasks + demo.goals + demo.questions;
-  if (demoTotal > 0) {
+  if (demo.records + demo.tasks + demo.goals + demo.questions > 0) {
     list.append(el('div', 'section-head', 'サンプル（デモ）データ'));
-    list.append(
-      row({
-        title: '動作確認用のデータが残っています',
-        sub: `学習記録${demo.records}件 ・ 予定${demo.tasks}件 ・ 目標${demo.goals}件 ・ 問題${demo.questions}問。これは実際の学習の記録ではありません。`,
-      })
-    );
+    list.append(row({
+      title: '動作確認用のデータが残っています',
+      sub: `学習記録${demo.records}件 ・ 予定${demo.tasks}件 ・ 目標${demo.goals}件 ・ 問題${demo.questions}問。これは実際の学習の記録ではありません。`,
+    }));
     const purgeBtn = el('button', 'btn btn-danger', 'サンプルデータを削除');
     purgeBtn.onclick = async () => {
       if (!confirm('サンプルの学習記録・予定・目標・問題だけを削除します。本物の記録は残ります。よろしいですか？')) return;
@@ -151,8 +150,10 @@ export async function renderSettings(screen) {
     purgeWrap.append(purgeBtn);
     list.append(purgeWrap);
   }
+}
 
-  list.append(el('div', 'section-head', 'データのバックアップ'));
+async function buildBackup(list) {
+  const info = await api.getAppInfo();
   const exportBtn = el('button', 'btn', 'JSONで書き出す');
   exportBtn.onclick = async () => {
     const data = await api.exportAll();
@@ -161,16 +162,82 @@ export async function renderSettings(screen) {
   const exportWrap = el('div', 'setting-actions');
   exportWrap.append(exportBtn);
   list.append(exportWrap);
+  list.append(row({
+    title: '書き出される内容',
+    sub: '問題マスタ・学習記録・予定・チャレンジ結果・目標・繰り越しの記録・学習可能時間・見積もりの指定。'
+      + '鍵（管理キー・端末キー・接続トークン）は入りません。',
+    classes: ['row-indent'],
+  }));
+  list.append(row({
+    title: 'データ形式のバージョン',
+    sub: 'MCPサーバーが参照するスキーマの版',
+    right: el('span', 'row-time', info.dataVersion),
+  }));
+}
 
-  await renderCloudCard(list, render);
+/* ------------------------------------------------------------------ */
 
-  list.append(
-    row({
-      title: 'データ形式のバージョン',
-      sub: 'MCPサーバーが参照するスキーマの版',
-      right: el('span', 'row-time', info.dataVersion),
-    })
-  );
+export async function renderSettings(screen) {
+  screen.innerHTML = '';
+  const head = el('div', 'view-head');
+  head.append(el('div', 'view-title', '設定'));
+  screen.append(head);
 
-  screen.append(list);
+  const goals = await api.getGoals();
+  const availability = await api.getAvailability();
+  const configuredDays = Object.values(availability.weekly).filter((value) => value !== null).length;
+
+  await section(screen, {
+    id: 'goals',
+    title: '目標',
+    sub: goals.length ? `${goals.length}件（${goals.filter((g) => g.status === 'active').length}件が進行中）` : 'まだありません',
+    build: (list) => renderGoalCard(list, render),
+  });
+
+  await section(screen, {
+    id: 'availability',
+    title: '学習に使える時間',
+    sub: configuredDays ? `${configuredDays}曜日ぶんを設定済み` : '未設定（設定すると計画に使われます）',
+    build: (list) => renderAvailabilityCard(list, render),
+  });
+
+  await section(screen, {
+    id: 'display',
+    title: '表示',
+    sub: `ダークモード: ${{ auto: '自動', light: 'ライト', dark: 'ダーク' }[state.settings.theme]}`,
+    build: (list) => {
+      list.append(choiceRow('ダークモード', null,
+        [['auto', '自動'], ['light', 'ライト'], ['dark', 'ダーク']],
+        state.settings.theme,
+        (v) => update({ theme: v })));
+    },
+  });
+
+  await section(screen, {
+    id: 'questions',
+    title: '問題データ',
+    sub: '問題マスタの確認・インポート・読み直し',
+    build: buildQuestions,
+  });
+
+  await section(screen, {
+    id: 'cloud',
+    title: 'AI連携 / 同期',
+    sub: 'Claude との連携と、端末どうしの同期',
+    build: (list) => renderCloudCard(list, render),
+  });
+
+  await section(screen, {
+    id: 'backup',
+    title: 'バックアップ',
+    sub: 'JSONで書き出す',
+    build: buildBackup,
+  });
+
+  await section(screen, {
+    id: 'help',
+    title: 'ヘルプ（マスの見方）',
+    sub: 'スケジュールと記録に出る、正方形の色の意味',
+    build: (list) => { list.append(helpPanel()); },
+  });
 }
