@@ -27,25 +27,15 @@ let openAttemptId = null;
 let carryOverFor = null;
 
 /**
- * 記録・チャレンジを取り消す。消すのではなく「取り消した」印をつける。
- * チャレンジは1回ぶんまるごと（中の記録も）取り消す。1問だけ抜くと合計時間と食い違うため。
+ * 記録を削除する。印をつけるのではなく、本当に消す。
+ * チャレンジの中の1問でも、その1問だけを消す（回そのものは残る）。
  */
-async function voidAttempt(record, rerender) {
+async function deleteAttempt(record, rerender) {
   const message = record.challengeId
-    ? 'この1問の記録を取り消します。チャレンジの回そのものは残ります。よろしいですか？'
-    : 'この記録を履歴から取り消します。集計からも外れます。よろしいですか？';
+    ? 'この1問の記録を削除します。チャレンジの回そのものは残ります。元に戻せません。よろしいですか？'
+    : 'この記録を削除します。元に戻せません。よろしいですか？';
   if (!confirm(message)) return;
-  await api.voidStudyRecord(record.id, { reason: 'この端末から取り消し' });
-  openAttemptId = null;
-  await refreshToday();
-  syncInBackground();
-  rerender();
-}
-
-/** 取り消したものを元へ戻す。取り消しは消していないので、いつでも戻せる。 */
-async function restoreAttempt({ record = null, challenge = null }, rerender) {
-  if (challenge) await api.restoreChallengeResult(challenge.id, { reason: 'この端末から戻す' });
-  else await api.restoreStudyRecord(record.id, { reason: 'この端末から戻す' });
+  await api.deleteStudyRecord(record.id);
   openAttemptId = null;
   await refreshToday();
   syncInBackground();
@@ -127,23 +117,18 @@ export async function renderDayDetail(screen, dateKey) {
   const today = todayKey();
   const rerender = () => render();
 
-  const [tasks, attemptsByDate, challengeResults, moves, voidedRecords, voidedChallenges] = await Promise.all([
+  const [tasks, attemptsByDate, challengeResults, moves] = await Promise.all([
     api.getTasksInRange(dateKey, dateKey),
     api.getAttemptsByDate(dateKey, dateKey),
     api.getChallengeResults(200),
     api.listMoves(),
-    // 取り消した分も読む。画面から戻せるようにするため（消していないので戻せる）。
-    api.listVoidedRecords({ date: dateKey }),
-    api.listVoidedChallenges({ date: dateKey }),
   ]);
   const records = attemptsByDate[dateKey] ?? [];
   const challenges = challengeResults
     .map((result) => ({ ...result, date: api.dayOf(result.timestamp) }))
     .filter((result) => result.date === dateKey);
-  // チャレンジの中の1問は、取り消したものも並べる（取り消し済みと分かる形で）。
   const lapRecordOf = (challengeId, questionId) =>
-    records.find((entry) => entry.challengeId === challengeId && entry.questionId === questionId)
-    ?? voidedRecords.find((entry) => entry.challengeId === challengeId && entry.questionId === questionId);
+    records.find((entry) => entry.challengeId === challengeId && entry.questionId === questionId);
 
   const head = el('div', 'view-head');
   head.append(el('div', 'view-title', `${fmtDate(dateKey)}${dateKey === today ? '（今日）' : ''}`));
@@ -208,7 +193,7 @@ export async function renderDayDetail(screen, dateKey) {
       const square = attemptSquare(record, { label: qLabel(record.questionId) });
       node.prepend(square);
       list.append(node);
-      if (opened) list.append(attemptDetailCard(record, { onVoid: (target) => voidAttempt(target, rerender) }));
+      if (opened) list.append(attemptDetailCard(record, { onDelete: (target) => deleteAttempt(target, rerender) }));
     }
   }
 
@@ -216,11 +201,12 @@ export async function renderDayDetail(screen, dateKey) {
   if (challenges.length) {
     list.append(el('div', 'section-head', `チャレンジ（${challenges.length}回）`));
     for (const result of challenges) {
-      const voidBtn = el('button', 'link-btn danger-link', '取り消す');
-      voidBtn.onclick = async (event) => {
+      const deleteBtn = el('button', 'link-btn danger-link', '削除');
+      deleteBtn.onclick = async (event) => {
         event.stopPropagation();
-        if (!confirm('この回のチャレンジを履歴から取り消します（中で解いた記録もいっしょに取り消します）。よろしいですか？')) return;
-        await api.voidChallengeResult(result.id, { reason: 'この端末から取り消し' });
+        if (!confirm('この回のチャレンジを削除します（中で解いた記録もいっしょに消えます）。元に戻せません。よろしいですか？')) return;
+        await api.deleteChallengeResult(result.id);
+        openAttemptId = null;
         await refreshToday();
         syncInBackground();
         rerender();
@@ -228,7 +214,7 @@ export async function renderDayDetail(screen, dateKey) {
       const node = detailRow({
         title: `チャレンジ ${result.laps?.length ?? 0}問`,
         sub: `${result.succeeded ? '制限時間内' : '時間超過'} ・ ${fmtMS(result.totalElapsedSeconds)} / ${fmtMS(result.timeLimitSeconds)}`,
-        right: [el('span', 'row-time', fmtTime(result.timestamp)), voidBtn],
+        right: [el('span', 'row-time', fmtTime(result.timestamp)), deleteBtn],
       });
       // チャレンジも、中の1問ずつをマスで並べる（カレンダーと同じ見方）。
       node.prepend(squareRow((result.laps ?? []).map((lap) => {
@@ -243,22 +229,14 @@ export async function renderDayDetail(screen, dateKey) {
       list.append(node);
       // チャレンジの中の1問ずつ。カレンダーでは1マスにまとめているが、
       // ここでは中身が分かるようにする（各問題の履歴にも1回として残っている）。
-      // 1問だけ取り消すこともでき、そのときもチャレンジの回そのものは残る。
+      // 1問だけ削除することもでき、そのときもチャレンジの回そのものは残る。
       for (const lap of result.laps ?? []) {
         const record = lapRecordOf(result.id, lap.questionId);
-        const voided = record?.voided === true;
         const opened = record && openAttemptId === record.id;
-        const restoreBtn = voided ? el('button', 'link-btn', '戻す') : null;
-        if (restoreBtn) {
-          restoreBtn.onclick = async (event) => {
-            event.stopPropagation();
-            await restoreAttempt({ record }, rerender);
-          };
-        }
         const lapNode = detailRow({
           title: qLabel(lap.questionId),
-          sub: [questionSub(lap.questionId), voided ? '取り消し済み' : null].filter(Boolean).join(' ・ '),
-          right: [el('span', 'row-time', fmtMS(lap.durationSeconds)), ...(restoreBtn ? [restoreBtn] : [])],
+          sub: [questionSub(lap.questionId), record ? null : '記録は削除済み'].filter(Boolean).join(' ・ '),
+          right: el('span', 'row-time', fmtMS(lap.durationSeconds)),
           onClick: record ? () => {
             openAttemptId = opened ? null : record.id;
             rerender();
@@ -268,48 +246,11 @@ export async function renderDayDetail(screen, dateKey) {
           ? attemptSquare(record, { label: qLabel(lap.questionId) })
           : attemptSquare({ evaluation: lap.evaluation, durationSeconds: lap.durationSeconds, questionId: lap.questionId }));
         lapNode.classList.add('row-indent');
-        if (voided) lapNode.classList.add('is-voided');
         list.append(lapNode);
         if (opened) {
-          list.append(attemptDetailCard(record, {
-            onVoid: (target) => voidAttempt(target, rerender),
-            onRestore: (target) => restoreAttempt({ record: target }, rerender),
-          }));
+          list.append(attemptDetailCard(record, { onDelete: (target) => deleteAttempt(target, rerender) }));
         }
       }
-    }
-  }
-
-  /* ---------- 取り消したもの ---------- */
-  // 取り消しは削除ではないので、ここから戻せる。
-  // ふだんの集計・カレンダーからは外れているが、何を取り消したかは残る。
-  const voidedPlain = voidedRecords.filter((record) => !record.challengeId);
-  if (voidedPlain.length || voidedChallenges.length) {
-    list.append(el('div', 'section-head', `取り消したもの（${voidedPlain.length + voidedChallenges.length}件）`));
-    for (const result of voidedChallenges) {
-      const restore = el('button', 'link-btn', '戻す');
-      restore.onclick = () => restoreAttempt({ challenge: result }, rerender);
-      const node = detailRow({
-        title: `チャレンジ ${result.laps?.length ?? 0}問`,
-        sub: ['取り消し済み', result.voidReason].filter(Boolean).join(' ・ '),
-        right: [el('span', 'row-time', fmtTime(result.timestamp)), restore],
-      });
-      node.classList.add('row-indent', 'is-voided');
-      list.append(node);
-    }
-    for (const record of voidedPlain) {
-      const restore = el('button', 'link-btn', '戻す');
-      restore.onclick = () => restoreAttempt({ record }, rerender);
-      const node = detailRow({
-        title: qLabel(record.questionId),
-        sub: ['取り消し済み', record.voidReason].filter(Boolean).join(' ・ '),
-        right: [
-          el('span', 'row-time', hasDuration(record) ? fmtMS(record.durationSeconds) : '—'),
-          restore,
-        ],
-      });
-      node.classList.add('row-indent', 'is-voided');
-      list.append(node);
     }
   }
 

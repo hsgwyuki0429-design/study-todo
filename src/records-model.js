@@ -8,7 +8,7 @@
 //   ・評価が分からない記録（evaluation: null）。正解とも不正解とも数えない
 //   ・所要時間が分からない記録（durationSeconds: null）。0秒として数えない
 //   ・時刻までは分からない記録（datePrecision: 'date'）。架空の時刻を作らない
-//   ・訂正（revision と corrections）と取り消し（voided）。消さずに履歴を残す
+//   ・訂正（revision と corrections）。誰がいつ何を直したかを残す
 //
 // 大事な約束:
 //   実績を作ってよいのは「本人が実際にやったと言ったとき」だけである。
@@ -104,16 +104,13 @@ export function normalizeStudyRecord(raw, { receivedAt = Date.now(), timezoneOff
     ...(typeof raw.updatedAt === 'string' ? { updatedAt: raw.updatedAt } : {}),
     // 訂正のたびに増える。古い内容で新しい内容を上書きしないために使う。
     revision: Number.isFinite(Number(raw.revision)) ? Math.max(0, Math.floor(Number(raw.revision))) : 0,
-    // 取り消し。消さずに残し、ふだんの集計からは外す。
+    // 取り消し。いまは削除で消すので新しくは付かないが、
+    // 古い版で取り消した記録がまだ残っていることがあるため、読めるようにしておく。
     ...(raw.voided === true
       ? {
         voided: true,
         voidedAt: typeof raw.voidedAt === 'string' ? raw.voidedAt : new Date(receivedAt).toISOString(),
         ...(typeof raw.voidReason === 'string' && raw.voidReason ? { voidReason: raw.voidReason.slice(0, 200) } : {}),
-        // チャレンジを1回ぶん取り消したときの道連れなら、その id。
-        // 取り消しを戻すとき、道連れの分だけを戻すために使う
-        //（1問だけ個別に取り消してあった分は、取り消したままにする）。
-        ...(typeof raw.voidedWith === 'string' && raw.voidedWith ? { voidedWith: raw.voidedWith.slice(0, 80) } : {}),
       }
       : {}),
     // 訂正の履歴（変更前後・理由・日時・実行者）。多くなりすぎないよう上限つき。
@@ -217,7 +214,6 @@ export function describeRecord(record) {
     revision: Number(record.revision ?? 0),
     voided: record.voided === true,
     voidReason: record.voidReason ?? null,
-    ...(record.voidedWith ? { voidedWith: record.voidedWith } : {}),
     corrections: (record.corrections ?? []).length,
     challengeId: record.challengeId ?? null,
     planTaskId: record.planTaskId ?? null,

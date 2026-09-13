@@ -48,7 +48,7 @@ test("initialize / tools/list / tools/call が動く", async () => {
     assert.ok(names.includes(expected), `${expected} が tools/list にない`);
   }
   // 学習実績は「本人の申告を代理入力する」ツールだけ。権限も別（records）。
-  for (const expected of ["addStudyRecords", "updateStudyRecords", "voidStudyRecords"]) {
+  for (const expected of ["addStudyRecords", "updateStudyRecords", "deleteStudyRecords", "deleteChallengeResults"]) {
     assert.ok(names.includes(expected), `${expected} が tools/list にない`);
   }
   // チャレンジ結果を作るツールは、今も公開しない。

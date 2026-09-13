@@ -1,4 +1,4 @@
-// 本人の申告にもとづく、学習実績の代理入力・訂正・取り消しの確認。
+// 本人の申告にもとづく、学習実績の代理入力・訂正・削除の確認。
 //
 // いちばん大事なのは「言っていないことを作らない」こと。
 // 分からない評価や時間は埋めず、未登録のまま保存できることを確かめる。
@@ -238,7 +238,7 @@ test("古い revision での訂正は断られ、何も変わらない", async (
   assert.equal(history.attempts[0].evaluation, "perfect", "何も変わっていない");
 });
 
-test("取り消した記録は集計から外れ、同期しても復活しない", async () => {
+test("削除した記録は本当に消え、同期しても復活しない", async () => {
   const { app, token, device } = await setup();
   const added = await add(app, token, {
     operationId: "op-add",
@@ -250,16 +250,17 @@ test("取り消した記録は集計から外れ、同期しても復活しな�
   const [keep, remove] = added.added.map((entry) => entry.recordId);
   void keep;
 
-  const voided = await callTool(app, token, "voidStudyRecords", {
-    operationId: "op-void",
+  const deleted = await callTool(app, token, "deleteStudyRecords", {
+    operationId: "op-delete",
     reason: "同じ取り組みを2回入れてしまった",
     records: [{ recordId: remove }],
   });
-  assert.equal(voided.ok, true);
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.counts.deleted, 1);
   assert.equal((await callTool(app, token, "getQuestionAttempts", { id: Q[0] })).totalAttempts, 1);
   assert.equal((await callTool(app, token, "getStudyStats")).totalRecords, 1);
 
-  // 取り消しを知らない端末が、古い内容を送ってきても戻らない。
+  // 削除を知らない端末が、古い内容を送ってきても復活しない（IDを覚えているため）。
   const resurrect = await call(app, "/api/sync/push", {
     method: "POST",
     token: device.deviceKey,
@@ -271,13 +272,48 @@ test("取り消した記録は集計から外れ、同期しても復活しな�
     },
   });
   assert.equal(resurrect.status, 200);
-  assert.equal((await callTool(app, token, "getQuestionAttempts", { id: Q[0] })).totalAttempts, 1, "取り消した記録が復活した");
+  assert.equal((await callTool(app, token, "getQuestionAttempts", { id: Q[0] })).totalAttempts, 1, "削除した記録が復活した");
 
-  // 端末へ配る内容には、取り消しの印つきで入っている（端末側でも消える）。
+  // 端末へ配る内容には、消したIDが入っている（端末側でも消える）。
   const pulled = await call(app, "/api/sync/pull", { token: device.deviceKey });
-  const sent = pulled.body.records.find((record) => record.id === remove);
-  assert.equal(sent.voided, true);
-  assert.equal(sent.revision, 1);
+  assert.ok(!pulled.body.records.some((entry) => entry.id === remove));
+  assert.ok(pulled.body.deletions.records.includes(remove));
+
+  // 何を消したかは履歴に残る（中身は残らない）。
+  const changes = await callTool(app, token, "getRecordChanges");
+  const entry = changes.operations.find((operation) => operation.operationId === "op-delete");
+  assert.equal(entry.changes[0].kind, "delete");
+  assert.equal(entry.reason, "同じ取り組みを2回入れてしまった");
+});
+
+test("端末から消したものも、クラウドから消えて戻らない", async () => {
+  const { app, token, device } = await setup();
+  await call(app, "/api/sync/push", {
+    method: "POST",
+    token: device.deviceKey,
+    body: {
+      records: [{ id: "rec-x", questionId: Q[0], timestamp: "2026-09-11T02:00:00Z", evaluation: "perfect", durationSeconds: 100 }],
+    },
+  });
+  assert.equal((await callTool(app, token, "getStudyStats")).totalRecords, 1);
+
+  // 端末で消した分を、同じ送信の中で「消した」と伝える。
+  await call(app, "/api/sync/push", {
+    method: "POST",
+    token: device.deviceKey,
+    body: { deletions: { records: ["rec-x"] } },
+  });
+  assert.equal((await callTool(app, token, "getStudyStats")).totalRecords, 0);
+
+  // 同じ送信に中身が混ざっていても、消したものは入り直さない。
+  await call(app, "/api/sync/push", {
+    method: "POST",
+    token: device.deviceKey,
+    body: {
+      records: [{ id: "rec-x", questionId: Q[0], timestamp: "2026-09-11T02:00:00Z", evaluation: "perfect", durationSeconds: 100 }],
+    },
+  });
+  assert.equal((await callTool(app, token, "getStudyStats")).totalRecords, 0);
 });
 
 test("日本時間の日付の境目でも、正しい日に入る", async () => {
@@ -410,7 +446,7 @@ test("知らない問題IDは断る。チャレンジの中の記録は評価だ
 });
 
 /* ------------------------------------------------------------------ */
-/* チャレンジの履歴を取り消す                                          */
+/* チャレンジの履歴を削除する                                          */
 /* ------------------------------------------------------------------ */
 
 /** チャレンジ1回ぶん（結果と、その中の記録2件）を入れておく。 */
@@ -435,130 +471,65 @@ async function seedChallenge(app, device, { id = "chl1", date = "2026-09-11" } =
   });
 }
 
-test("チャレンジの履歴を、1回ぶんまるごと取り消せる", async () => {
+test("チャレンジの履歴を、1回ぶんまるごと削除できる", async () => {
   const { app, token, device } = await setup();
   await seedChallenge(app, device);
-  const before = await callTool(app, token, "getChallengeResults");
-  assert.equal(before.total, 1);
+  assert.equal((await callTool(app, token, "getChallengeResults")).total, 1);
 
-  const result = await callTool(app, token, "voidChallengeResults", {
-    operationId: "op-void-chl",
+  const result = await callTool(app, token, "deleteChallengeResults", {
+    operationId: "op-del-chl",
     challenges: ["chl1"],
     reason: "間違って始めた",
   });
   assert.equal(result.ok, true);
-  assert.equal(result.counts.voidedChallenges, 1);
-  // 中の記録もいっしょに取り消す（1問だけ残すと合計時間と食い違うため）。
-  assert.equal(result.counts.voided, 2);
+  assert.equal(result.counts.deletedChallenges, 1);
+  // 中の記録もいっしょに消す（1問だけ残すと合計時間と食い違うため）。
+  assert.equal(result.counts.deleted, 2);
 
-  const after = await callTool(app, token, "getChallengeResults");
-  assert.equal(after.total, 0);
-  const recent = await callTool(app, token, "getRecentChallengeResult");
-  assert.equal(recent.result, null);
-  const stats = await callTool(app, token, "getStudyStats");
-  assert.equal(stats.totalRecords, 0);
+  assert.equal((await callTool(app, token, "getChallengeResults")).total, 0);
+  assert.equal((await callTool(app, token, "getRecentChallengeResult")).result, null);
+  assert.equal((await callTool(app, token, "getStudyStats")).totalRecords, 0);
 });
 
-test("チャレンジの中の記録は、1問だけ取り消せる", async () => {
+test("チャレンジの中の記録は、1問だけ削除できる", async () => {
   const { app, token, device } = await setup();
   await seedChallenge(app, device);
-  const result = await callTool(app, token, "voidStudyRecords", {
-    operationId: "op-void-chl-rec",
+  const result = await callTool(app, token, "deleteStudyRecords", {
+    operationId: "op-del-chl-rec",
     records: ["chl1-r1"],
     reason: "この1問は数えない",
   });
   assert.equal(result.ok, true);
-  assert.equal(result.counts.voided, 1);
-  assert.equal(result.counts.voidedChallenges, 0);
+  assert.equal(result.counts.deleted, 1);
+  assert.equal(result.counts.deletedChallenges, 0);
 
-  // チャレンジ結果そのものは残る（測った合計時間は事実として残す）。
-  const after = await callTool(app, token, "getChallengeResults");
-  assert.equal(after.total, 1);
-  // 集計からは、その1問だけが外れる。
-  const stats = await callTool(app, token, "getStudyStats");
-  assert.equal(stats.totalRecords, 1);
-});
-
-test("取り消した記録を、あとから戻せる", async () => {
-  const { app, token, device } = await setup();
-  await seedChallenge(app, device);
-  await callTool(app, token, "voidStudyRecords", { operationId: "op-v", records: ["chl1-r1"] });
-  assert.equal((await callTool(app, token, "getStudyStats")).totalRecords, 1);
-
-  const restored = await callTool(app, token, "restoreStudyRecords", {
-    operationId: "op-r",
-    records: ["chl1-r1"],
-    reason: "やっぱり解いていた",
-  });
-  assert.equal(restored.ok, true);
-  assert.equal(restored.counts.restored, 1);
-  assert.equal((await callTool(app, token, "getStudyStats")).totalRecords, 2);
-
-  // 取り消されていないものは戻せない（二重に版を進めない）。
-  const again = await callTool(app, token, "restoreStudyRecords", { operationId: "op-r2", records: ["chl1-r1"] });
-  assert.equal(again.ok, false);
-  assert.equal(again.error, "not_voided");
-});
-
-test("チャレンジを戻すと、道連れで取り消した記録だけが戻る", async () => {
-  const { app, token, device } = await setup();
-  await seedChallenge(app, device);
-  // 先に1問だけ個別に取り消しておく。これは本人が別に決めたことなので、戻さない。
-  await callTool(app, token, "voidStudyRecords", { operationId: "op-one", records: ["chl1-r1"] });
-  const voided = await callTool(app, token, "voidChallengeResults", { operationId: "op-all", challenges: ["chl1"] });
-  assert.equal(voided.counts.voided, 1);   // 残っていた1件だけが道連れになる
-
-  const restored = await callTool(app, token, "restoreStudyRecords", {
-    operationId: "op-restore-chl",
-    challenges: ["chl1"],
-  });
-  assert.equal(restored.ok, true);
-  assert.equal(restored.counts.restoredChallenges, 1);
-  assert.equal(restored.counts.restored, 1);
+  // チャレンジの回そのものは残る（測った合計時間は事実として残す）。
   assert.equal((await callTool(app, token, "getChallengeResults")).total, 1);
-  // 個別に取り消した1問は、取り消したまま。
+  // 集計からは、その1問だけが外れる。
   assert.equal((await callTool(app, token, "getStudyStats")).totalRecords, 1);
 });
 
-test("取り消しを戻す操作にも records の権限が要る", async () => {
-  const { app, token, device } = await setup({ records: false });
-  await seedChallenge(app, device);
-  const denied = await callTool(app, token, "restoreStudyRecords", {
-    operationId: "op-restore-denied",
-    records: ["chl1-r1"],
-  });
-  assert.equal(denied.ok, false);
-  assert.equal(denied.error, "permission_denied");
-  assert.equal(denied.requiredScope, "records");
-});
-
-test("取り消したチャレンジは、取り消しを知らない端末が送り直しても戻らない", async () => {
+test("削除したチャレンジは、削除を知らない端末が送り直しても戻らない", async () => {
   const { app, token, device } = await setup();
   await seedChallenge(app, device);
-  await callTool(app, token, "voidChallengeResults", { operationId: "op-void-chl2", challenges: ["chl1"] });
+  await callTool(app, token, "deleteChallengeResults", { operationId: "op-del-chl2", challenges: ["chl1"] });
 
-  // 古い端末が、取り消し前の内容をそのまま送ってくる。
+  // 古い端末が、削除前の内容をそのまま送ってくる。
   await seedChallenge(app, device);
-  const after = await callTool(app, token, "getChallengeResults");
-  assert.equal(after.total, 0);
-  const stats = await callTool(app, token, "getStudyStats");
-  assert.equal(stats.totalRecords, 0);
+  assert.equal((await callTool(app, token, "getChallengeResults")).total, 0);
+  assert.equal((await callTool(app, token, "getStudyStats")).totalRecords, 0);
 
-  // 端末には「取り消した」ことが伝わる（配らないと端末に残り続けるため）。
-  const pulled = await call(app, "/api/sync/push", {
-    method: "POST",
-    token: device.deviceKey,
-    body: {},
-  });
-  const voided = (pulled.body.snapshot.challenges ?? []).find((entry) => entry.id === "chl1");
-  assert.equal(voided?.voided, true);
+  // 端末には「消した」ことが伝わる（伝えないと端末に残り続けるため）。
+  const pulled = await call(app, "/api/sync/push", { method: "POST", token: device.deviceKey, body: {} });
+  assert.ok(pulled.body.snapshot.deletions.challenges.includes("chl1"));
+  assert.ok(pulled.body.snapshot.deletions.records.includes("chl1-r1"));
 });
 
-test("チャレンジの取り消しには records の権限が要る", async () => {
+test("チャレンジの削除には records の権限が要る", async () => {
   const { app, token, device } = await setup({ records: false });
   await seedChallenge(app, device);
-  const denied = await callTool(app, token, "voidChallengeResults", {
-    operationId: "op-void-chl-denied",
+  const denied = await callTool(app, token, "deleteChallengeResults", {
+    operationId: "op-del-chl-denied",
     challenges: ["chl1"],
   });
   assert.equal(denied.ok, false);
@@ -566,14 +537,14 @@ test("チャレンジの取り消しには records の権限が要る", async ()
   assert.equal(denied.requiredScope, "records");
 });
 
-test("同じ operationId でチャレンジの取り消しを送り直しても二重にならない", async () => {
+test("同じ operationId でチャレンジの削除を送り直しても二重にならない", async () => {
   const { app, token, device } = await setup();
   await seedChallenge(app, device);
-  const first = await callTool(app, token, "voidChallengeResults", { operationId: "op-void-once", challenges: ["chl1"] });
-  const again = await callTool(app, token, "voidChallengeResults", { operationId: "op-void-once", challenges: ["chl1"] });
+  const first = await callTool(app, token, "deleteChallengeResults", { operationId: "op-del-once", challenges: ["chl1"] });
+  const again = await callTool(app, token, "deleteChallengeResults", { operationId: "op-del-once", challenges: ["chl1"] });
   assert.equal(first.ok, true);
   assert.equal(again.replayed, true);
-  assert.equal(again.counts.voidedChallenges, 1);
+  assert.equal(again.counts.deletedChallenges, 1);
 });
 
 test("1件でも通らなければ、1件も保存されない", async () => {

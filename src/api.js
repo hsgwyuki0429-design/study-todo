@@ -20,7 +20,7 @@ import {
 // 1.4.0 で予定に items（1回の取り組みごとの予定項目）、学習記録に planItemId、
 // 繰り越しの記録（moves）を足した。
 // 1.5.0 で学習記録に date（実施日）・datePrecision・source（どうやって入った記録か）・
-// revision（訂正の版）・voided（取り消し）・corrections（訂正の履歴）を足し、
+// revision（訂正の版）・corrections（訂正の履歴）を足し、
 // 評価と所要時間に「未登録（null）」を入れられるようにした。
 // どれも足すだけで、古いデータはそのまま読める（古い記録は timestamp から実施日を出す）。
 export const DATA_VERSION = '1.5.0';
@@ -196,7 +196,8 @@ export async function clearOutboxEntries(keys) {
 
 /**
  * ふだんの集計に使う学習記録。
- * 取り消した記録（voided）は、消さずに残してあるが、ここでは返さない。
+ * 消した記録は本当に消えている。古い版で「取り消し」にした記録がまだ残っていることが
+ * あるので、それはここでは返さない。
  */
 export async function listRecords({ includeVoided = false } = {}) {
   const records = await idb.all(STORES.records);
@@ -537,53 +538,18 @@ export async function carryOverPlanItems({
 /* ------------------------------------------------------------------ */
 
 /**
- * 学習記録を取り消す。消さずに「取り消した」印をつけ、ふだんの集計から外す。
+ * 学習記録を削除する。
  *
- * 消さないのは、あとから「何を取り消したか」を確かめられるようにするためと、
- * 他の端末にも「取り消した」ことを伝えるためである（消すと、知らない端末が戻してしまう）。
+ * 印をつけるのではなく、この端末から本当に消す。
+ * 消したIDだけは outbox に残し、同期でクラウドと他の端末からも消す
+ *（これが無いと、次の同期でクラウドから戻ってきてしまう）。
  */
-export async function voidStudyRecord(recordId, { reason = null, voidedWith = null } = {}) {
+export async function deleteStudyRecord(recordId) {
   const record = await idb.get(STORES.records, recordId);
   if (!record) return { ok: false, error: 'not_found' };
-  const now = new Date().toISOString();
-  const next = {
-    ...record,
-    voided: true,
-    voidedAt: now,
-    voidReason: reason,
-    // チャレンジを1回ぶん取り消した道連れなら、それを覚えておく（戻すときに使う）。
-    ...(voidedWith ? { voidedWith } : {}),
-    revision: Number(record.revision ?? 0) + 1,
-    updatedAt: now,
-    corrections: [
-      ...(record.corrections ?? []),
-      { at: now, by: 'この端末', reason, before: { voided: false }, after: { voided: true } },
-    ],
-  };
-  await idb.put(STORES.records, next);
-  await enqueueOutbox('record', next.id);
-  return { ok: true, record: next };
-}
-
-/** 取り消した学習記録を、取り消す前の状態へ戻す。 */
-export async function restoreStudyRecord(recordId, { reason = null } = {}) {
-  const record = await idb.get(STORES.records, recordId);
-  if (!record) return { ok: false, error: 'not_found' };
-  if (record.voided !== true) return { ok: false, error: 'not_voided' };
-  const now = new Date().toISOString();
-  const { voided, voidedAt, voidReason, voidedWith, ...rest } = record;
-  const next = {
-    ...rest,
-    revision: Number(record.revision ?? 0) + 1,
-    updatedAt: now,
-    corrections: [
-      ...(record.corrections ?? []),
-      { at: now, by: 'この端末', reason, before: { voided: true }, after: { voided: false } },
-    ],
-  };
-  await idb.put(STORES.records, next);
-  await enqueueOutbox('record', next.id);
-  return { ok: true, record: next };
+  await idb.del(STORES.records, recordId);
+  await enqueueOutbox('record_deleted', recordId);
+  return { ok: true, record };
 }
 
 export async function saveChallengeResult(result) {
@@ -609,70 +575,46 @@ export async function getChallengeResults(limit = 20, { includeVoided = false } 
 }
 
 /**
- * チャレンジの履歴を1回ぶん取り消す。
+ * チャレンジの履歴を1回ぶん削除する。
  *
  * チャレンジは「制限時間つきの通し」なので、中の1問だけを抜くと合計時間と食い違う。
- * そのため結果と、その中で解いた学習記録をまとめて取り消す。
+ * そのため結果と、その中で解いた学習記録をまとめて消す。
  */
-export async function voidChallengeResult(challengeId, { reason = null } = {}) {
+export async function deleteChallengeResult(challengeId) {
   const result = await idb.get(STORES.challenges, challengeId);
   if (!result) return { ok: false, error: 'not_found' };
-  const now = new Date().toISOString();
-  const next = {
-    ...result,
-    voided: true,
-    voidedAt: now,
-    voidReason: reason,
-    revision: Number(result.revision ?? 0) + 1,
-    updatedAt: now,
-  };
-  await idb.put(STORES.challenges, next);
-  await enqueueOutbox('challenge', next.id);
+  await idb.del(STORES.challenges, challengeId);
+  await enqueueOutbox('challenge_deleted', challengeId);
 
-  const records = (await idb.all(STORES.records))
-    .filter((record) => record.challengeId === challengeId && record.voided !== true);
-  for (const record of records) {
-    await voidStudyRecord(record.id, { reason: reason ?? 'チャレンジごと取り消し', voidedWith: challengeId });
-  }
-  return { ok: true, result: next, voidedRecords: records.length };
+  const records = (await idb.all(STORES.records)).filter((record) => record.challengeId === challengeId);
+  for (const record of records) await deleteStudyRecord(record.id);
+  return { ok: true, result, deletedRecords: records.length };
 }
 
 /**
- * 取り消したチャレンジを戻す。
- * そのとき道連れで取り消した記録だけを戻し、1問ずつ取り消してあった分は取り消したままにする。
+ * 学習データをすべて消す。設定画面から、本人がはっきり選んだときだけ呼ぶ。
+ *
+ * 消すのは学習記録・チャレンジ・予定・目標・繰り越し。
+ * 問題マスタと、この端末の設定（同期の鍵など）は残す。
+ * クラウドを使っているときは、クラウド側も消さないと次の同期で戻ってくる。
  */
-export async function restoreChallengeResult(challengeId, { reason = null } = {}) {
-  const result = await idb.get(STORES.challenges, challengeId);
-  if (!result) return { ok: false, error: 'not_found' };
-  if (result.voided !== true) return { ok: false, error: 'not_voided' };
-  const now = new Date().toISOString();
-  const { voided, voidedAt, voidReason, ...rest } = result;
-  const next = { ...rest, revision: Number(result.revision ?? 0) + 1, updatedAt: now };
-  await idb.put(STORES.challenges, next);
-  await enqueueOutbox('challenge', next.id);
-
-  const records = (await idb.all(STORES.records))
-    .filter((record) => record.voided === true && record.voidedWith === challengeId);
-  for (const record of records) await restoreStudyRecord(record.id, { reason });
-  return { ok: true, result: next, restoredRecords: records.length };
-}
-
-/** 取り消した学習記録（日付で絞れる）。画面から戻せるようにするために使う。 */
-export async function listVoidedRecords({ date = null } = {}) {
-  const all = await idb.all(STORES.records);
-  return all
-    .filter((record) => record.voided === true)
-    .filter((record) => !date || recordDateOf(record) === date)
-    .sort((a, b) => String(b.voidedAt ?? '').localeCompare(String(a.voidedAt ?? '')));
-}
-
-/** 取り消したチャレンジ（日付で絞れる）。 */
-export async function listVoidedChallenges({ date = null } = {}) {
-  const all = await idb.all(STORES.challenges);
-  return all
-    .filter((result) => result.voided === true)
-    .filter((result) => !date || dayOf(result.timestamp) === date)
-    .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)));
+export async function purgeStudyData() {
+  const removed = {
+    records: (await idb.all(STORES.records)).length,
+    challenges: (await idb.all(STORES.challenges)).length,
+    tasks: (await idb.all(STORES.tasks)).length,
+    goals: (await idb.all(STORES.goals)).length,
+    moves: (await idb.all(STORES.moves)).length,
+  };
+  for (const store of [STORES.records, STORES.challenges, STORES.tasks, STORES.goals, STORES.moves, STORES.outbox]) {
+    await idb.clear(store);
+  }
+  // 予定の版・学習可能時間・見積もりの指定も、いっしょに初期状態へ戻す。
+  // 同期の鍵（cloud）と表示の設定は消さない。消すと使えなくなってしまうため。
+  for (const key of ['planMeta', AVAILABILITY_KEY, ESTIMATES_KEY]) {
+    await idb.del(STORES.meta, key).catch(() => {});
+  }
+  return removed;
 }
 
 /* ------------------------------------------------------------------ */

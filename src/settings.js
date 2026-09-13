@@ -7,6 +7,7 @@ import * as api from './api.js';
 import { state, render } from './state.js';
 import { el, row } from './ui.js';
 import { renderCloudCard } from './settings-cloud.js';
+import * as cloud from './cloud-sync.js';
 import { renderAvailabilityCard, renderGoalCard } from './settings-plan.js';
 import { helpPanel } from './squares.js';
 import { countDemoStudyData, removeDemoStudyData, loadQuestionMaster } from './seed.js';
@@ -175,6 +176,73 @@ async function buildBackup(list) {
   }));
 }
 
+/**
+ * 学習データをすべて消す。戻せないので、二段階で確かめる。
+ *
+ * クラウドを使っているときは、クラウド側も消さないと次の同期で戻ってくる。
+ * 消すのは学習記録・チャレンジ・予定・目標・繰り越しで、問題マスタと鍵は残す。
+ */
+async function buildDangerZone(list) {
+  const [info, config, records, challenges] = await Promise.all([
+    api.getAppInfo(),
+    cloud.getCloudConfig(),
+    api.listRecords(),
+    api.getChallengeResults(1000),
+  ]);
+  const linked = cloud.isLinked(config);
+
+  list.append(row({
+    title: 'いま入っているもの',
+    sub: `学習記録 ${records.length}件 ・ チャレンジ ${challenges.length}回 ・ 問題 ${info.questionCount}問`
+      + `${linked ? ' ・ クラウドと同期中' : ' ・ この端末のみ'}`,
+  }));
+  list.append(row({
+    title: '消えるもの',
+    sub: '学習記録・チャレンジ結果・予定・目標・繰り越しの記録・学習可能時間・見積もりの指定。'
+      + ' 問題マスタと、同期の鍵は残ります。',
+    classes: ['row-indent'],
+  }));
+  list.append(row({
+    title: '先に書き出しておけます',
+    sub: '設定 → バックアップ → JSONで書き出す',
+    classes: ['row-indent'],
+  }));
+
+  const button = el('button', 'btn btn-danger', '学習データをすべて削除');
+  button.onclick = async () => {
+    if (!confirm('学習記録・チャレンジ・予定・目標をすべて削除します。元に戻せません。続けますか？')) return;
+    const answer = prompt('本当に削除するなら「削除」と入力してください。');
+    if (answer !== '削除') {
+      alert('削除しませんでした。');
+      return;
+    }
+    let cloudNote = '';
+    if (config.serverUrl && config.ownerKey) {
+      // 端末だけ消すと、次の同期でクラウドから戻ってくる。先にクラウドを消す。
+      try {
+        await cloud.admin.purgeData(config);
+        cloudNote = ' クラウドの分も削除しました。';
+      } catch (error) {
+        alert(`クラウドの分を削除できませんでした（${error.message}）。`
+          + ' この端末だけ消すと次の同期で戻ってくるため、何も削除していません。');
+        return;
+      }
+    } else if (linked) {
+      alert('クラウドと同期していますが、この端末に管理キーがありません。'
+        + ' 管理キーを入れてから実行してください（消しても次の同期で戻ってきてしまいます）。');
+      return;
+    }
+    const removed = await api.purgeStudyData();
+    await cloud.resetSyncCursor();
+    alert(`削除しました（記録${removed.records} / チャレンジ${removed.challenges} / 予定${removed.tasks}`
+      + ` / 目標${removed.goals}）。${cloudNote}`);
+    location.reload();
+  };
+  const wrap = el('div', 'setting-actions');
+  wrap.append(button);
+  list.append(wrap);
+}
+
 /* ------------------------------------------------------------------ */
 
 export async function renderSettings(screen) {
@@ -232,6 +300,13 @@ export async function renderSettings(screen) {
     title: 'バックアップ',
     sub: 'JSONで書き出す',
     build: buildBackup,
+  });
+
+  await section(screen, {
+    id: 'danger',
+    title: 'データの削除',
+    sub: '学習データをすべて消す（元に戻せません）',
+    build: buildDangerZone,
   });
 
   await section(screen, {

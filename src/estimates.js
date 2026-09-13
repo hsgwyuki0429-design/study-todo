@@ -14,7 +14,7 @@
 //   ・極端な値は外す。数秒で終わっている記録は計測忘れ、長すぎる記録は中断とみなす。
 //     外すのは「見積もりの計算から」だけで、学習記録そのものは消さない。
 //   ・時間が未登録の記録（本人の申告で「時間は覚えていない」など）は、0秒として混ぜない。
-//     取り消した記録も使わない。
+//     消された記録は、そもそも残っていない。
 //   ・制限時間で打ち切られたチャレンジの記録は「解き終えるのに必要な時間」ではないので、
 //     見積もりには使わない。
 //   ・平均ではなく中央値を使う。1件の外れ値で見積もりが崩れないようにする。
@@ -66,7 +66,7 @@ export const conditionOf = ({ attemptIndex = 0, inChallenge = false } = {}) => (
  */
 export function usableSamples(records, { truncatedChallengeIds = new Set() } = {}) {
   return records.filter((record) => {
-    // 取り消した記録と、時間が未登録の記録は使わない。
+    // 時間が未登録の記録は使わない。
     // 未登録を0秒として混ぜると、見積もりが実際より短くなってしまう。
     if (record.voided === true) return false;
     if (typeof record.durationSeconds !== 'number') return false;
