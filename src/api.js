@@ -536,6 +536,33 @@ export async function carryOverPlanItems({
 /* チャレンジ結果                                                      */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 学習記録を取り消す。消さずに「取り消した」印をつけ、ふだんの集計から外す。
+ *
+ * 消さないのは、あとから「何を取り消したか」を確かめられるようにするためと、
+ * 他の端末にも「取り消した」ことを伝えるためである（消すと、知らない端末が戻してしまう）。
+ */
+export async function voidStudyRecord(recordId, { reason = null } = {}) {
+  const record = await idb.get(STORES.records, recordId);
+  if (!record) return { ok: false, error: 'not_found' };
+  const now = new Date().toISOString();
+  const next = {
+    ...record,
+    voided: true,
+    voidedAt: now,
+    voidReason: reason,
+    revision: Number(record.revision ?? 0) + 1,
+    updatedAt: now,
+    corrections: [
+      ...(record.corrections ?? []),
+      { at: now, by: 'この端末', reason, before: { voided: false }, after: { voided: true } },
+    ],
+  };
+  await idb.put(STORES.records, next);
+  await enqueueOutbox('record', next.id);
+  return { ok: true, record: next };
+}
+
 export async function saveChallengeResult(result) {
   const saved = { id: result.id || uid('chl'), timestamp: new Date().toISOString(), ...result };
   await idb.put(STORES.challenges, saved);
@@ -543,15 +570,48 @@ export async function saveChallengeResult(result) {
   return saved;
 }
 
+const countedChallenges = (all) => all.filter((result) => result.voided !== true);
+
 export async function getRecentChallengeResult() {
-  const all = await idb.all(STORES.challenges);
+  const all = countedChallenges(await idb.all(STORES.challenges));
   all.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   return all[0] ?? null;
 }
 
-export async function getChallengeResults(limit = 20) {
+export async function getChallengeResults(limit = 20, { includeVoided = false } = {}) {
   const all = await idb.all(STORES.challenges);
-  return all.sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, limit);
+  return (includeVoided ? all : countedChallenges(all))
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
+    .slice(0, limit);
+}
+
+/**
+ * チャレンジの履歴を1回ぶん取り消す。
+ *
+ * チャレンジは「制限時間つきの通し」なので、中の1問だけを抜くと合計時間と食い違う。
+ * そのため結果と、その中で解いた学習記録をまとめて取り消す。
+ */
+export async function voidChallengeResult(challengeId, { reason = null } = {}) {
+  const result = await idb.get(STORES.challenges, challengeId);
+  if (!result) return { ok: false, error: 'not_found' };
+  const now = new Date().toISOString();
+  const next = {
+    ...result,
+    voided: true,
+    voidedAt: now,
+    voidReason: reason,
+    revision: Number(result.revision ?? 0) + 1,
+    updatedAt: now,
+  };
+  await idb.put(STORES.challenges, next);
+  await enqueueOutbox('challenge', next.id);
+
+  const records = (await idb.all(STORES.records))
+    .filter((record) => record.challengeId === challengeId && record.voided !== true);
+  for (const record of records) {
+    await voidStudyRecord(record.id, { reason: reason ?? 'チャレンジごと取り消し' });
+  }
+  return { ok: true, result: next, voidedRecords: records.length };
 }
 
 /* ------------------------------------------------------------------ */

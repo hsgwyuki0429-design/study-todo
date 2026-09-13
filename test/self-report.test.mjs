@@ -369,7 +369,7 @@ test("目標の進捗は、評価が未登録なら「習得」にはしない",
   assert.equal(updated.goals[0].satisfiedCount, 1);
 });
 
-test("知らない問題IDや、チャレンジの中の記録は断る", async () => {
+test("知らない問題IDは断る。チャレンジの中の記録は評価だけ直せる", async () => {
   const { app, token, device } = await setup();
   const unknown = await add(app, token, {
     operationId: "op-unknown-q",
@@ -377,7 +377,7 @@ test("知らない問題IDや、チャレンジの中の記録は断る", async 
   });
   assert.equal(unknown.error, "unknown_question");
 
-  // チャレンジの中の記録は訂正できない。
+  // チャレンジの中の記録は、結果と食い違わない範囲（評価だけ）なら直せる。
   await call(app, "/api/sync/push", {
     method: "POST",
     token: device.deviceKey,
@@ -393,12 +393,129 @@ test("知らない問題IDや、チャレンジの中の記録は断る", async 
       }],
     },
   });
-  const denied = await callTool(app, token, "updateStudyRecords", {
-    operationId: "op-chl",
+  const fixed = await callTool(app, token, "updateStudyRecords", {
+    operationId: "op-chl-eval",
     updates: [{ recordId: "chl-rec", evaluation: "calc_error" }],
+  });
+  assert.equal(fixed.ok, true);
+  assert.equal(fixed.updated[0].evaluation, "calc_error");
+
+  // 日付や所要時間は、チャレンジ結果の合計と食い違うので断る。
+  const denied = await callTool(app, token, "updateStudyRecords", {
+    operationId: "op-chl-date",
+    updates: [{ recordId: "chl-rec", date: "2026-09-10" }],
   });
   assert.equal(denied.ok, false);
   assert.equal(denied.error, "challenge_record");
+});
+
+/* ------------------------------------------------------------------ */
+/* チャレンジの履歴を取り消す                                          */
+/* ------------------------------------------------------------------ */
+
+/** チャレンジ1回ぶん（結果と、その中の記録2件）を入れておく。 */
+async function seedChallenge(app, device, { id = "chl1", date = "2026-09-11" } = {}) {
+  await call(app, "/api/sync/push", {
+    method: "POST",
+    token: device.deviceKey,
+    body: {
+      records: [
+        { id: `${id}-r1`, questionId: Q[0], timestamp: `${date}T02:00:00Z`, evaluation: "perfect", durationSeconds: 120, challengeId: id },
+        { id: `${id}-r2`, questionId: Q[1], timestamp: `${date}T02:03:00Z`, evaluation: "calc_error", durationSeconds: 180, challengeId: id },
+      ],
+      challenges: [{
+        id, timestamp: `${date}T02:00:00Z`, timeLimitSeconds: 600,
+        totalElapsedSeconds: 300, succeeded: true,
+        laps: [
+          { questionId: Q[0], durationSeconds: 120, evaluation: "perfect" },
+          { questionId: Q[1], durationSeconds: 180, evaluation: "calc_error" },
+        ],
+      }],
+    },
+  });
+}
+
+test("チャレンジの履歴を、1回ぶんまるごと取り消せる", async () => {
+  const { app, token, device } = await setup();
+  await seedChallenge(app, device);
+  const before = await callTool(app, token, "getChallengeResults");
+  assert.equal(before.total, 1);
+
+  const result = await callTool(app, token, "voidChallengeResults", {
+    operationId: "op-void-chl",
+    challenges: ["chl1"],
+    reason: "間違って始めた",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.counts.voidedChallenges, 1);
+  // 中の記録もいっしょに取り消す（1問だけ残すと合計時間と食い違うため）。
+  assert.equal(result.counts.voided, 2);
+
+  const after = await callTool(app, token, "getChallengeResults");
+  assert.equal(after.total, 0);
+  const recent = await callTool(app, token, "getRecentChallengeResult");
+  assert.equal(recent.result, null);
+  const stats = await callTool(app, token, "getStudyStats");
+  assert.equal(stats.totalRecords, 0);
+});
+
+test("チャレンジの中の記録を取り消すと、その回ごと取り消される", async () => {
+  const { app, token, device } = await setup();
+  await seedChallenge(app, device);
+  const result = await callTool(app, token, "voidStudyRecords", {
+    operationId: "op-void-chl-rec",
+    records: ["chl1-r1"],
+    reason: "この回は無し",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.counts.voided, 2);
+  assert.equal(result.counts.voidedChallenges, 1);
+  const after = await callTool(app, token, "getChallengeResults");
+  assert.equal(after.total, 0);
+});
+
+test("取り消したチャレンジは、取り消しを知らない端末が送り直しても戻らない", async () => {
+  const { app, token, device } = await setup();
+  await seedChallenge(app, device);
+  await callTool(app, token, "voidChallengeResults", { operationId: "op-void-chl2", challenges: ["chl1"] });
+
+  // 古い端末が、取り消し前の内容をそのまま送ってくる。
+  await seedChallenge(app, device);
+  const after = await callTool(app, token, "getChallengeResults");
+  assert.equal(after.total, 0);
+  const stats = await callTool(app, token, "getStudyStats");
+  assert.equal(stats.totalRecords, 0);
+
+  // 端末には「取り消した」ことが伝わる（配らないと端末に残り続けるため）。
+  const pulled = await call(app, "/api/sync/push", {
+    method: "POST",
+    token: device.deviceKey,
+    body: {},
+  });
+  const voided = (pulled.body.snapshot.challenges ?? []).find((entry) => entry.id === "chl1");
+  assert.equal(voided?.voided, true);
+});
+
+test("チャレンジの取り消しには records の権限が要る", async () => {
+  const { app, token, device } = await setup({ records: false });
+  await seedChallenge(app, device);
+  const denied = await callTool(app, token, "voidChallengeResults", {
+    operationId: "op-void-chl-denied",
+    challenges: ["chl1"],
+  });
+  assert.equal(denied.ok, false);
+  assert.equal(denied.error, "permission_denied");
+  assert.equal(denied.requiredScope, "records");
+});
+
+test("同じ operationId でチャレンジの取り消しを送り直しても二重にならない", async () => {
+  const { app, token, device } = await setup();
+  await seedChallenge(app, device);
+  const first = await callTool(app, token, "voidChallengeResults", { operationId: "op-void-once", challenges: ["chl1"] });
+  const again = await callTool(app, token, "voidChallengeResults", { operationId: "op-void-once", challenges: ["chl1"] });
+  assert.equal(first.ok, true);
+  assert.equal(again.replayed, true);
+  assert.equal(again.counts.voidedChallenges, 1);
 });
 
 test("1件でも通らなければ、1件も保存されない", async () => {

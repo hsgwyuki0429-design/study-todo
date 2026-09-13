@@ -16,7 +16,7 @@ import {
   hasDuration, hasExactTime, todayKey,
 } from './api.js';
 import { itemsOf, splitPlanItems } from './plan-items.js';
-import { state, q, qLabel, render, loadTasks } from './state.js';
+import { state, q, qLabel, render, loadTasks, refreshToday } from './state.js';
 import { el, fmtDate, fmtMS, fmtTime, row, emptyState } from './ui.js';
 import { attemptDetailCard, attemptSquare, plannedSquare, squareRow } from './squares.js';
 import { syncInBackground } from './cloud-sync.js';
@@ -25,6 +25,24 @@ import { syncInBackground } from './cloud-sync.js';
 let openAttemptId = null;
 // 繰り越しの理由を選んでいる最中のタスク。
 let carryOverFor = null;
+
+/**
+ * 記録・チャレンジを取り消す。消すのではなく「取り消した」印をつける。
+ * チャレンジは1回ぶんまるごと（中の記録も）取り消す。1問だけ抜くと合計時間と食い違うため。
+ */
+async function voidAttempt(record, rerender) {
+  const challengeId = record.challengeId ?? null;
+  const message = challengeId
+    ? 'この回のチャレンジを履歴から取り消します（中で解いた記録もいっしょに取り消します）。よろしいですか？'
+    : 'この記録を履歴から取り消します。集計からも外れます。よろしいですか？';
+  if (!confirm(message)) return;
+  if (challengeId) await api.voidChallengeResult(challengeId, { reason: 'この端末から取り消し' });
+  else await api.voidStudyRecord(record.id, { reason: 'この端末から取り消し' });
+  openAttemptId = null;
+  await refreshToday();
+  syncInBackground();
+  rerender();
+}
 
 function detailRow({ title, sub, right, onClick }) {
   const node = el(onClick ? 'button' : 'div', 'detail-item');
@@ -175,7 +193,7 @@ export async function renderDayDetail(screen, dateKey) {
       const square = attemptSquare(record, { label: qLabel(record.questionId) });
       node.prepend(square);
       list.append(node);
-      if (opened) list.append(attemptDetailCard(record));
+      if (opened) list.append(attemptDetailCard(record, { onVoid: (target) => voidAttempt(target, rerender) }));
     }
   }
 
@@ -183,10 +201,19 @@ export async function renderDayDetail(screen, dateKey) {
   if (challenges.length) {
     list.append(el('div', 'section-head', `チャレンジ（${challenges.length}回）`));
     for (const result of challenges) {
+      const voidBtn = el('button', 'link-btn danger-link', '取り消す');
+      voidBtn.onclick = async (event) => {
+        event.stopPropagation();
+        if (!confirm('この回のチャレンジを履歴から取り消します（中で解いた記録もいっしょに取り消します）。よろしいですか？')) return;
+        await api.voidChallengeResult(result.id, { reason: 'この端末から取り消し' });
+        await refreshToday();
+        syncInBackground();
+        rerender();
+      };
       const node = detailRow({
         title: `チャレンジ ${result.laps?.length ?? 0}問`,
         sub: `${result.succeeded ? '制限時間内' : '時間超過'} ・ ${fmtMS(result.totalElapsedSeconds)} / ${fmtMS(result.timeLimitSeconds)}`,
-        right: fmtTime(result.timestamp),
+        right: [el('span', 'row-time', fmtTime(result.timestamp)), voidBtn],
       });
       // チャレンジも、中の1問ずつをマスで並べる（カレンダーと同じ見方）。
       node.prepend(squareRow((result.laps ?? []).map((lap) => {

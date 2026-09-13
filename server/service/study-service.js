@@ -1953,6 +1953,38 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       });
     },
 
+    /**
+     * チャレンジの履歴を取り消す。
+     *
+     * チャレンジは「1回ぶんの通し」なので、1問だけ抜くと合計時間と食い違う。
+     * そのため取り消しは1回まるごとで、中の学習記録もいっしょに取り消す。
+     */
+    async voidChallengeResults(args = {}, actor = {}) {
+      const operationId = readString(args.operationId, "operationId", { required: true, max: 120 });
+      const reason = readString(args.reason, "reason", { max: 200 });
+      const list = readArray(args.challenges, "challenges", { min: 1, max: SERVICE_LIMITS.recordsPerOperation });
+      const voidChallenges = list.map((raw, index) => {
+        const field = `challenges[${index}]`;
+        if (typeof raw === "string") return { challengeId: raw, reason };
+        if (typeof raw !== "object" || raw === null) fail(`${field} は challengeId か { challengeId, expectedRevision } で渡してください。`, field);
+        rejectUnknownKeys(raw, ["challengeId", "expectedRevision", "reason"], field);
+        return {
+          challengeId: readString(raw.challengeId, `${field}.challengeId`, { required: true, max: 80 }),
+          expectedRevision: raw.expectedRevision,
+          reason: readString(raw.reason, `${field}.reason`, { max: 200 }) ?? reason,
+        };
+      });
+      return runRecordOperations({
+        operationId,
+        fingerprint: recordFingerprint({ voidChallenges: voidChallenges.map(({ challengeId }) => challengeId), reason }),
+        voidChallenges,
+        actorKind: "ai",
+        actorName: actor?.clientName ?? actor?.tokenLabel ?? "AI",
+        tool: "voidChallengeResults",
+        reason,
+      });
+    },
+
     /** 学習記録の追加・訂正・取り消しの履歴。 */
     async getRecordChanges(args = {}) {
       const limit = readInteger(args.limit, "limit", { min: 1, max: 100, fallback: 20 });

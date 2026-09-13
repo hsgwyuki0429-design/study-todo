@@ -67,8 +67,10 @@ export function mergeRecords(stored = {}, incoming = []) {
 }
 
 /**
- * チャレンジ結果も追加専用のイベントとして扱う。
- * 形は study-todo のPWAが保存しているものに合わせる。
+ * チャレンジ結果。形は study-todo のPWAが保存しているものに合わせる。
+ *
+ * 取り消し（voided）と版（revision）を持つ。間違って始めたチャレンジを、
+ * あとから履歴から外せるようにするためで、消さずに印をつけるだけである。
  */
 export function normalizeChallengeResult(raw, { receivedAt = Date.now() } = {}) {
   if (!isObject(raw)) return null;
@@ -88,8 +90,42 @@ export function normalizeChallengeResult(raw, { receivedAt = Date.now() } = {}) 
       durationSeconds: Math.max(0, Math.round(Number(lap?.durationSeconds) || 0)),
       evaluation: EVALUATIONS.includes(lap?.evaluation) ? lap.evaluation : null,
     })).filter((lap) => lap.questionId),
+    revision: Math.max(0, Math.round(Number(raw.revision) || 0)),
+    ...(raw.voided === true ? { voided: true } : {}),
+    ...(typeof raw.voidedAt === "string" && raw.voidedAt ? { voidedAt: raw.voidedAt } : {}),
+    ...(typeof raw.voidReason === "string" && raw.voidReason ? { voidReason: raw.voidReason.slice(0, 200) } : {}),
+    ...(typeof raw.updatedAt === "string" && raw.updatedAt ? { updatedAt: raw.updatedAt } : {}),
     syncedAt: receivedAt,
   };
+}
+
+/** チャレンジ結果を重ね合わせる。学習記録と同じく、版が大きいほうを残す。 */
+export function mergeChallenges(stored = {}, incoming = []) {
+  const merged = { ...stored };
+  let added = 0;
+  let updated = 0;
+  let ignored = 0;
+  for (const result of incoming) {
+    if (!result) continue;
+    const current = merged[result.id];
+    if (!current) {
+      merged[result.id] = result;
+      added += 1;
+      continue;
+    }
+    const currentRevision = Number(current.revision ?? 0);
+    const incomingRevision = Number(result.revision ?? 0);
+    if (incomingRevision > currentRevision
+      || (incomingRevision === currentRevision
+        && String(result.updatedAt ?? "") > String(current.updatedAt ?? ""))) {
+      merged[result.id] = result;
+      updated += 1;
+    } else {
+      // 届いた内容のほうが古い。取り消した結果を、古い端末が戻すことはない。
+      ignored += 1;
+    }
+  }
+  return { merged, added, updated, ignored };
 }
 
 /**

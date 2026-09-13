@@ -110,7 +110,7 @@ export function helpPanel() {
  * マスを押したときに出す、その1回の取り組みの中身。
  * スケジュールの詳細でも、例題ごとの履歴でも同じものを使う。
  */
-export function attemptDetailCard(record, { planTitle = null } = {}) {
+export function attemptDetailCard(record, { planTitle = null, onVoid = null } = {}) {
   const question = q(record.questionId);
   const ev = evalOf(record.evaluation) ?? UNEVALUATED;
   const card = el('div', 'attempt-detail');
@@ -136,5 +136,16 @@ export function attemptDetailCard(record, { planTitle = null } = {}) {
   if (record.voided) card.append(el('div', null, `取り消し済み${record.voidReason ? `（${record.voidReason}）` : ''}`));
   if (planTitle) card.append(el('div', null, `対応する予定: ${planTitle}`));
   else if (!record.planItemId) card.append(el('div', null, '対応する予定: 分かりません（以前の形式の記録）'));
+  // 間違って入れた記録を、本人がここから取り消せるようにする。
+  // 消すのではなく「取り消した」印をつけるので、他の端末でも同じように外れる。
+  if (onVoid && !record.voided) {
+    const actions = el('div', 'setting-actions');
+    const button = el('button', 'link-btn danger-link', record.challengeId
+      ? 'この回のチャレンジごと取り消す'
+      : 'この記録を取り消す');
+    button.onclick = () => onVoid(record);
+    actions.append(button);
+    card.append(actions);
+  }
   return card;
 }

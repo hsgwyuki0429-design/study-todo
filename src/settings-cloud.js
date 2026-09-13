@@ -55,6 +55,35 @@ function button(label, onClick, cls = 'btn') {
   return node;
 }
 
+// サーバーの状態は、一度取れたら次の描画まで覚えておく。
+// 画面を組み立てるたびに通信の返事を待っていると、押しても動かないように見えるため。
+let cachedStatus = { key: null, status: null, error: null, pending: false, settled: false };
+
+/** いま見に行くべきサーバーを表す合言葉。URLか管理キーが変われば取り直す。 */
+const statusKeyOf = (config) => `${config.serverUrl}|${config.ownerKey}`;
+
+/**
+ * サーバーの状態を、画面を止めずに取りに行く。取れたら描き直す。
+ * 同じ相手にはすでに取れていれば何もしない（描き直しが堂々巡りにならないようにする）。
+ */
+function refreshStatus(config, rerender) {
+  const key = statusKeyOf(config);
+  if (cachedStatus.key === key && (cachedStatus.pending || cachedStatus.settled)) return;
+  cachedStatus = { key, status: null, error: null, pending: true, settled: false };
+  cloud.admin.status(config).then(
+    (status) => { cachedStatus = { key, status, error: null, pending: false, settled: true }; },
+    (error) => { cachedStatus = { key, status: null, error: error.message, pending: false, settled: true }; },
+  ).then(() => {
+    // 設定画面から離れていたら描き直さない（入力中の欄を消さないため）。
+    if (state.tab === 'settings') rerender();
+  });
+}
+
+/** 次に描くときは、サーバーの状態を取り直す（設定や権限を変えた直後など）。 */
+function invalidateStatus() {
+  cachedStatus = { key: null, status: null, error: null, pending: false, settled: false };
+}
+
 /**
  * 「AI連携 / 同期」カードを組み立てて list に足す。
  * rerender は設定画面をもう一度描き直すための関数。
@@ -63,15 +92,20 @@ export async function renderCloudCard(list, rerender) {
   const config = await cloud.getCloudConfig();
 
   // 管理キーがあり、オンラインならサーバーの状態も見に行く。
+  // ただし返事は待たない。待つと、サーバーが応じないあいだ設定画面ぜんぶが
+  // 組み上がらず、どこを押しても反応しないように見えてしまう。
   let status = null;
   let statusError = null;
+  let checking = false;
   if (config.serverUrl && config.ownerKey) {
-    try {
-      status = await cloud.admin.status(config);
-    } catch (error) {
-      statusError = error.message;
-    }
+    const key = statusKeyOf(config);
+    const usable = cachedStatus.key === key && cachedStatus.settled;
+    status = usable ? cachedStatus.status : null;
+    statusError = usable ? cachedStatus.error : null;
+    checking = !usable;
+    refreshStatus(config, rerender);
   }
+
   const state = cloud.connectionState(config, { serverEnabled: status?.enabled ?? null });
 
   list.append(el('div', 'section-head', 'AI連携 / 同期'));
@@ -82,6 +116,7 @@ export async function renderCloudCard(list, rerender) {
     sub: [
       `最終同期: ${fmtDateTime(config.lastSyncedAt)}`,
       config.lastError ? `直前の問題: ${config.lastError}` : null,
+      checking ? 'サーバーを確認中…' : null,
       statusError ? `サーバー: ${statusError}` : null,
     ].filter(Boolean).join(' / '),
     right: pill,
@@ -107,6 +142,7 @@ export async function renderCloudCard(list, rerender) {
       ...(keyInput.value ? { ownerKey: keyInput.value } : {}),
     });
     lastMessage = '保存しました。';
+    invalidateStatus();
     rerender();
   }, 'btn btn-primary')));
 
@@ -169,6 +205,7 @@ export async function renderCloudCard(list, rerender) {
       sub: status.enabled ? 'AIからの接続を受け付けています' : 'AIからは接続できません',
       right: button(status.enabled ? 'オフにする' : 'オンにする', async () => {
         await cloud.admin.updateSettings(config, { enabled: !status.enabled });
+        invalidateStatus();
         rerender();
       }, 'link-btn'),
     }));
@@ -183,6 +220,7 @@ export async function renderCloudCard(list, rerender) {
       sub: 'AIが今日のTODOや目標を書き換えられるようにする',
       right: button(status.permissions.write ? '許可中' : '許可しない', async () => {
         await cloud.admin.updateSettings(config, { permissions: { write: !status.permissions.write } });
+        invalidateStatus();
         rerender();
       }, 'link-btn'),
     }));
@@ -193,6 +231,7 @@ export async function renderCloudCard(list, rerender) {
         + ' 予定を変える権限とは別で、許していなければ実績は1件も変わりません。',
       right: button(status.permissions.records ? '許可中' : '許可しない', async () => {
         await cloud.admin.updateSettings(config, { permissions: { records: !status.permissions.records } });
+        invalidateStatus();
         rerender();
       }, 'link-btn'),
     }));
@@ -230,6 +269,7 @@ export async function renderCloudCard(list, rerender) {
         } catch (error) {
           lastMessage = `発行できませんでした: ${error.message}`;
         }
+        invalidateStatus();
         rerender();
       }, 'btn btn-primary'),
       ...(status.token ? [button('トークンを失効', async () => {
@@ -237,6 +277,7 @@ export async function renderCloudCard(list, rerender) {
         await cloud.admin.revokeToken(config);
         issuedToken = null;
         lastMessage = '失効しました。';
+        invalidateStatus();
         rerender();
       }, 'btn btn-danger')] : []),
     ));

@@ -70,16 +70,48 @@ export class CloudError extends Error {
   }
 }
 
-async function request(config, path, { method = 'GET', body = null, token = null, signal } = {}) {
+/**
+ * 応答が返らないまま待ち続けないための待ち時間の上限。
+ *
+ * これが無いと、URLの打ち間違いやVPN・プロキシで接続が吸い込まれたときに、
+ * ブラウザがあきらめるまで（環境によっては数十秒）画面が固まったように見える。
+ * 設定画面はこの応答を待って組み立てるので、待たせないことが特に大事である。
+ */
+const REQUEST_TIMEOUT_MS = 15000;
+
+/** 呼び出し側の signal と、待ち時間の上限を1つにまとめる。 */
+function withTimeout(signal, timeoutMs) {
+  if (!timeoutMs) return { signal, done: () => {} };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
+  const abort = () => controller.abort(signal.reason);
+  if (signal) {
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    done: () => {
+      clearTimeout(timer);
+      signal?.removeEventListener?.('abort', abort);
+    },
+    timedOut: () => controller.signal.aborted && !signal?.aborted,
+  };
+}
+
+async function request(config, path, {
+  method = 'GET', body = null, token = null, signal, timeoutMs = REQUEST_TIMEOUT_MS,
+} = {}) {
   if (!config?.serverUrl) throw new CloudError('同期サーバーのURLが設定されていません。');
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     throw new CloudError('オフラインです。オンラインに戻ったときに同期します。', null, true);
   }
+  const limit = withTimeout(signal, timeoutMs);
   let response;
   try {
     response = await fetch(`${config.serverUrl}${path}`, {
       method,
-      signal,
+      signal: limit.signal,
       headers: {
         'content-type': 'application/json',
         ...(token ? { authorization: `Bearer ${token}` } : {}),
@@ -87,7 +119,12 @@ async function request(config, path, { method = 'GET', body = null, token = null
       body: body === null ? undefined : JSON.stringify(body),
     });
   } catch (error) {
+    if (limit.timedOut?.()) {
+      throw new CloudError(`サーバーから${Math.round(timeoutMs / 1000)}秒以内に返事がありませんでした。URLとネットワークを確認してください。`, null, true);
+    }
     throw new CloudError(`サーバーへつながりませんでした（${error.message}）。URLとネットワークを確認してください。`, null, true);
+  } finally {
+    limit.done();
   }
   const text = await response.text();
   let payload = null;
@@ -110,7 +147,9 @@ async function request(config, path, { method = 'GET', body = null, token = null
 /* ------------------------------------------------------------------ */
 
 export const admin = {
-  status: (config, signal) => request(config, '/api/admin/status', { token: config.ownerKey, signal }),
+  // 設定画面はこの返事を待たずに組み立てる。待つと、応じないサーバーのせいで
+  // 画面ぜんぶが出てこず、どこも押せないように見えてしまう。
+  status: (config, signal) => request(config, '/api/admin/status', { token: config.ownerKey, signal, timeoutMs: 8000 }),
   updateSettings: (config, changes) =>
     request(config, '/api/admin/settings', { method: 'POST', body: changes, token: config.ownerKey }),
   issueToken: (config, scopes) =>
@@ -207,7 +246,8 @@ export async function reportActivity(date, taskId, questionId = null) {
 export async function fetchPlanChanges(limit = 10) {
   const config = await getCloudConfig();
   if (!isLinked(config)) return { entries: [] };
-  return request(config, `/api/sync/changes?limit=${limit}`, { token: config.deviceKey });
+  // 設定画面を組み立てる途中で読むので、待たされすぎないよう短めに切る。
+  return request(config, `/api/sync/changes?limit=${limit}`, { token: config.deviceKey, timeoutMs: 8000 });
 }
 
 /** 変更を取り消す。安全に戻せないときはサーバーが断り、何も変わらない。 */
@@ -319,13 +359,29 @@ async function applySnapshot(snapshot) {
     applied.records = recordsToSave.length;
   }
 
-  const existingChallenges = new Set((await idb.all(STORES.challenges)).map((c) => c.id));
-  const newChallenges = (snapshot.challenges ?? [])
-    .filter((c) => c && c.id && !existingChallenges.has(c.id))
-    .map(({ syncedAt, ...result }) => result);
-  if (newChallenges.length) {
-    await idb.putAll(STORES.challenges, newChallenges);
-    applied.challenges = newChallenges.length;
+  // チャレンジ結果も、取り消しができるようになったので版で重ね合わせる。
+  // 取り消したチャレンジを、取り消しを知らない端末が戻すことはない。
+  const localChallenges = new Map((await idb.all(STORES.challenges)).map((c) => [c.id, c]));
+  const challengesToSave = [];
+  for (const incoming of snapshot.challenges ?? []) {
+    if (!incoming || !incoming.id) continue;
+    const { syncedAt, ...result } = incoming;
+    const current = localChallenges.get(result.id);
+    if (!current) {
+      challengesToSave.push(result);
+      continue;
+    }
+    const currentRevision = Number(current.revision ?? 0);
+    const incomingRevision = Number(result.revision ?? 0);
+    if (incomingRevision > currentRevision
+      || (incomingRevision === currentRevision
+        && String(result.updatedAt ?? '') > String(current.updatedAt ?? ''))) {
+      challengesToSave.push(result);
+    }
+  }
+  if (challengesToSave.length) {
+    await idb.putAll(STORES.challenges, challengesToSave);
+    applied.challenges = challengesToSave.length;
   }
 
   // 学習可能時間は、新しいほうを採る（サーバー側で突き合わせ済み）。
@@ -419,6 +475,8 @@ export async function syncNow({ force = false } = {}) {
         method: 'POST',
         body: built.payload,
         token: config.deviceKey,
+        // 初回はまとめて送るので、ふだんの上限では足りないことがある。
+        timeoutMs: 60000,
       });
       const applied = await applySnapshot(response.snapshot ?? {});
       if (built.outboxKeys.length) await api.clearOutboxEntries(built.outboxKeys);
