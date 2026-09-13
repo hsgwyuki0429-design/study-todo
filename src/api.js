@@ -542,7 +542,7 @@ export async function carryOverPlanItems({
  * 消さないのは、あとから「何を取り消したか」を確かめられるようにするためと、
  * 他の端末にも「取り消した」ことを伝えるためである（消すと、知らない端末が戻してしまう）。
  */
-export async function voidStudyRecord(recordId, { reason = null } = {}) {
+export async function voidStudyRecord(recordId, { reason = null, voidedWith = null } = {}) {
   const record = await idb.get(STORES.records, recordId);
   if (!record) return { ok: false, error: 'not_found' };
   const now = new Date().toISOString();
@@ -551,11 +551,34 @@ export async function voidStudyRecord(recordId, { reason = null } = {}) {
     voided: true,
     voidedAt: now,
     voidReason: reason,
+    // チャレンジを1回ぶん取り消した道連れなら、それを覚えておく（戻すときに使う）。
+    ...(voidedWith ? { voidedWith } : {}),
     revision: Number(record.revision ?? 0) + 1,
     updatedAt: now,
     corrections: [
       ...(record.corrections ?? []),
       { at: now, by: 'この端末', reason, before: { voided: false }, after: { voided: true } },
+    ],
+  };
+  await idb.put(STORES.records, next);
+  await enqueueOutbox('record', next.id);
+  return { ok: true, record: next };
+}
+
+/** 取り消した学習記録を、取り消す前の状態へ戻す。 */
+export async function restoreStudyRecord(recordId, { reason = null } = {}) {
+  const record = await idb.get(STORES.records, recordId);
+  if (!record) return { ok: false, error: 'not_found' };
+  if (record.voided !== true) return { ok: false, error: 'not_voided' };
+  const now = new Date().toISOString();
+  const { voided, voidedAt, voidReason, voidedWith, ...rest } = record;
+  const next = {
+    ...rest,
+    revision: Number(record.revision ?? 0) + 1,
+    updatedAt: now,
+    corrections: [
+      ...(record.corrections ?? []),
+      { at: now, by: 'この端末', reason, before: { voided: true }, after: { voided: false } },
     ],
   };
   await idb.put(STORES.records, next);
@@ -609,9 +632,47 @@ export async function voidChallengeResult(challengeId, { reason = null } = {}) {
   const records = (await idb.all(STORES.records))
     .filter((record) => record.challengeId === challengeId && record.voided !== true);
   for (const record of records) {
-    await voidStudyRecord(record.id, { reason: reason ?? 'チャレンジごと取り消し' });
+    await voidStudyRecord(record.id, { reason: reason ?? 'チャレンジごと取り消し', voidedWith: challengeId });
   }
   return { ok: true, result: next, voidedRecords: records.length };
+}
+
+/**
+ * 取り消したチャレンジを戻す。
+ * そのとき道連れで取り消した記録だけを戻し、1問ずつ取り消してあった分は取り消したままにする。
+ */
+export async function restoreChallengeResult(challengeId, { reason = null } = {}) {
+  const result = await idb.get(STORES.challenges, challengeId);
+  if (!result) return { ok: false, error: 'not_found' };
+  if (result.voided !== true) return { ok: false, error: 'not_voided' };
+  const now = new Date().toISOString();
+  const { voided, voidedAt, voidReason, ...rest } = result;
+  const next = { ...rest, revision: Number(result.revision ?? 0) + 1, updatedAt: now };
+  await idb.put(STORES.challenges, next);
+  await enqueueOutbox('challenge', next.id);
+
+  const records = (await idb.all(STORES.records))
+    .filter((record) => record.voided === true && record.voidedWith === challengeId);
+  for (const record of records) await restoreStudyRecord(record.id, { reason });
+  return { ok: true, result: next, restoredRecords: records.length };
+}
+
+/** 取り消した学習記録（日付で絞れる）。画面から戻せるようにするために使う。 */
+export async function listVoidedRecords({ date = null } = {}) {
+  const all = await idb.all(STORES.records);
+  return all
+    .filter((record) => record.voided === true)
+    .filter((record) => !date || recordDateOf(record) === date)
+    .sort((a, b) => String(b.voidedAt ?? '').localeCompare(String(a.voidedAt ?? '')));
+}
+
+/** 取り消したチャレンジ（日付で絞れる）。 */
+export async function listVoidedChallenges({ date = null } = {}) {
+  const all = await idb.all(STORES.challenges);
+  return all
+    .filter((result) => result.voided === true)
+    .filter((result) => !date || dayOf(result.timestamp) === date)
+    .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)));
 }
 
 /* ------------------------------------------------------------------ */

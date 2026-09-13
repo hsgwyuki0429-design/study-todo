@@ -752,7 +752,9 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     adds = [],
     updates = [],
     voids = [],
+    restores = [],
     voidChallenges = [],
+    restoreChallenges = [],
     actorKind = "ai",
     actorName = "AI",
     tool = "addStudyRecords",
@@ -789,7 +791,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       };
 
       // 2. 先に全部確かめる。
-      const targets = [...updates, ...voids];
+      const targets = [...updates, ...voids, ...restores];
       for (const target of targets) {
         const found = locate(target.recordId);
         if (!found) {
@@ -813,32 +815,35 @@ export function createSyncService({ storage, now = () => Date.now() }) {
             nextAction: "getQuestionAttempts で今の内容と revision を取り直してください。",
           };
         }
-        // チャレンジの中の記録は、結果（ラップ・合計時間）と地続きなので、
-        // 1件だけ日付や所要時間を動かすと、チャレンジ結果と食い違ってしまう。
+        // チャレンジの中の記録は、結果（ラップ・合計時間）と地続きである。
         //
-        //  ・取り消しは通す。ただし1問だけ抜くことはできないので、
-        //    そのチャレンジまるごと（結果と中の記録すべて）を取り消す。
+        //  ・取り消し／取り消しの取り消しは1件ずつできる。
+        //    チャレンジ結果そのものは残り、その1問だけが集計から外れる（総時間は測った事実として残す）。
         //  ・訂正は、結果と食い違わない評価だけ通す。
-        if (found.record.challengeId) {
-          const isVoid = voids.includes(target);
-          if (isVoid) {
-            target.challengeId = found.record.challengeId;
-          } else {
-            // source は訂正のたびに付く印なので、中身の変更としては数えない。
-            const touched = Object.keys(target.patch ?? {}).filter((key) => key !== "source");
-            const allowed = touched.length > 0 && touched.every((key) => key === "evaluation");
-            if (!allowed) {
-              return {
-                ok: false,
-                error: "challenge_record",
-                recordId: target.recordId,
-                challengeId: found.record.challengeId,
-                fields: touched.filter((key) => key !== "evaluation"),
-                message: "チャレンジの中の記録は、評価だけ直せます（日付や所要時間を変えると、チャレンジ結果の合計と食い違うため）。",
-                nextAction: "評価だけを直すか、そのチャレンジごと取り消してください（voidChallengeResults）。",
-              };
-            }
+        if (found.record.challengeId && updates.includes(target)) {
+          // source は訂正のたびに付く印なので、中身の変更としては数えない。
+          const touched = Object.keys(target.patch ?? {}).filter((key) => key !== "source");
+          const allowed = touched.length > 0 && touched.every((key) => key === "evaluation");
+          if (!allowed) {
+            return {
+              ok: false,
+              error: "challenge_record",
+              recordId: target.recordId,
+              challengeId: found.record.challengeId,
+              fields: touched.filter((key) => key !== "evaluation"),
+              message: "チャレンジの中の記録は、評価だけ直せます（日付や所要時間を変えると、チャレンジ結果の合計と食い違うため）。",
+              nextAction: "評価だけを直すか、そのチャレンジごと取り消してください（voidChallengeResults）。",
+            };
           }
+        }
+        if (restores.includes(target) && found.record.voided !== true) {
+          return {
+            ok: false,
+            error: "not_voided",
+            recordId: target.recordId,
+            message: `学習記録 ${target.recordId} は取り消されていません。`,
+            nextAction: "取り消し済みの記録だけを戻せます。getRecordChanges で何を取り消したか確かめてください。",
+          };
         }
         target.found = found;
       }
@@ -871,26 +876,70 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         }
         challengeTargets.set(target.challengeId, { stored, reason: target.reason ?? reason ?? null });
       }
-      for (const target of voids) {
-        if (!target.challengeId || challengeTargets.has(target.challengeId)) continue;
+      // チャレンジまるごとの取り消しを戻す。
+      const restoreTargets = new Map();
+      for (const target of restoreChallenges) {
         const stored = challengesDoc.results?.[target.challengeId];
-        // 結果が見つからない（古い記録など）なら、記録だけを取り消す。
-        if (stored) challengeTargets.set(target.challengeId, { stored, reason: target.reason ?? reason ?? null });
+        if (!stored) {
+          return {
+            ok: false,
+            error: "challenge_not_found",
+            challengeId: target.challengeId,
+            message: `チャレンジ ${target.challengeId} が見つかりません。`,
+            nextAction: "getChallengeResults で id を確かめてください。",
+          };
+        }
+        if (stored.voided !== true) {
+          return {
+            ok: false,
+            error: "not_voided",
+            challengeId: target.challengeId,
+            message: `チャレンジ ${target.challengeId} は取り消されていません。`,
+            nextAction: "取り消し済みのチャレンジだけを戻せます。",
+          };
+        }
+        if (target.expectedRevision !== undefined && target.expectedRevision !== null
+          && Number(target.expectedRevision) !== Number(stored.revision ?? 0)) {
+          return {
+            ok: false,
+            error: "revision_conflict",
+            challengeId: target.challengeId,
+            expectedRevision: Number(target.expectedRevision),
+            currentRevision: Number(stored.revision ?? 0),
+            message: "そのチャレンジは、読み取ったあとに別の場所から変更されています。何も変えていません。",
+            nextAction: "getChallengeResults で今の内容と revision を取り直してください。",
+          };
+        }
+        restoreTargets.set(target.challengeId, { stored, reason: target.reason ?? reason ?? null });
       }
-      // 取り消すチャレンジの中の記録は、まとめて取り消す（1問だけ残さない）。
+
+      // チャレンジを1回ぶん取り消すときは、中の記録もまとめて取り消す。
+      // 戻すときは、そのとき道連れにした分（voidedWith）だけを戻す。
+      // 個別に取り消してあった記録は、取り消したままにする。
       const expandedVoids = [...voids];
-      if (challengeTargets.size) {
-        const already = new Set(voids.map((target) => target.recordId));
+      const expandedRestores = [...restores];
+      if (challengeTargets.size || restoreTargets.size) {
+        const touched = new Set([...voids, ...restores].map((target) => target.recordId));
         for (const [, shard] of shards) {
           for (const record of Object.values(shard.records ?? {})) {
-            if (!record.challengeId || !challengeTargets.has(record.challengeId)) continue;
-            if (already.has(record.id) || record.voided === true) continue;
-            already.add(record.id);
-            expandedVoids.push({
-              recordId: record.id,
-              reason: challengeTargets.get(record.challengeId).reason,
-              found: { key: recordsKeyFor(record), record },
-            });
+            if (!record.challengeId || touched.has(record.id)) continue;
+            if (challengeTargets.has(record.challengeId) && record.voided !== true) {
+              touched.add(record.id);
+              expandedVoids.push({
+                recordId: record.id,
+                reason: challengeTargets.get(record.challengeId).reason,
+                voidedWith: record.challengeId,
+                found: { key: recordsKeyFor(record), record },
+              });
+            } else if (restoreTargets.has(record.challengeId)
+              && record.voided === true && record.voidedWith === record.challengeId) {
+              touched.add(record.id);
+              expandedRestores.push({
+                recordId: record.id,
+                reason: restoreTargets.get(record.challengeId).reason,
+                found: { key: recordsKeyFor(record), record },
+              });
+            }
           }
         }
       }
@@ -957,6 +1006,8 @@ export function createSyncService({ storage, now = () => Date.now() }) {
           voided: true,
           voidedAt: at,
           voidReason: target.reason ?? reason ?? null,
+          // チャレンジごと取り消した道連れなら、それを覚えておく（戻すときに使う）。
+          ...(target.voidedWith ? { voidedWith: target.voidedWith } : {}),
           revision: Number(before.revision ?? 0) + 1,
           updatedAt: at,
           corrections: [
@@ -966,6 +1017,47 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         }, { receivedAt: now() });
         put(next);
         voidedRecords.push(next);
+      }
+
+      const restoredRecords = [];
+      for (const target of expandedRestores) {
+        const before = target.found.record;
+        const next = normalizeStudyRecord({
+          ...before,
+          voided: false,
+          voidedAt: null,
+          voidReason: null,
+          voidedWith: null,
+          revision: Number(before.revision ?? 0) + 1,
+          updatedAt: at,
+          corrections: [
+            ...(before.corrections ?? []),
+            { at, by: actorName, reason: target.reason ?? reason ?? null, before: { voided: true }, after: { voided: false } },
+          ],
+        }, { receivedAt: now() });
+        put(next);
+        restoredRecords.push(next);
+      }
+
+      const restoredChallenges = [];
+      for (const [challengeId, { stored, reason: why }] of restoreTargets) {
+        const next = {
+          ...stored,
+          voided: false,
+          voidedAt: null,
+          voidReason: why,
+          revision: Number(stored.revision ?? 0) + 1,
+          updatedAt: at,
+          syncedAt: now(),
+        };
+        challengesDoc.results[challengeId] = next;
+        restoredChallenges.push({
+          challengeId,
+          timestamp: stored.timestamp,
+          questionCount: (stored.laps ?? []).length,
+          voided: false,
+          revision: next.revision,
+        });
       }
 
       const voidedChallenges = [];
@@ -990,7 +1082,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       }
 
       for (const [key, shard] of shards) await tx.put(key, shard);
-      if (voidedChallenges.length) await tx.put(SYNC_KEYS.challenges, challengesDoc);
+      if (voidedChallenges.length || restoredChallenges.length) await tx.put(SYNC_KEYS.challenges, challengesDoc);
 
       const result = {
         ok: true,
@@ -999,12 +1091,16 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         added: added.map(describeRecord),
         updated: changed.map((entry) => describeRecord(entry.after)),
         voided: voidedRecords.map(describeRecord),
+        restored: restoredRecords.map(describeRecord),
         voidedChallenges,
+        restoredChallenges,
         counts: {
           added: added.length,
           updated: changed.length,
           voided: voidedRecords.length,
+          restored: restoredRecords.length,
           voidedChallenges: voidedChallenges.length,
+          restoredChallenges: restoredChallenges.length,
         },
       };
 
@@ -1028,7 +1124,9 @@ export function createSyncService({ storage, now = () => Date.now() }) {
             after: describeRecord(entry.after),
           })),
           ...voidedRecords.map((record) => ({ recordId: record.id, kind: "void", after: describeRecord(record) })),
+          ...restoredRecords.map((record) => ({ recordId: record.id, kind: "restore", after: describeRecord(record) })),
           ...voidedChallenges.map((entry) => ({ challengeId: entry.challengeId, kind: "void_challenge", after: entry })),
+          ...restoredChallenges.map((entry) => ({ challengeId: entry.challengeId, kind: "restore_challenge", after: entry })),
         ],
       }, ...(opsDoc.entries ?? [])].slice(0, SYNC_LIMITS.recordOpEntries);
       await tx.put(SYNC_KEYS.recordOps, opsDoc);
@@ -1039,7 +1137,9 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         summary: `学習記録を${added.length ? `${added.length}件追加` : ""}`
           + `${changed.length ? `${added.length ? "・" : ""}${changed.length}件訂正` : ""}`
           + `${voidedRecords.length ? `${added.length || changed.length ? "・" : ""}${voidedRecords.length}件取り消し` : ""}`
+          + `${restoredRecords.length ? `${added.length || changed.length || voidedRecords.length ? "・" : ""}${restoredRecords.length}件の取り消しを戻す` : ""}`
           + `${voidedChallenges.length ? `（チャレンジ${voidedChallenges.length}回ぶん）` : ""}`
+          + `${restoredChallenges.length ? `（チャレンジ${restoredChallenges.length}回ぶんを戻す）` : ""}`
           + `${claimSummary ? `（申告: ${claimSummary}）` : ""}`,
       });
 

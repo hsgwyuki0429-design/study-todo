@@ -748,8 +748,9 @@ export function createTools() {
         "誤って入れた実績を取り消す。記録は消さずに「取り消した」印をつけ、ふだんの集計・カレンダー・統計から外す。",
         "履歴には残るので、あとから何を取り消したか確かめられる。",
         "同じ取り組みを二重に入れてしまったときは、**どちらを残すか**を利用者に確かめてから片方だけを取り消すこと。",
-        "チャレンジの中の記録を指すと、そのチャレンジ1回ぶん（結果と中の記録すべて）がまとめて取り消される。",
-        "1問だけ抜くと合計時間と食い違うためで、結果は voidedChallenges に返る。",
+        "チャレンジの中の記録も、1問ずつ取り消せる。チャレンジ結果そのものは残り、その1問だけが集計から外れる",
+        "（測った合計時間は事実として残す）。1回ぶんまとめて消したいときは voidChallengeResults を使う。",
+        "取り消しは戻せる（restoreStudyRecords）。消していないので、間違えても失われない。",
       ].join(""),
       scope: "records",
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
@@ -780,11 +781,63 @@ export function createTools() {
     }),
 
     defineTool({
+      name: "restoreStudyRecords",
+      title: "取り消した記録を戻す",
+      description: [
+        "取り消した学習記録・チャレンジを、取り消す前の状態へ戻す。取り消しは消さずに印をつけるだけなので、戻せる。",
+        "「やっぱりあれは解いていた」「消す回を間違えた」と言われたときに使う。",
+        "チャレンジを1回ぶん戻すと、そのとき道連れで取り消した記録もいっしょに戻る。",
+        "1問だけ個別に取り消してあった分は、取り消したままにする（本人が別に決めたことなので勝手に戻さない）。",
+        "何を取り消したかは getRecordChanges で分かる。",
+      ].join(""),
+      scope: "records",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          operationId: { type: "string", maxLength: 120, description: "送り直しても二重にならないようにするための、自分で決める文字列。" },
+          records: {
+            type: "array",
+            maxItems: 50,
+            description: "戻す学習記録。",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["recordId"],
+              properties: {
+                recordId: { type: "string", maxLength: 80 },
+                expectedRevision: { type: "integer", minimum: 0, description: "読み取ったときの revision。食い違えば何も変えずに断る。" },
+                reason: { type: "string", maxLength: 200 },
+              },
+            },
+          },
+          challenges: {
+            type: "array",
+            maxItems: 50,
+            description: "戻すチャレンジ（1回ぶん）。",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["challengeId"],
+              properties: {
+                challengeId: { type: "string", maxLength: 80 },
+                expectedRevision: { type: "integer", minimum: 0, description: "読み取ったときの revision。食い違えば何も変えずに断る。" },
+                reason: { type: "string", maxLength: 200 },
+              },
+            },
+          },
+          reason: { type: "string", maxLength: 200, description: "戻す理由。履歴に残る。" },
+        },
+        required: ["operationId"],
+      },
+      run: (args, { service, actor }) => service.restoreStudyRecords(args, actor),
+    }),
+
+    defineTool({
       name: "voidChallengeResults",
       title: "チャレンジの履歴を取り消す",
       description: [
         "誤って始めた・数え直したいチャレンジ1回ぶんを、履歴から取り消す。",
-        "結果と、その中で解いた学習記録をまとめて取り消す（1問だけ抜くと合計時間と食い違うため）。",
+        "結果と、その中で解いた学習記録をまとめて取り消す。1問だけ取り消したいなら voidStudyRecords を使う。",
         "消さずに「取り消した」印をつけるので、履歴には残り、あとから何を取り消したか確かめられる。",
         "対象は getChallengeResults / getRecentChallengeResult の id で指定する。",
         "どの回のことか曖昧なときは、勝手に選ばず利用者に確かめること。",
@@ -1223,8 +1276,10 @@ export const SERVER_INSTRUCTIONS = `study-todo は、青チャート（数学の
   勝手に選ばず、どれのことかを聞きます。同じ問題を同じ日に2回解くのはふつうのことなので、
   日付と問題が同じというだけで重複とみなさないでください。
 - チャレンジ結果は、このサーバーからは作れません（実際に挑戦した端末だけが作ります）。
-  ただし「間違って始めたチャレンジを履歴から消したい」ときは voidChallengeResults で取り消せます。
-  そのときは1回ぶんまるごと（結果と中の記録すべて）が取り消されます。中の記録は評価だけ訂正できます
+  ただし「間違って始めたチャレンジを履歴から消したい」ときは voidChallengeResults で取り消せます
+  （1回ぶんまるごと）。チャレンジの中の記録も、voidStudyRecords で1問ずつ取り消せます。
+  中の記録を訂正できるのは評価だけです（日付や所要時間は結果の合計と食い違うため）。
+  取り消しはどれも消しておらず、restoreStudyRecords で戻せます
   （結果と食い違うため断られます）。その場合は study-todo の画面から直してもらってください。
 - 権限は3つに分かれています。
   read（学習状況を見る）/ write（予定・目標を変える）/ records（本人が申告した学習を記録・訂正する）。

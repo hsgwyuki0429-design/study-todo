@@ -31,13 +31,21 @@ let carryOverFor = null;
  * チャレンジは1回ぶんまるごと（中の記録も）取り消す。1問だけ抜くと合計時間と食い違うため。
  */
 async function voidAttempt(record, rerender) {
-  const challengeId = record.challengeId ?? null;
-  const message = challengeId
-    ? 'この回のチャレンジを履歴から取り消します（中で解いた記録もいっしょに取り消します）。よろしいですか？'
+  const message = record.challengeId
+    ? 'この1問の記録を取り消します。チャレンジの回そのものは残ります。よろしいですか？'
     : 'この記録を履歴から取り消します。集計からも外れます。よろしいですか？';
   if (!confirm(message)) return;
-  if (challengeId) await api.voidChallengeResult(challengeId, { reason: 'この端末から取り消し' });
-  else await api.voidStudyRecord(record.id, { reason: 'この端末から取り消し' });
+  await api.voidStudyRecord(record.id, { reason: 'この端末から取り消し' });
+  openAttemptId = null;
+  await refreshToday();
+  syncInBackground();
+  rerender();
+}
+
+/** 取り消したものを元へ戻す。取り消しは消していないので、いつでも戻せる。 */
+async function restoreAttempt({ record = null, challenge = null }, rerender) {
+  if (challenge) await api.restoreChallengeResult(challenge.id, { reason: 'この端末から戻す' });
+  else await api.restoreStudyRecord(record.id, { reason: 'この端末から戻す' });
   openAttemptId = null;
   await refreshToday();
   syncInBackground();
@@ -119,16 +127,23 @@ export async function renderDayDetail(screen, dateKey) {
   const today = todayKey();
   const rerender = () => render();
 
-  const [tasks, attemptsByDate, challengeResults, moves] = await Promise.all([
+  const [tasks, attemptsByDate, challengeResults, moves, voidedRecords, voidedChallenges] = await Promise.all([
     api.getTasksInRange(dateKey, dateKey),
     api.getAttemptsByDate(dateKey, dateKey),
     api.getChallengeResults(200),
     api.listMoves(),
+    // 取り消した分も読む。画面から戻せるようにするため（消していないので戻せる）。
+    api.listVoidedRecords({ date: dateKey }),
+    api.listVoidedChallenges({ date: dateKey }),
   ]);
   const records = attemptsByDate[dateKey] ?? [];
   const challenges = challengeResults
     .map((result) => ({ ...result, date: api.dayOf(result.timestamp) }))
     .filter((result) => result.date === dateKey);
+  // チャレンジの中の1問は、取り消したものも並べる（取り消し済みと分かる形で）。
+  const lapRecordOf = (challengeId, questionId) =>
+    records.find((entry) => entry.challengeId === challengeId && entry.questionId === questionId)
+    ?? voidedRecords.find((entry) => entry.challengeId === challengeId && entry.questionId === questionId);
 
   const head = el('div', 'view-head');
   head.append(el('div', 'view-title', `${fmtDate(dateKey)}${dateKey === today ? '（今日）' : ''}`));
@@ -217,7 +232,7 @@ export async function renderDayDetail(screen, dateKey) {
       });
       // チャレンジも、中の1問ずつをマスで並べる（カレンダーと同じ見方）。
       node.prepend(squareRow((result.laps ?? []).map((lap) => {
-        const record = records.find((entry) => entry.challengeId === result.id && entry.questionId === lap.questionId);
+        const record = lapRecordOf(result.id, lap.questionId);
         return attemptSquare(record ?? {
           questionId: lap.questionId,
           evaluation: lap.evaluation,
@@ -228,19 +243,73 @@ export async function renderDayDetail(screen, dateKey) {
       list.append(node);
       // チャレンジの中の1問ずつ。カレンダーでは1マスにまとめているが、
       // ここでは中身が分かるようにする（各問題の履歴にも1回として残っている）。
+      // 1問だけ取り消すこともでき、そのときもチャレンジの回そのものは残る。
       for (const lap of result.laps ?? []) {
-        const record = records.find((entry) => entry.challengeId === result.id && entry.questionId === lap.questionId);
+        const record = lapRecordOf(result.id, lap.questionId);
+        const voided = record?.voided === true;
+        const opened = record && openAttemptId === record.id;
+        const restoreBtn = voided ? el('button', 'link-btn', '戻す') : null;
+        if (restoreBtn) {
+          restoreBtn.onclick = async (event) => {
+            event.stopPropagation();
+            await restoreAttempt({ record }, rerender);
+          };
+        }
         const lapNode = detailRow({
           title: qLabel(lap.questionId),
-          sub: questionSub(lap.questionId),
-          right: fmtMS(lap.durationSeconds),
+          sub: [questionSub(lap.questionId), voided ? '取り消し済み' : null].filter(Boolean).join(' ・ '),
+          right: [el('span', 'row-time', fmtMS(lap.durationSeconds)), ...(restoreBtn ? [restoreBtn] : [])],
+          onClick: record ? () => {
+            openAttemptId = opened ? null : record.id;
+            rerender();
+          } : null,
         });
         lapNode.prepend(record
           ? attemptSquare(record, { label: qLabel(lap.questionId) })
           : attemptSquare({ evaluation: lap.evaluation, durationSeconds: lap.durationSeconds, questionId: lap.questionId }));
         lapNode.classList.add('row-indent');
+        if (voided) lapNode.classList.add('is-voided');
         list.append(lapNode);
+        if (opened) {
+          list.append(attemptDetailCard(record, {
+            onVoid: (target) => voidAttempt(target, rerender),
+            onRestore: (target) => restoreAttempt({ record: target }, rerender),
+          }));
+        }
       }
+    }
+  }
+
+  /* ---------- 取り消したもの ---------- */
+  // 取り消しは削除ではないので、ここから戻せる。
+  // ふだんの集計・カレンダーからは外れているが、何を取り消したかは残る。
+  const voidedPlain = voidedRecords.filter((record) => !record.challengeId);
+  if (voidedPlain.length || voidedChallenges.length) {
+    list.append(el('div', 'section-head', `取り消したもの（${voidedPlain.length + voidedChallenges.length}件）`));
+    for (const result of voidedChallenges) {
+      const restore = el('button', 'link-btn', '戻す');
+      restore.onclick = () => restoreAttempt({ challenge: result }, rerender);
+      const node = detailRow({
+        title: `チャレンジ ${result.laps?.length ?? 0}問`,
+        sub: ['取り消し済み', result.voidReason].filter(Boolean).join(' ・ '),
+        right: [el('span', 'row-time', fmtTime(result.timestamp)), restore],
+      });
+      node.classList.add('row-indent', 'is-voided');
+      list.append(node);
+    }
+    for (const record of voidedPlain) {
+      const restore = el('button', 'link-btn', '戻す');
+      restore.onclick = () => restoreAttempt({ record }, rerender);
+      const node = detailRow({
+        title: qLabel(record.questionId),
+        sub: ['取り消し済み', record.voidReason].filter(Boolean).join(' ・ '),
+        right: [
+          el('span', 'row-time', hasDuration(record) ? fmtMS(record.durationSeconds) : '—'),
+          restore,
+        ],
+      });
+      node.classList.add('row-indent', 'is-voided');
+      list.append(node);
     }
   }
 

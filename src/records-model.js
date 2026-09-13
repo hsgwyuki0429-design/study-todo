@@ -110,6 +110,10 @@ export function normalizeStudyRecord(raw, { receivedAt = Date.now(), timezoneOff
         voided: true,
         voidedAt: typeof raw.voidedAt === 'string' ? raw.voidedAt : new Date(receivedAt).toISOString(),
         ...(typeof raw.voidReason === 'string' && raw.voidReason ? { voidReason: raw.voidReason.slice(0, 200) } : {}),
+        // チャレンジを1回ぶん取り消したときの道連れなら、その id。
+        // 取り消しを戻すとき、道連れの分だけを戻すために使う
+        //（1問だけ個別に取り消してあった分は、取り消したままにする）。
+        ...(typeof raw.voidedWith === 'string' && raw.voidedWith ? { voidedWith: raw.voidedWith.slice(0, 80) } : {}),
       }
       : {}),
     // 訂正の履歴（変更前後・理由・日時・実行者）。多くなりすぎないよう上限つき。
@@ -213,6 +217,7 @@ export function describeRecord(record) {
     revision: Number(record.revision ?? 0),
     voided: record.voided === true,
     voidReason: record.voidReason ?? null,
+    ...(record.voidedWith ? { voidedWith: record.voidedWith } : {}),
     corrections: (record.corrections ?? []).length,
     challengeId: record.challengeId ?? null,
     planTaskId: record.planTaskId ?? null,

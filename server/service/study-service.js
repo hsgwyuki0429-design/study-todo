@@ -1954,6 +1954,54 @@ export function createStudyService({ sync, now = () => Date.now() }) {
     },
 
     /**
+     * 取り消した記録・チャレンジを、取り消す前の状態へ戻す。
+     *
+     * 取り消しは消さずに印をつけるだけなので、戻すことができる。
+     * チャレンジを1回ぶん戻すと、そのとき道連れで取り消した記録も戻る
+     *（1問だけ個別に取り消してあった分は、取り消したままにする）。
+     */
+    async restoreStudyRecords(args = {}, actor = {}) {
+      const operationId = readString(args.operationId, "operationId", { required: true, max: 120 });
+      const reason = readString(args.reason, "reason", { max: 200 });
+      const readTargets = (list, key, idKey) => (list ?? []).map((raw, index) => {
+        const field = `${key}[${index}]`;
+        if (typeof raw === "string") return { [idKey]: raw, reason };
+        if (typeof raw !== "object" || raw === null) fail(`${field} は ${idKey} か { ${idKey}, expectedRevision } で渡してください。`, field);
+        rejectUnknownKeys(raw, [idKey, "expectedRevision", "reason"], field);
+        return {
+          [idKey]: readString(raw[idKey], `${field}.${idKey}`, { required: true, max: 80 }),
+          expectedRevision: raw.expectedRevision,
+          reason: readString(raw.reason, `${field}.reason`, { max: 200 }) ?? reason,
+        };
+      });
+      const restores = readTargets(
+        args.records === undefined ? [] : readArray(args.records, "records", { max: SERVICE_LIMITS.recordsPerOperation }),
+        "records", "recordId",
+      );
+      const restoreChallenges = readTargets(
+        args.challenges === undefined ? [] : readArray(args.challenges, "challenges", { max: SERVICE_LIMITS.recordsPerOperation }),
+        "challenges", "challengeId",
+      );
+      if (!restores.length && !restoreChallenges.length) {
+        fail("戻したい記録（records）かチャレンジ（challenges）を1件以上渡してください。", "records");
+      }
+      return runRecordOperations({
+        operationId,
+        fingerprint: recordFingerprint({
+          restores: restores.map(({ recordId }) => recordId),
+          restoreChallenges: restoreChallenges.map(({ challengeId }) => challengeId),
+          reason,
+        }),
+        restores,
+        restoreChallenges,
+        actorKind: "ai",
+        actorName: actor?.clientName ?? actor?.tokenLabel ?? "AI",
+        tool: "restoreStudyRecords",
+        reason,
+      });
+    },
+
+    /**
      * チャレンジの履歴を取り消す。
      *
      * チャレンジは「1回ぶんの通し」なので、1問だけ抜くと合計時間と食い違う。
