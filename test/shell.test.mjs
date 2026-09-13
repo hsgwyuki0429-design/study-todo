@@ -49,7 +49,7 @@ test("Worker が使う src の共有コードは、すべてデプロイ条件�
       const target = match[1] ?? match[2];
       if (!target.startsWith(".")) continue;
       const resolved = path.resolve(path.dirname(file), target);
-      if (resolved.startsWith(path.join(root, "src"))) shared.add(path.relative(root, resolved));
+      if (resolved.startsWith(path.join(root, "src"))) shared.add(path.relative(root, resolved).split(path.sep).join("/"));
       walk(resolved);
     }
   };
