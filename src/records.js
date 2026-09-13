@@ -1,9 +1,12 @@
-// 記録タブ。目次ビュー（章→単元→例題→履歴）と履歴ビュー（時系列）を切り替える。
+// 記録タブ。章 → 単元 → 例題 とたどって、その例題の取り組み履歴を見る。
+//
+// 「いつ何をやったか」はスケジュールの過ぎた日で分かるので、時系列の一覧はここには置かない。
+// ここが受け持つのは「この問題を、これまで何回、どうだったか」だけである。
 
 import * as api from './api.js';
-import { EVALUATIONS, EVAL_MAP, dayOf } from './api.js';
+import { EVAL_MAP, dayOf } from './api.js';
 import { state, q, qLabel, render } from './state.js';
-import { el, fmtMS, fmtTime, fmtDate, row, segmented, emptyState } from './ui.js';
+import { el, fmtMS, fmtTime, fmtDate, row, emptyState } from './ui.js';
 import { attemptDetailCard, attemptSquare, squareRow } from './squares.js';
 
 const CHEVRON = '›';
@@ -137,100 +140,13 @@ async function tocView(screen) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 履歴ビュー                                                          */
-/* ------------------------------------------------------------------ */
-
-async function historyView(screen) {
-  const f = state.records.filters;
-  const filters = el('div', 'filters');
-
-  const chapters = [...new Set([...state.questions.values()].map((x) => x.chapter))];
-  const chapterSel = el('select');
-  chapterSel.append(new Option('すべての章', ''));
-  chapters.forEach((c) => chapterSel.append(new Option(c, c)));
-  chapterSel.value = f.chapter;
-  chapterSel.onchange = () => {
-    f.chapter = chapterSel.value;
-    f.section = '';
-    render();
-  };
-
-  const sectionSel = el('select');
-  sectionSel.append(new Option('すべての単元', ''));
-  if (f.chapter) {
-    [...new Set([...state.questions.values()].filter((x) => x.chapter === f.chapter).map((x) => x.section))]
-      .forEach((s) => sectionSel.append(new Option(s, s)));
-  }
-  sectionSel.value = f.section ?? '';
-  sectionSel.disabled = !f.chapter;
-  sectionSel.onchange = () => {
-    f.section = sectionSel.value;
-    render();
-  };
-
-  const evalSel = el('select');
-  evalSel.append(new Option('すべての評価', ''));
-  EVALUATIONS.forEach((e) => evalSel.append(new Option(`${e.symbol} ${e.label}`, e.value)));
-  evalSel.value = f.evaluation;
-  evalSel.onchange = () => {
-    f.evaluation = evalSel.value;
-    render();
-  };
-
-  filters.append(chapterSel, sectionSel, evalSel);
-  screen.append(filters);
-
-  let records = await api.getStudyHistory({
-    limit: 400,
-    evaluation: f.evaluation || undefined,
-    chapter: f.chapter || undefined,
-  });
-  if (f.section) records = records.filter((r) => q(r.questionId)?.section === f.section);
-
-  const list = el('div', 'list');
-  if (!records.length) list.append(emptyState('記録がありません'));
-
-  let day = null;
-  for (const r of records) {
-    const d = dayOf(r.timestamp);
-    if (d !== day) {
-      day = d;
-      list.append(el('div', 'section-head', fmtDate(d)));
-    }
-    const qq = q(r.questionId);
-    const node = row({
-      title: qLabel(r.questionId),
-      sub: `${fmtTime(r.timestamp)}${qq ? ` ・ ${qq.chapter}` : ''}`,
-      right: el('span', 'row-time', fmtMS(r.durationSeconds)),
-      onClick: () => {
-        Object.assign(state.records, { view: 'toc' });
-        Object.assign(state.records.toc, {
-          chapter: qq?.chapter ?? null,
-          section: qq?.section ?? null,
-          questionId: r.questionId,
-        });
-        render();
-      },
-    });
-    node.prepend(evalMark(r.evaluation));
-    list.append(node);
-  }
-  screen.append(list);
-}
-
-/* ------------------------------------------------------------------ */
 
 export async function renderRecords(screen) {
   screen.innerHTML = '';
   const head = el('div', 'view-head');
   head.append(el('div', 'view-title', '記録'));
   screen.append(head);
-  screen.append(
-    segmented([['toc', '目次'], ['history', '履歴']], state.records.view, (v) => {
-      state.records.view = v;
-      render();
-    })
-  );
-  if (state.records.view === 'toc') await tocView(screen);
-  else await historyView(screen);
+  // 時系列の一覧は置かない。「いつ何をやったか」はスケジュールの過ぎた日で分かるので、
+  // ここは「この問題をこれまで何回どうだったか」だけを受け持つ。
+  await tocView(screen);
 }

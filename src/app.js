@@ -58,6 +58,11 @@ function buildTabBar() {
     m.textContent = mark;
     b.append(m, document.createTextNode(label));
     b.onclick = () => {
+      // スケジュールは、タブを押すたびに今日を真ん中へ持ってくる。
+      if (name === 'schedule') {
+        state.schedule.selectedDate = null;
+        state.schedule.centerToday = true;
+      }
       state.tab = name;
       render();
     };

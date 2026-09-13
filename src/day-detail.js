@@ -129,8 +129,9 @@ export async function renderDayDetail(screen, dateKey) {
     classes: ['row-back'],
     onClick: () => {
       state.schedule.selectedDate = null;
-      // 一覧に戻ったときは、押す前の位置へ帰す。
-      state.schedule.restoreScroll = state.schedule.scrollY ?? 0;
+      // 一覧に戻ったときは、押す前の位置へ帰す（今日へは寄せ直さない）。
+      state.schedule.restoreScroll = state.schedule.scrollTop ?? 0;
+      state.schedule.centerToday = false;
       render();
     },
   }));

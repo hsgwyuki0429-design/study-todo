@@ -546,7 +546,20 @@ input[type='password'] { width: 100%; }
 
 :root { --sq: 18px; }
 
-.week-list { display: flex; flex-direction: column; padding: 0 10px 16px; }
+/* 日付がずっと続く1本の並び。上へ行けば過去、下へ行けば先の予定。 */
+.day-list { display: flex; flex-direction: column; padding: 0 10px 24px; }
+
+.month-heading {
+  position: sticky;
+  /* 見出しのすぐ下に貼り付く（見出しは画面の上に固定してある）。 */
+  top: calc(44px + env(safe-area-inset-top));
+  z-index: 1;
+  background: var(--bg);
+  padding: 8px 4px 4px;
+  font-size: 12px;
+  color: var(--fg-sub);
+  border-bottom: 1px solid var(--line);
+}
 
 .day-row {
   width: 100%;
@@ -562,6 +575,8 @@ input[type='password'] { width: 100%; }
   background: transparent;
 }
 .day-row.is-past { color: var(--fg-sub); }
+/* 週のはじまり（月曜）だけ、区切りを少し濃くする。 */
+.day-row.week-start { border-top: 1px solid var(--line-strong); }
 .day-row.is-today { background: var(--accent-bg); border-radius: 8px; }
 
 .day-col { flex: none; width: 62px; }
@@ -575,18 +590,23 @@ input[type='password'] { width: 100%; }
 
 .day-bars { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 
-.week-nav {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  flex: none;
-}
-.week-period { flex: 1; text-align: center; font-size: 15px; font-weight: 600; }
+.head-actions { display: flex; align-items: center; gap: 4px; }
 
 /* 見出しの右端に置く小さなボタン（ℹ️ など） */
 .view-head-row { display: flex; align-items: center; justify-content: space-between; }
 .icon-btn { font-size: 18px; min-width: var(--tap); min-height: var(--tap); }
+
+/* スケジュールは日付がずっと続くので、見出し（今日へ戻る・ⓘ）は貼り付けておく。 */
+#screen-schedule .view-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--bg);
+  padding-top: calc(6px + env(safe-area-inset-top));
+  padding-bottom: 6px;
+  min-height: 44px;
+  box-sizing: border-box;
+}
 
 /* 日別の詳細 */
 .detail-item {
@@ -623,12 +643,6 @@ input[type='password'] { width: 100%; }
 
 .attempt-detail { padding: 12px 16px; background: var(--bg-sub); border-bottom: 1px solid var(--line); font-size: 13px; }
 .attempt-detail div { margin: 2px 0; }
-
-/* 狭い画面でも、マスと文字を小さくしすぎない。横にはみ出させない。 */
-@media (max-width: 359px) {
-  .week-list { padding: 0 8px 24px; }
-  .day-card { padding: 10px; }
-}
 
 .attempt-history { padding: 10px 16px; }
 
@@ -686,6 +700,5 @@ input[type='password'] { width: 100%; }
   :root { --sq: 15px; }
   .day-row { padding: 6px 4px; gap: 6px; }
   .day-col { width: 56px; }
-  .week-nav { padding: 4px 10px; }
-  .week-list { padding: 0 8px 12px; }
+  .day-list { padding: 0 8px 16px; }
 }

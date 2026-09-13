@@ -708,6 +708,77 @@ export async function estimateForQuestionId(questionId, { inChallenge = false } 
   });
 }
 
+/**
+ * カレンダーのように「たくさんの日」を一度に描くための下ごしらえ。
+ *
+ * 1日ずつ IndexedDB を読み直すと、日数ぶんだけ読み込みが増えて重くなる。
+ * ここで必要なものを一度だけ読み、あとは同期的に計算できるようにしておく。
+ */
+export async function createDayPlanner() {
+  const [records, challenges, entries, availability, questions] = await Promise.all([
+    idb.all(STORES.records),
+    idb.all(STORES.challenges),
+    getEstimateEntries(),
+    getAvailability(),
+    idb.all(STORES.questions),
+  ]);
+  const questionById = new Map(questions.map((question) => [question.id, question]));
+  const historyByQuestion = new Map();
+  for (const record of [...records].sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)))) {
+    if (!historyByQuestion.has(record.questionId)) historyByQuestion.set(record.questionId, []);
+    historyByQuestion.get(record.questionId).push(record);
+  }
+  const spentByDate = new Map();
+  for (const record of records) {
+    const day = dayOf(record.timestamp);
+    spentByDate.set(day, (spentByDate.get(day) ?? 0) + (record.durationSeconds ?? 0));
+  }
+  const truncated = new Set(challenges.filter((c) => c.succeeded === false).map((c) => c.id));
+  const today = todayKey();
+  const cache = new Map();
+
+  const estimate = (questionId, { inChallenge = false } = {}) => {
+    const key = `${questionId}|${inChallenge ? 'c' : 'n'}`;
+    if (!cache.has(key)) {
+      const history = historyByQuestion.get(questionId) ?? [];
+      cache.set(key, estimateForQuestion({
+        question: questionById.get(questionId) ?? null,
+        history,
+        stored: entries[questionId] ?? null,
+        condition: { firstTry: history.length === 0, inChallenge },
+        review: {
+          timerIncludesReview: availability.timerIncludesReview,
+          reviewOverheadSeconds: availability.reviewOverheadSeconds,
+        },
+        truncatedChallengeIds: truncated,
+      }));
+    }
+    return cache.get(key);
+  };
+
+  return {
+    availability,
+    estimate,
+    /** その日に使える時間（未設定なら available は null）。 */
+    capacity: (dateKey) => availabilityForDate(availability, dateKey, {
+      spentSeconds: spentByDate.get(dateKey) ?? 0,
+      isToday: dateKey === today,
+    }),
+    /** その日の未実施の予定にかかる見積もり（分）。 */
+    plannedMinutes: (dateKey, tasks = [], dayRecords = []) => {
+      let seconds = 0;
+      for (const task of tasks) {
+        if (task.completed) continue;
+        const split = splitPlanItems(task, dayRecords, { date: dateKey });
+        for (const item of split.pending) {
+          seconds += estimate(item.questionId, { inChallenge: task.kind === 'challenge' }).seconds;
+        }
+      }
+      return Math.round(seconds / 60);
+    },
+  };
+}
+
 /** その日の未実施の予定にかかる見積もり（分）。 */
 export async function plannedMinutesFor(dateKey) {
   const [tasks, records] = await Promise.all([

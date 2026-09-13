@@ -12,6 +12,7 @@
 // マスは「1回の取り組み」または「1回ぶんの予定」で1つ。チャレンジをまとめて1マスにはしない。
 
 import { splitPlanItems } from './plan-items.js';
+import { shiftDateKey } from './datetime.js';
 
 export const ROWS = Object.freeze(['example', 'exercise']);
 
@@ -66,4 +67,16 @@ export function buildDay(dateKey, {
     attemptCount: attempts.example.length + attempts.exercise.length,
     plannedCount: planned.example.length + planned.exercise.length,
   };
+}
+
+
+/** from から to までの日付を並べる（連続したカレンダー用）。 */
+export function dateRange(from, to, { max = 800 } = {}) {
+  const dates = [];
+  let cursor = from;
+  while (cursor <= to && dates.length < max) {
+    dates.push(cursor);
+    cursor = shiftDateKey(cursor, 1);
+  }
+  return dates;
 }

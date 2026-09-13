@@ -3,7 +3,6 @@
 
 import * as api from './api.js';
 import { EMPTY_SESSION, DEFAULT_SETTINGS, todayKey } from './api.js';
-import { startOfWeekKey } from './datetime.js';
 
 export const state = {
   tab: 'home',
@@ -17,18 +16,19 @@ export const state = {
   today: { seconds: 0, count: 0, records: [] },
 
   records: {
-    view: 'toc',      // 'toc' | 'history'
     toc: { chapter: null, section: null, questionId: null, attemptId: null },
-    filters: { chapter: '', evaluation: '' },
   },
 
-  // スケジュールは週ぎめ。日付を押すと詳細へ移り、戻ると同じ週・同じ位置へ帰る。
+  // スケジュールは日付がずっと続く1本の並び。
+  // タブを押したときは今日が真ん中に来て、日付を押すと詳細へ移り、戻ると同じ位置へ帰る。
   schedule: {
-    weekStart: startOfWeekKey(todayKey()),
+    from: null,            // いま出している範囲（null なら今日を中心に取り直す）
+    to: null,
     selectedDate: null,
-    scrollY: 0,
+    scrollTop: 0,
     restoreScroll: null,
-    // 右上の ℹ️ で開く「マスの見方」。
+    centerToday: true,
+    // 右上の ⓘ で開く「マスの見方」。
     helpOpen: false,
   },
 };
