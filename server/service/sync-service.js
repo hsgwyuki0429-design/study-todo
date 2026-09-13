@@ -65,8 +65,17 @@ export const SYNC_KEYS = Object.freeze({
   placements: "studytodo:placements",
   // 予定を別の日へ動かした記録（繰り越し・予定変更）。追加専用。
   moves: "studytodo:moves",
-  // 学習記録の追加・訂正・取り消しの記録（誰が・いつ・何を・なぜ）。
+  // 学習記録の追加・訂正・削除の記録（誰が・いつ・何を・なぜ）。
   recordOps: "studytodo:recordops",
+  // 「学習データをすべて削除」をした日時。
+  // 他の端末は、これを見て自分の手元も消す。全部を消すと配るものが無くなり、
+  // 「空が返ってきた」と「そもそも何も無い」の区別が付かないため、印だけ残しておく。
+  // この鍵は全削除でも消さない。
+  purge: "studytodo:purge",
+  // 削除した学習記録・チャレンジのID（墓標）。
+  // 中身は残さないが、IDだけは覚えておく。これが無いと、削除を知らない端末が
+  // 同じものをもう一度送ってきたときに復活してしまう。
+  deletions: "studytodo:deletions",
   // 1日に使える学習時間（曜日別・日付ごと・今日の残り）。
   availability: "studytodo:availability",
   // 問題別の見積もり指定（本人の指定とAIの仮見積もり）。実績から計算する分は保存しない。
@@ -88,6 +97,9 @@ export const SYNC_LIMITS = Object.freeze({
   changeEntries: 50,
   // 学習記録の追加・訂正の記録。1回に扱える件数と、残しておく件数。
   recordsPerOperation: 50,
+  // 覚えておく墓標の数。IDと日時だけなので小さいが、際限なくは増やさない。
+  deletionEntries: 5000,
+  deletionsPerPush: 200,
   recordOpEntries: 100,
   // 繰り越しの記録。追加専用で、1回に送れる数と持っておく数の上限。
   movesPerPush: 200,
@@ -123,8 +135,12 @@ export function normalizeSyncCode(value) {
 const DEFAULT_DEVICES = { devices: {}, syncCodeHash: null, syncCodePreview: null, updatedAt: null };
 const DEFAULT_RECORDS = { records: {} };
 const DEFAULT_CHALLENGES = { results: {} };
+const DEFAULT_DELETIONS = { records: {}, challenges: {} };
+const DEFAULT_PURGE = { at: null, atMs: 0, id: null };
 const DEFAULT_GOALS = { goals: [] };
-const DEFAULT_QUESTIONS = { version: 0, hash: null, updatedAt: null, questions: [] };
+// masterVersion は「どちらが新しいか」を決める数（ハッシュでは分からない）。
+// version は書き換えた回数で、こちらは同期の目安にしか使わない。
+const DEFAULT_QUESTIONS = { version: 0, masterVersion: 0, hash: null, updatedAt: null, questions: [] };
 const DEFAULT_LOG = { entries: [] };
 const DEFAULT_CHANGES = { entries: [] };
 const DEFAULT_PLACEMENTS = { tasks: {} };
@@ -145,15 +161,16 @@ export function createSyncService({ storage, now = () => Date.now() }) {
 
   /**
    * 保存してある学習記録（月ごとに分けて持っている）。
-   * 取り消した記録は、ふだんの集計に混ざらないよう既定では返さない。
+   * 消した記録はそもそも残っていない。古い版で「取り消し」にした記録だけ、ここで外す。
    */
-  async function readAllRecords({ includeVoided = false } = {}) {
+  async function readAllRecords() {
     const keys = await storage.list(SYNC_KEYS.recordsPrefix);
     const shards = await Promise.all(keys.map((key) => readDoc(key, DEFAULT_RECORDS)));
     const records = [];
     for (const shard of shards) {
       for (const record of Object.values(shard.records ?? {})) {
-        if (!includeVoided && !isCountedRecord(record)) continue;
+        // 古い版で「取り消し」にした記録がまだ残っていることがある。数えない。
+        if (!isCountedRecord(record)) continue;
         records.push(record);
       }
     }
@@ -164,7 +181,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     ));
   }
 
-  /** 1件の記録を id から引く（訂正・取り消しの対象を確かめるため）。 */
+  /** 1件の記録を id から引く（訂正・削除の対象を確かめるため）。 */
   async function findRecord(recordId) {
     const keys = await storage.list(SYNC_KEYS.recordsPrefix);
     for (const key of keys) {
@@ -175,11 +192,33 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     return null;
   }
 
-  async function readChallenges({ includeVoided = false } = {}) {
+  async function readChallenges() {
     const document = await readDoc(SYNC_KEYS.challenges, DEFAULT_CHALLENGES);
-    const results = Object.values(document.results ?? {});
-    return (includeVoided ? results : results.filter((result) => result.voided !== true))
+    return Object.values(document.results ?? {})
+      // 古い版で「取り消し」にした回がまだ残っていることがある。数えない。
+      .filter((result) => result.voided !== true)
       .sort((left, right) => String(right.timestamp).localeCompare(String(left.timestamp)));
+  }
+
+  /**
+   * 削除した学習記録・チャレンジのID（墓標）。
+   *
+   * 削除は本当に消す。中身は残さないが、IDと消した日時だけは覚えておく。
+   * これが無いと、削除を知らない端末が同じものをもう一度送ってきたときに復活してしまう。
+   */
+  async function readDeletions() {
+    return readDoc(SYNC_KEYS.deletions, DEFAULT_DELETIONS);
+  }
+
+  /** 墓標に足す。多くなりすぎたら古いものから落とす。 */
+  function addTombstones(document, kind, ids, at) {
+    const table = document[kind] ?? (document[kind] = {});
+    for (const id of ids) table[id] = at;
+    const entries = Object.entries(table);
+    if (entries.length > SYNC_LIMITS.deletionEntries) {
+      entries.sort((left, right) => String(right[1]).localeCompare(String(left[1])));
+      document[kind] = Object.fromEntries(entries.slice(0, SYNC_LIMITS.deletionEntries));
+    }
   }
 
   async function readGoals({ includeDeleted = false } = {}) {
@@ -736,12 +775,12 @@ export function createSyncService({ storage, now = () => Date.now() }) {
   const recordsKeyFor = (record) => SYNC_KEYS.records(recordDateOf(record).slice(0, 7));
 
   /**
-   * 学習記録をまとめて追加・訂正・取り消しする。
+   * 学習記録をまとめて追加・訂正・削除する。
    *
    * ・全部の確認を通ったときだけ書き込む（1つでも通らなければ1件も変えない）
    * ・同じ operationId の送り直しでは、前回の結果を返すだけで二重にならない
    * ・訂正は revision を1つ進め、変更前後を履歴に残す
-   * ・取り消しは消さずに印をつける（ふだんの集計からは外れる）
+   * ・削除は本当に消す。消したIDだけを墓標に残し、送り直されても復活させない
    *
    * 実際の中身の確かめ（問題IDが正しいか、日付が未来でないかなど）は、
    * 呼び出し側（study-service）が先に済ませている前提。ここでは保存の正しさだけを見る。
@@ -751,10 +790,8 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     fingerprint,
     adds = [],
     updates = [],
-    voids = [],
-    restores = [],
-    voidChallenges = [],
-    restoreChallenges = [],
+    deletes = [],
+    deleteChallenges = [],
     actorKind = "ai",
     actorName = "AI",
     tool = "addStudyRecords",
@@ -791,7 +828,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       };
 
       // 2. 先に全部確かめる。
-      const targets = [...updates, ...voids, ...restores];
+      const targets = [...updates, ...deletes];
       for (const target of targets) {
         const found = locate(target.recordId);
         if (!found) {
@@ -817,8 +854,8 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         }
         // チャレンジの中の記録は、結果（ラップ・合計時間）と地続きである。
         //
-        //  ・取り消し／取り消しの取り消しは1件ずつできる。
-        //    チャレンジ結果そのものは残り、その1問だけが集計から外れる（総時間は測った事実として残す）。
+        //  ・削除は1件ずつできる。チャレンジ結果そのものは残り、
+        //    その1問だけが集計から外れる（総時間は測った事実として残す）。
         //  ・訂正は、結果と食い違わない評価だけ通す。
         if (found.record.challengeId && updates.includes(target)) {
           // source は訂正のたびに付く印なので、中身の変更としては数えない。
@@ -832,26 +869,17 @@ export function createSyncService({ storage, now = () => Date.now() }) {
               challengeId: found.record.challengeId,
               fields: touched.filter((key) => key !== "evaluation"),
               message: "チャレンジの中の記録は、評価だけ直せます（日付や所要時間を変えると、チャレンジ結果の合計と食い違うため）。",
-              nextAction: "評価だけを直すか、そのチャレンジごと取り消してください（voidChallengeResults）。",
+              nextAction: "評価だけを直すか、その1問を消す（deleteStudyRecords）か、チャレンジごと消してください（deleteChallengeResults）。",
             };
           }
-        }
-        if (restores.includes(target) && found.record.voided !== true) {
-          return {
-            ok: false,
-            error: "not_voided",
-            recordId: target.recordId,
-            message: `学習記録 ${target.recordId} は取り消されていません。`,
-            nextAction: "取り消し済みの記録だけを戻せます。getRecordChanges で何を取り消したか確かめてください。",
-          };
         }
         target.found = found;
       }
 
-      // チャレンジまるごとの取り消し。記録の取り消しから広がった分もここへ集める。
+      // チャレンジ1回ぶんの削除。中で解いた記録もいっしょに消す。
       const challengesDoc = (await tx.get(SYNC_KEYS.challenges)) ?? structuredClone(DEFAULT_CHALLENGES);
       const challengeTargets = new Map();
-      for (const target of voidChallenges) {
+      for (const target of deleteChallenges) {
         const stored = challengesDoc.results?.[target.challengeId];
         if (!stored) {
           return {
@@ -860,86 +888,23 @@ export function createSyncService({ storage, now = () => Date.now() }) {
             challengeId: target.challengeId,
             message: `チャレンジ ${target.challengeId} が見つかりません。`,
             nextAction: "getChallengeResults で id を確かめてください。",
-          };
-        }
-        if (target.expectedRevision !== undefined && target.expectedRevision !== null
-          && Number(target.expectedRevision) !== Number(stored.revision ?? 0)) {
-          return {
-            ok: false,
-            error: "revision_conflict",
-            challengeId: target.challengeId,
-            expectedRevision: Number(target.expectedRevision),
-            currentRevision: Number(stored.revision ?? 0),
-            message: "そのチャレンジは、読み取ったあとに別の場所から変更されています。何も変えていません。",
-            nextAction: "getChallengeResults で今の内容と revision を取り直してください。",
           };
         }
         challengeTargets.set(target.challengeId, { stored, reason: target.reason ?? reason ?? null });
       }
-      // チャレンジまるごとの取り消しを戻す。
-      const restoreTargets = new Map();
-      for (const target of restoreChallenges) {
-        const stored = challengesDoc.results?.[target.challengeId];
-        if (!stored) {
-          return {
-            ok: false,
-            error: "challenge_not_found",
-            challengeId: target.challengeId,
-            message: `チャレンジ ${target.challengeId} が見つかりません。`,
-            nextAction: "getChallengeResults で id を確かめてください。",
-          };
-        }
-        if (stored.voided !== true) {
-          return {
-            ok: false,
-            error: "not_voided",
-            challengeId: target.challengeId,
-            message: `チャレンジ ${target.challengeId} は取り消されていません。`,
-            nextAction: "取り消し済みのチャレンジだけを戻せます。",
-          };
-        }
-        if (target.expectedRevision !== undefined && target.expectedRevision !== null
-          && Number(target.expectedRevision) !== Number(stored.revision ?? 0)) {
-          return {
-            ok: false,
-            error: "revision_conflict",
-            challengeId: target.challengeId,
-            expectedRevision: Number(target.expectedRevision),
-            currentRevision: Number(stored.revision ?? 0),
-            message: "そのチャレンジは、読み取ったあとに別の場所から変更されています。何も変えていません。",
-            nextAction: "getChallengeResults で今の内容と revision を取り直してください。",
-          };
-        }
-        restoreTargets.set(target.challengeId, { stored, reason: target.reason ?? reason ?? null });
-      }
-
-      // チャレンジを1回ぶん取り消すときは、中の記録もまとめて取り消す。
-      // 戻すときは、そのとき道連れにした分（voidedWith）だけを戻す。
-      // 個別に取り消してあった記録は、取り消したままにする。
-      const expandedVoids = [...voids];
-      const expandedRestores = [...restores];
-      if (challengeTargets.size || restoreTargets.size) {
-        const touched = new Set([...voids, ...restores].map((target) => target.recordId));
+      const expandedDeletes = [...deletes];
+      if (challengeTargets.size) {
+        const already = new Set(deletes.map((target) => target.recordId));
         for (const [, shard] of shards) {
           for (const record of Object.values(shard.records ?? {})) {
-            if (!record.challengeId || touched.has(record.id)) continue;
-            if (challengeTargets.has(record.challengeId) && record.voided !== true) {
-              touched.add(record.id);
-              expandedVoids.push({
-                recordId: record.id,
-                reason: challengeTargets.get(record.challengeId).reason,
-                voidedWith: record.challengeId,
-                found: { key: recordsKeyFor(record), record },
-              });
-            } else if (restoreTargets.has(record.challengeId)
-              && record.voided === true && record.voidedWith === record.challengeId) {
-              touched.add(record.id);
-              expandedRestores.push({
-                recordId: record.id,
-                reason: restoreTargets.get(record.challengeId).reason,
-                found: { key: recordsKeyFor(record), record },
-              });
-            }
+            if (!record.challengeId || !challengeTargets.has(record.challengeId)) continue;
+            if (already.has(record.id)) continue;
+            already.add(record.id);
+            expandedDeletes.push({
+              recordId: record.id,
+              reason: challengeTargets.get(record.challengeId).reason,
+              found: { key: recordsKeyFor(record), record },
+            });
           }
         }
       }
@@ -998,91 +963,32 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         changed.push({ before, after: next });
       }
 
-      const voidedRecords = [];
-      for (const target of expandedVoids) {
+      // 削除は本当に消す。戻せないので、呼ぶ側で本人の意思を確かめてある前提。
+      // 消したIDだけは墓標に残す（削除を知らない端末が送り直しても復活しないように）。
+      const deletedRecords = [];
+      for (const target of expandedDeletes) {
         const before = target.found.record;
-        const next = normalizeStudyRecord({
-          ...before,
-          voided: true,
-          voidedAt: at,
-          voidReason: target.reason ?? reason ?? null,
-          // チャレンジごと取り消した道連れなら、それを覚えておく（戻すときに使う）。
-          ...(target.voidedWith ? { voidedWith: target.voidedWith } : {}),
-          revision: Number(before.revision ?? 0) + 1,
-          updatedAt: at,
-          corrections: [
-            ...(before.corrections ?? []),
-            { at, by: actorName, reason: target.reason ?? reason ?? null, before: { voided: false }, after: { voided: true } },
-          ],
-        }, { receivedAt: now() });
-        put(next);
-        voidedRecords.push(next);
+        delete shards.get(target.found.key).records[before.id];
+        deletedRecords.push(before);
       }
 
-      const restoredRecords = [];
-      for (const target of expandedRestores) {
-        const before = target.found.record;
-        const next = normalizeStudyRecord({
-          ...before,
-          voided: false,
-          voidedAt: null,
-          voidReason: null,
-          voidedWith: null,
-          revision: Number(before.revision ?? 0) + 1,
-          updatedAt: at,
-          corrections: [
-            ...(before.corrections ?? []),
-            { at, by: actorName, reason: target.reason ?? reason ?? null, before: { voided: true }, after: { voided: false } },
-          ],
-        }, { receivedAt: now() });
-        put(next);
-        restoredRecords.push(next);
-      }
-
-      const restoredChallenges = [];
-      for (const [challengeId, { stored, reason: why }] of restoreTargets) {
-        const next = {
-          ...stored,
-          voided: false,
-          voidedAt: null,
-          voidReason: why,
-          revision: Number(stored.revision ?? 0) + 1,
-          updatedAt: at,
-          syncedAt: now(),
-        };
-        challengesDoc.results[challengeId] = next;
-        restoredChallenges.push({
+      const deletedChallenges = [];
+      for (const [challengeId, { stored }] of challengeTargets) {
+        delete challengesDoc.results[challengeId];
+        deletedChallenges.push({
           challengeId,
           timestamp: stored.timestamp,
           questionCount: (stored.laps ?? []).length,
-          voided: false,
-          revision: next.revision,
         });
       }
 
-      const voidedChallenges = [];
-      for (const [challengeId, { stored, reason: why }] of challengeTargets) {
-        const next = {
-          ...stored,
-          voided: true,
-          voidedAt: at,
-          voidReason: why,
-          revision: Number(stored.revision ?? 0) + 1,
-          updatedAt: at,
-          syncedAt: now(),
-        };
-        challengesDoc.results[challengeId] = next;
-        voidedChallenges.push({
-          challengeId,
-          timestamp: stored.timestamp,
-          questionCount: (stored.laps ?? []).length,
-          voided: true,
-          revision: next.revision,
-        });
-      }
+      const deletionsDoc = (await tx.get(SYNC_KEYS.deletions)) ?? structuredClone(DEFAULT_DELETIONS);
+      if (deletedRecords.length) addTombstones(deletionsDoc, "records", deletedRecords.map((record) => record.id), at);
+      if (deletedChallenges.length) addTombstones(deletionsDoc, "challenges", deletedChallenges.map((entry) => entry.challengeId), at);
+      if (deletedRecords.length || deletedChallenges.length) await tx.put(SYNC_KEYS.deletions, deletionsDoc);
 
       for (const [key, shard] of shards) await tx.put(key, shard);
-      if (voidedChallenges.length || restoredChallenges.length) await tx.put(SYNC_KEYS.challenges, challengesDoc);
+      if (deletedChallenges.length) await tx.put(SYNC_KEYS.challenges, challengesDoc);
 
       const result = {
         ok: true,
@@ -1090,17 +996,13 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         at,
         added: added.map(describeRecord),
         updated: changed.map((entry) => describeRecord(entry.after)),
-        voided: voidedRecords.map(describeRecord),
-        restored: restoredRecords.map(describeRecord),
-        voidedChallenges,
-        restoredChallenges,
+        deleted: deletedRecords.map(describeRecord),
+        deletedChallenges,
         counts: {
           added: added.length,
           updated: changed.length,
-          voided: voidedRecords.length,
-          restored: restoredRecords.length,
-          voidedChallenges: voidedChallenges.length,
-          restoredChallenges: restoredChallenges.length,
+          deleted: deletedRecords.length,
+          deletedChallenges: deletedChallenges.length,
         },
       };
 
@@ -1123,10 +1025,9 @@ export function createSyncService({ storage, now = () => Date.now() }) {
             before: describeRecord(entry.before),
             after: describeRecord(entry.after),
           })),
-          ...voidedRecords.map((record) => ({ recordId: record.id, kind: "void", after: describeRecord(record) })),
-          ...restoredRecords.map((record) => ({ recordId: record.id, kind: "restore", after: describeRecord(record) })),
-          ...voidedChallenges.map((entry) => ({ challengeId: entry.challengeId, kind: "void_challenge", after: entry })),
-          ...restoredChallenges.map((entry) => ({ challengeId: entry.challengeId, kind: "restore_challenge", after: entry })),
+          // 消したものは中身が残らないので、何を消したかだけ履歴に残す。
+          ...deletedRecords.map((record) => ({ recordId: record.id, kind: "delete", before: describeRecord(record) })),
+          ...deletedChallenges.map((entry) => ({ challengeId: entry.challengeId, kind: "delete_challenge", before: entry })),
         ],
       }, ...(opsDoc.entries ?? [])].slice(0, SYNC_LIMITS.recordOpEntries);
       await tx.put(SYNC_KEYS.recordOps, opsDoc);
@@ -1136,10 +1037,8 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         tool,
         summary: `学習記録を${added.length ? `${added.length}件追加` : ""}`
           + `${changed.length ? `${added.length ? "・" : ""}${changed.length}件訂正` : ""}`
-          + `${voidedRecords.length ? `${added.length || changed.length ? "・" : ""}${voidedRecords.length}件取り消し` : ""}`
-          + `${restoredRecords.length ? `${added.length || changed.length || voidedRecords.length ? "・" : ""}${restoredRecords.length}件の取り消しを戻す` : ""}`
-          + `${voidedChallenges.length ? `（チャレンジ${voidedChallenges.length}回ぶん）` : ""}`
-          + `${restoredChallenges.length ? `（チャレンジ${restoredChallenges.length}回ぶんを戻す）` : ""}`
+          + `${deletedRecords.length ? `${added.length || changed.length ? "・" : ""}${deletedRecords.length}件削除` : ""}`
+          + `${deletedChallenges.length ? `（チャレンジ${deletedChallenges.length}回ぶん）` : ""}`
           + `${claimSummary ? `（申告: ${claimSummary}）` : ""}`,
       });
 
@@ -1158,9 +1057,63 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     };
   }
 
+  /**
+   * クラウドに預けてある学習データを、すべて消す。
+   *
+   * 消すのは学習記録・チャレンジ・予定・目標・繰り越し・変更履歴。
+   * 問題マスタ・端末の登録・AI連携の設定は残す（消すと使えなくなってしまうため）。
+   * 戻せないので、呼ぶ側で本人の意思を確かめてある前提。
+   */
+  /** いつ全削除したか。端末はこれを見て、自分の手元も消す。 */
+  async function readPurge() {
+    return readDoc(SYNC_KEYS.purge, DEFAULT_PURGE);
+  }
+
+  async function purgeStudyData() {
+    const [recordKeys, planKeys] = await Promise.all([
+      storage.list(SYNC_KEYS.recordsPrefix),
+      storage.list(SYNC_KEYS.taskPlanPrefix),
+    ]);
+    const keys = [
+      ...recordKeys,
+      ...planKeys,
+      SYNC_KEYS.challenges,
+      SYNC_KEYS.goals,
+      SYNC_KEYS.moves,
+      SYNC_KEYS.changes,
+      SYNC_KEYS.placements,
+      SYNC_KEYS.recordOps,
+      SYNC_KEYS.deletions,
+      SYNC_KEYS.availability,
+      SYNC_KEYS.estimates,
+    ];
+    for (const key of keys) await storage.delete(key);
+
+    // 消し終わってから印を付ける。他の端末は次の同期でこれを見て、自分の手元も消す。
+    // 印が無いと、端末には「空が返ってきた」としか見えず、消したことが伝わらない。
+    const at = new Date(now()).toISOString();
+    const purge = { at, atMs: now(), id: generateToken(8) };
+    await storage.put(SYNC_KEYS.purge, purge);
+
+    await appendLog({
+      clientName: "設定画面",
+      tool: "purgeStudyData",
+      summary: `クラウドの学習データをすべて削除（記録${recordKeys.length}か月ぶん・予定${planKeys.length}日ぶん）`,
+    });
+    return {
+      ok: true,
+      purgedAt: at,
+      purgedAtMs: purge.atMs,
+      removed: { recordMonths: recordKeys.length, planDays: planKeys.length },
+    };
+  }
+
   return {
     limits: SYNC_LIMITS,
     keys: SYNC_KEYS,
+    purgeStudyData,
+    readPurge,
+    readDeletions,
     readAllRecords,
     findRecord,
     applyRecordOperations,
@@ -1260,7 +1213,18 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         };
         document.updatedAt = at;
       }, { defaults: structuredClone(DEFAULT_DEVICES) });
-      return { deviceId, deviceKey, deviceName: deviceName || "端末" };
+      // いまの「すべて削除」の印を、登録した時点で知っているものとして渡す。
+      //
+      // これが無いと、前に一度でも全削除していたクラウドへ新しい端末が入ったとき、
+      // その端末が手元に持っていた学習記録を、昔の削除の巻き添えで消してしまう。
+      // 削除はそのとき参加していた端末に効くもので、あとから来た端末の分は消さない。
+      const purge = await readPurge();
+      return {
+        deviceId,
+        deviceKey,
+        deviceName: deviceName || "端末",
+        purgedAtMs: purge.atMs || 0,
+      };
     },
 
     /** 端末キーから、どの端末かを割り出す。 */
@@ -1301,6 +1265,35 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       const at = now();
       const atIso = new Date(at).toISOString();
 
+      // 「すべて削除」を知らない端末が送ってきたものは、1つも受け取らない。
+      //
+      // 端末は自分の手元にあるものを送ってから、返ってきた内容を重ねる。
+      // ここで受け取ってしまうと、消したばかりのものが送り主の手元から
+      // そのまま戻ってきて、消したのに消えていない状態になる。
+      // 受け取らずに印だけ返せば、端末はそれを見て自分の手元を消し、
+      // 次の同期で消えたあとの状態にそろう。
+      const purge = await readPurge();
+      const knownPurgeAtMs = Math.max(0, Math.floor(Number(payload.knownPurgeAtMs) || 0));
+      if (purge.atMs && purge.atMs > knownPurgeAtMs) {
+        await updateDocument(storage, SYNC_KEYS.devices, (document) => {
+          const device = document.devices?.[deviceId];
+          if (device) device.lastSeenAt = atIso;
+          document.updatedAt = atIso;
+        }, { defaults: structuredClone(DEFAULT_DEVICES) });
+        return {
+          savedAt: atIso,
+          // 何も受け取らなかったことを、はっきり返す。
+          ignored: {
+            reason: "purged",
+            purgedAt: purge.at,
+            message: "この端末が知らないうちに学習データがすべて削除されています。"
+              + "送られた内容は受け取っていません。この端末も削除に合わせてください。",
+          },
+          accepted: { records: 0, challenges: 0, taskPlans: 0, goals: 0, moves: 0 },
+          questionsStored: false,
+        };
+      }
+
       const records = Array.isArray(payload.records) ? payload.records : [];
       if (records.length > SYNC_LIMITS.recordsPerPush) {
         fail(`1回に送れる学習記録は${SYNC_LIMITS.recordsPerPush}件までです。分けて送ってください。`, "records");
@@ -1320,6 +1313,40 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       const goals = Array.isArray(payload.goals) ? payload.goals : [];
       if (goals.length > SYNC_LIMITS.goalsPerPush) fail(`目標は${SYNC_LIMITS.goalsPerPush}件までです。`, "goals");
 
+      // 端末で消したもの。先に消してから、送られてきた中身を重ねる。
+      // この順でないと、同じ送信の中にある「消したはずのもの」が入り直してしまう。
+      const deleteIds = {
+        records: (payload.deletions?.records ?? []).filter((id) => typeof id === "string").slice(0, SYNC_LIMITS.deletionsPerPush),
+        challenges: (payload.deletions?.challenges ?? []).filter((id) => typeof id === "string").slice(0, SYNC_LIMITS.deletionsPerPush),
+      };
+      const tombstones = await readDeletions();
+      if (deleteIds.records.length || deleteIds.challenges.length) {
+        if (deleteIds.records.length) {
+          const wanted = new Set(deleteIds.records);
+          const keys = await storage.list(SYNC_KEYS.recordsPrefix);
+          for (const key of keys) {
+            const shard = await readDoc(key, DEFAULT_RECORDS);
+            const hit = Object.keys(shard.records ?? {}).filter((id) => wanted.has(id));
+            if (!hit.length) continue;
+            await updateDocument(storage, key, (document) => {
+              for (const id of hit) delete document.records[id];
+            }, { defaults: structuredClone(DEFAULT_RECORDS) });
+          }
+        }
+        if (deleteIds.challenges.length) {
+          const wanted = new Set(deleteIds.challenges);
+          await updateDocument(storage, SYNC_KEYS.challenges, (document) => {
+            for (const id of wanted) delete document.results?.[id];
+          }, { defaults: structuredClone(DEFAULT_CHALLENGES) });
+        }
+        await updateDocument(storage, SYNC_KEYS.deletions, (document) => {
+          addTombstones(document, "records", deleteIds.records, atIso);
+          addTombstones(document, "challenges", deleteIds.challenges, atIso);
+        }, { defaults: structuredClone(DEFAULT_DELETIONS) });
+        for (const id of deleteIds.records) tombstones.records[id] = atIso;
+        for (const id of deleteIds.challenges) tombstones.challenges[id] = atIso;
+      }
+
       // 学習記録は月ごとに分けて預かる。増えても1回の書き込みが重くならない。
       // 訂正や取り消しも届くので、id が同じものは revision の大きいほうを残す
       // （訂正を知らない端末が古い内容を送ってきても、戻らない）。
@@ -1328,6 +1355,8 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       for (const raw of records) {
         const record = normalizeRecord(raw, { receivedAt: at });
         if (!record) { skippedRecords += 1; continue; }
+        // 消したものは受け取らない。削除を知らない端末が送り直しても復活させない。
+        if (tombstones.records[record.id]) { skippedRecords += 1; continue; }
         const month = recordDateOf(record).slice(0, 7);
         if (!byMonth.has(month)) byMonth.set(month, []);
         byMonth.get(month).push(record);
@@ -1346,7 +1375,8 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       let addedChallenges = 0;
       const normalizedChallenges = challenges
         .map((raw) => normalizeChallengeResult(raw, { receivedAt: at }))
-        .filter(Boolean);
+        .filter(Boolean)
+        .filter((result) => !tombstones.challenges[result.id]);
       if (normalizedChallenges.length) {
         await updateDocument(storage, SYNC_KEYS.challenges, (document) => {
           const { merged, added } = mergeChallenges(document.results ?? {}, normalizedChallenges);
@@ -1409,6 +1439,14 @@ export function createSyncService({ storage, now = () => Date.now() }) {
 
       // 問題マスタは、中身が変わったときだけ入れ替える。同じものは送り直させない。
       let questionsStored = false;
+      // 問題マスタは、版（masterVersion）が今より大きいときだけ受け取る。
+      //
+      // ハッシュは「違う」ことしか言えないので、それだけで置き換えると、
+      // 古い問題マスタを持ったままの端末が久しぶりに同期したときに、
+      // 新しいマスタを古いほうへ巻き戻してしまう。
+      // 版を知らない（この仕組みより前の）端末は 0 として扱うので、
+      // 何も送り込めないかわりに、pull で新しいマスタを受け取る。
+      let questionsIgnored = null;
       if (payload.questions && Array.isArray(payload.questions.questions)) {
         const list = payload.questions.questions.map(normalizeQuestion).filter(Boolean);
         if (list.length > SYNC_LIMITS.questions) {
@@ -1416,14 +1454,29 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         }
         const hash = await hashQuestions(list);
         const current = await readQuestions();
+        const incomingVersion = Math.max(0, Math.floor(Number(payload.questions.masterVersion) || 0));
+        const currentVersion = Math.max(0, Math.floor(Number(current.masterVersion) || 0));
+        // サーバーに1問も無いときは、版に関わらず受け取る（最初の1台ぶん）。
+        const first = !(current.questions ?? []).length;
         if (list.length && hash !== current.hash) {
-          await updateDocument(storage, SYNC_KEYS.questions, (document) => {
-            document.questions = list;
-            document.hash = hash;
-            document.version = Number(document.version ?? 0) + 1;
-            document.updatedAt = atIso;
-          }, { defaults: structuredClone(DEFAULT_QUESTIONS) });
-          questionsStored = true;
+          if (first || incomingVersion > currentVersion) {
+            await updateDocument(storage, SYNC_KEYS.questions, (document) => {
+              document.questions = list;
+              document.hash = hash;
+              document.masterVersion = Math.max(incomingVersion, currentVersion);
+              document.version = Number(document.version ?? 0) + 1;
+              document.updatedAt = atIso;
+            }, { defaults: structuredClone(DEFAULT_QUESTIONS) });
+            questionsStored = true;
+          } else {
+            // 送ってきたほうが古い。受け取らず、pull で新しいマスタを返す。
+            questionsIgnored = {
+              reason: "older_master",
+              sentMasterVersion: incomingVersion,
+              currentMasterVersion: currentVersion,
+              message: "送られた問題マスタのほうが古いので受け取りませんでした。この端末には新しいマスタを配ります。",
+            };
+          }
         }
       }
 
@@ -1449,6 +1502,8 @@ export function createSyncService({ storage, now = () => Date.now() }) {
           goals: goals.length,
         },
         questionsStored,
+        // 古いマスタを送ってきたときは、その旨を返す（端末側で気づけるように）。
+        ...(questionsIgnored ? { questionsIgnored } : {}),
       };
     },
 
@@ -1458,15 +1513,15 @@ export function createSyncService({ storage, now = () => Date.now() }) {
      */
     async pull({ since = null, questionsHash = null, timezoneOffsetMinutes } = {}) {
       const today = todayKeyOf(timezoneOffsetMinutes, now());
-      const [allRecords, challenges, goals, questions, index] = await Promise.all([
-        // 取り消した記録も配る。端末側でも集計から外れるようにするため
-        // （配らないと、端末には取り消し前の記録が残ったままになる）。
-        readAllRecords({ includeVoided: true }),
-        // 取り消したチャレンジも配る（端末側でも履歴から消えるようにするため）。
-        readChallenges({ includeVoided: true }),
+      const [allRecords, challenges, goals, questions, index, deletions, purge] = await Promise.all([
+        readAllRecords(),
+        readChallenges(),
         readGoals({ includeDeleted: true }),
         readQuestions(),
         readDeviceIndex(),
+        // 消したもののID。端末側でも消えるようにするため、これも配る。
+        readDeletions(),
+        readPurge(),
       ]);
       const sinceMs = Number.isFinite(Number(since)) ? Number(since) : null;
       const records = sinceMs === null
@@ -1480,12 +1535,24 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       return {
         serverTime: new Date(now()).toISOString(),
         serverTimeMs: now(),
-        totalRecords: allRecords.filter(isCountedRecord).length,
+        totalRecords: allRecords.length,
         records,
         challenges: sinceMs === null
           ? challenges
           : challenges.filter((result) => Number(result.syncedAt ?? 0) > sinceMs),
         taskPlans: plans,
+        // 「すべて削除」をした印。端末はこれを見て、手元のものもまとめて消す。
+        // 前に受け取った印より新しいときだけ消すので、何度同期しても1回しか効かない。
+        purge: purge.atMs ? { at: purge.at, atMs: purge.atMs, id: purge.id } : null,
+        // 消したもののID。端末はこれを見て、手元からも消す。
+        deletions: {
+          records: Object.entries(deletions.records ?? {})
+            .filter(([, at]) => sinceMs === null || Date.parse(at) > sinceMs)
+            .map(([id]) => id),
+          challenges: Object.entries(deletions.challenges ?? {})
+            .filter(([, at]) => sinceMs === null || Date.parse(at) > sinceMs)
+            .map(([id]) => id),
+        },
         // 繰り越しの記録も配る（追加専用なので、重ねても増えない）。
         moves: (await readMoves({ limit: SYNC_LIMITS.movesPerPull })).moves,
         availability: await readAvailability(),
@@ -1494,6 +1561,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         goals,
         questions: {
           version: questions.version,
+          masterVersion: Math.max(0, Math.floor(Number(questions.masterVersion) || 0)),
           hash: questions.hash,
           count: (questions.questions ?? []).length,
           updatedAt: questions.updatedAt,

@@ -70,12 +70,12 @@ async function tocView(screen) {
       const opened = attempts.find((record) => record.id === toc.attemptId);
       if (opened) {
         list.append(attemptDetailCard(opened, {
-          onVoid: async (record) => {
+          onDelete: async (record) => {
             const message = record.challengeId
-              ? 'この1問の記録を取り消します。チャレンジの回そのものは残ります。よろしいですか？'
-              : 'この記録を履歴から取り消します。集計からも外れます。よろしいですか？';
+              ? 'この1問の記録を削除します。チャレンジの回そのものは残ります。元に戻せません。よろしいですか？'
+              : 'この記録を削除します。元に戻せません。よろしいですか？';
             if (!confirm(message)) return;
-            await api.voidStudyRecord(record.id, { reason: 'この端末から取り消し' });
+            await api.deleteStudyRecord(record.id);
             toc.attemptId = null;
             await refreshToday();
             syncInBackground();

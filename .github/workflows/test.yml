@@ -23,3 +23,20 @@ jobs:
       - run: npm test
       - name: 問題マスタが tools/source と一致しているか
         run: npm run build:questions -- --check
+
+  # 実ブラウザでの通し確認（タップ → IndexedDB → Service Worker → 再起動 →
+  # オフライン → 同期）。判定のしかたを見る npm test とは別の層なので、
+  # ブラウザの用意に時間がかかるぶん、ジョブを分けて並べて走らせる。
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Playwright と Chromium を用意
+        run: |
+          npm install --no-save playwright@1.56.1
+          npx playwright install --with-deps chromium
+      - run: npm run test:e2e

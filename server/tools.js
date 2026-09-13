@@ -13,7 +13,7 @@
 //   ・分からない評価・時間は埋めない。未登録として保存する。
 //   ・取り消しは消すのではなく、印をつけて集計から外す（履歴は残る）。
 //   ・チャレンジ結果は、このサーバーからは作れない（実際に挑戦した端末だけが作る）。
-//     取り消し（voidChallengeResults）は、本人が「あれは無し」と言ったときだけできる。
+//     削除（deleteChallengeResults）は、本人が「あれは無し」と言ったときだけできる。
 
 import { toolResult } from "./core/mcp.js";
 import { PermissionError, requireScope } from "./auth/tokens.js";
@@ -742,15 +742,16 @@ export function createTools() {
     }),
 
     defineTool({
-      name: "voidStudyRecords",
-      title: "記録した学習を取り消す",
+      name: "deleteStudyRecords",
+      title: "記録した学習を削除する",
       description: [
-        "誤って入れた実績を取り消す。記録は消さずに「取り消した」印をつけ、ふだんの集計・カレンダー・統計から外す。",
-        "履歴には残るので、あとから何を取り消したか確かめられる。",
-        "同じ取り組みを二重に入れてしまったときは、**どちらを残すか**を利用者に確かめてから片方だけを取り消すこと。",
-        "チャレンジの中の記録も、1問ずつ取り消せる。チャレンジ結果そのものは残り、その1問だけが集計から外れる",
-        "（測った合計時間は事実として残す）。1回ぶんまとめて消したいときは voidChallengeResults を使う。",
-        "取り消しは戻せる（restoreStudyRecords）。消していないので、間違えても失われない。",
+        "誤って入れた実績を削除する。印をつけるのではなく、**本当に消す**。戻せない。",
+        "消したことは他の端末にも伝わり、削除を知らない端末が同じものを送り直しても復活しない。",
+        "「何を消したか」だけは履歴（getRecordChanges）に残るが、中身は残らない。",
+        "同じ取り組みを二重に入れてしまったときは、**どちらを残すか**を利用者に確かめてから片方だけを消すこと。",
+        "どれのことか曖昧なときは、勝手に選ばず必ず利用者に確かめること。",
+        "チャレンジの中の記録も、1問ずつ消せる。チャレンジの回そのものは残り、その1問だけが集計から外れる",
+        "（測った合計時間は事実として残す）。1回ぶんまとめて消したいときは deleteChallengeResults を使う。",
       ].join(""),
       scope: "records",
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
@@ -761,7 +762,7 @@ export function createTools() {
             type: "array",
             minItems: 1,
             maxItems: 50,
-            description: "取り消す記録。",
+            description: "削除する記録。",
             items: {
               type: "object",
               additionalProperties: false,
@@ -773,72 +774,19 @@ export function createTools() {
               },
             },
           },
-          reason: { type: "string", maxLength: 200, description: "取り消す理由。履歴に残る。" },
+          reason: { type: "string", maxLength: 200, description: "削除する理由。履歴に残る。" },
         },
         required: ["operationId", "records"],
       },
-      run: (args, { service, actor }) => service.voidStudyRecords(args, actor),
+      run: (args, { service, actor }) => service.deleteStudyRecords(args, actor),
     }),
 
     defineTool({
-      name: "restoreStudyRecords",
-      title: "取り消した記録を戻す",
+      name: "deleteChallengeResults",
+      title: "チャレンジの履歴を削除する",
       description: [
-        "取り消した学習記録・チャレンジを、取り消す前の状態へ戻す。取り消しは消さずに印をつけるだけなので、戻せる。",
-        "「やっぱりあれは解いていた」「消す回を間違えた」と言われたときに使う。",
-        "チャレンジを1回ぶん戻すと、そのとき道連れで取り消した記録もいっしょに戻る。",
-        "1問だけ個別に取り消してあった分は、取り消したままにする（本人が別に決めたことなので勝手に戻さない）。",
-        "何を取り消したかは getRecordChanges で分かる。",
-      ].join(""),
-      scope: "records",
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      inputSchema: {
-        properties: {
-          operationId: { type: "string", maxLength: 120, description: "送り直しても二重にならないようにするための、自分で決める文字列。" },
-          records: {
-            type: "array",
-            maxItems: 50,
-            description: "戻す学習記録。",
-            items: {
-              type: "object",
-              additionalProperties: false,
-              required: ["recordId"],
-              properties: {
-                recordId: { type: "string", maxLength: 80 },
-                expectedRevision: { type: "integer", minimum: 0, description: "読み取ったときの revision。食い違えば何も変えずに断る。" },
-                reason: { type: "string", maxLength: 200 },
-              },
-            },
-          },
-          challenges: {
-            type: "array",
-            maxItems: 50,
-            description: "戻すチャレンジ（1回ぶん）。",
-            items: {
-              type: "object",
-              additionalProperties: false,
-              required: ["challengeId"],
-              properties: {
-                challengeId: { type: "string", maxLength: 80 },
-                expectedRevision: { type: "integer", minimum: 0, description: "読み取ったときの revision。食い違えば何も変えずに断る。" },
-                reason: { type: "string", maxLength: 200 },
-              },
-            },
-          },
-          reason: { type: "string", maxLength: 200, description: "戻す理由。履歴に残る。" },
-        },
-        required: ["operationId"],
-      },
-      run: (args, { service, actor }) => service.restoreStudyRecords(args, actor),
-    }),
-
-    defineTool({
-      name: "voidChallengeResults",
-      title: "チャレンジの履歴を取り消す",
-      description: [
-        "誤って始めた・数え直したいチャレンジ1回ぶんを、履歴から取り消す。",
-        "結果と、その中で解いた学習記録をまとめて取り消す。1問だけ取り消したいなら voidStudyRecords を使う。",
-        "消さずに「取り消した」印をつけるので、履歴には残り、あとから何を取り消したか確かめられる。",
+        "誤って始めた・数え直したいチャレンジ1回ぶんを、履歴から削除する。印ではなく**本当に消す**。戻せない。",
+        "結果と、その中で解いた学習記録をまとめて消す。1問だけ消したいなら deleteStudyRecords を使う。",
         "対象は getChallengeResults / getRecentChallengeResult の id で指定する。",
         "どの回のことか曖昧なときは、勝手に選ばず利用者に確かめること。",
       ].join(""),
@@ -851,29 +799,28 @@ export function createTools() {
             type: "array",
             minItems: 1,
             maxItems: 50,
-            description: "取り消すチャレンジ。",
+            description: "削除するチャレンジ。",
             items: {
               type: "object",
               additionalProperties: false,
               required: ["challengeId"],
               properties: {
-                challengeId: { type: "string", maxLength: 80, description: "取り消すチャレンジ結果のID。" },
-                expectedRevision: { type: "integer", minimum: 0, description: "読み取ったときの revision。食い違えば何も変えずに断る。" },
+                challengeId: { type: "string", maxLength: 80, description: "削除するチャレンジ結果のID。" },
                 reason: { type: "string", maxLength: 200 },
               },
             },
           },
-          reason: { type: "string", maxLength: 200, description: "取り消す理由。履歴に残る。" },
+          reason: { type: "string", maxLength: 200, description: "削除する理由。履歴に残る。" },
         },
         required: ["operationId", "challenges"],
       },
-      run: (args, { service, actor }) => service.voidChallengeResults(args, actor),
+      run: (args, { service, actor }) => service.deleteChallengeResults(args, actor),
     }),
 
     defineTool({
       name: "getRecordChanges",
-      title: "学習記録の追加・訂正の履歴",
-      description: "本人の申告で足した記録や、訂正・取り消しの履歴を新しい順に返す。いつ・誰が・何を・なぜ変えたか（変更前後つき）が分かる。",
+      title: "学習記録の追加・訂正・削除の履歴",
+      description: "本人の申告で足した記録や、訂正・削除の履歴を新しい順に返す。いつ・誰が・何を・なぜ変えたかが分かる。削除したものは中身が残らないので、何を消したかだけが分かる。",
       scope: "read",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
@@ -1254,7 +1201,7 @@ export const SERVER_INSTRUCTIONS = `study-todo は、青チャート（数学の
 - 繰り越しが多い予定を見て、「難しいから進まない」と決めつけないでください。
   理由（reason）が unspecified の移動は、理由が分かっていないという意味です。
 - 学習の実績（学習記録）は、**本人が「やった」と言ったときだけ**、代理で記録・訂正できます。
-  使うのは addStudyRecords / updateStudyRecords / voidStudyRecords で、records の権限が要ります。
+  使うのは addStudyRecords / updateStudyRecords / deleteStudyRecords で、records の権限が要ります。
 
     1. getAppInfo で今日の日付（日本時間）を確かめる。「昨日」は today から年月日に直す
     2. searchQuestions / listQuestions で対象の問題IDを確かめる
@@ -1272,14 +1219,15 @@ export const SERVER_INSTRUCTIONS = `study-todo は、青チャート（数学の
   ・分からない時間を0秒や推定値で埋める（「4問で40分」は各10分に割り振らない）
   ・時刻が分からないのに、それらしい時刻を作る
   保存できなかったときに「記録しました」と答えないでください。結果の counts を見て伝えます。
-- 実績の訂正・取り消しでは、対象の recordId を必ず確かめてください。候補が複数あるときは
+- 実績の訂正・削除では、対象の recordId を必ず確かめてください。候補が複数あるときは
   勝手に選ばず、どれのことかを聞きます。同じ問題を同じ日に2回解くのはふつうのことなので、
   日付と問題が同じというだけで重複とみなさないでください。
+  **削除は本当に消すので戻せません。** どれを消すかが少しでも曖昧なら、必ず先に確かめてください。
 - チャレンジ結果は、このサーバーからは作れません（実際に挑戦した端末だけが作ります）。
-  ただし「間違って始めたチャレンジを履歴から消したい」ときは voidChallengeResults で取り消せます
-  （1回ぶんまるごと）。チャレンジの中の記録も、voidStudyRecords で1問ずつ取り消せます。
+  ただし「間違って始めたチャレンジを履歴から消したい」ときは deleteChallengeResults で消せます
+  （1回ぶんまるごと）。チャレンジの中の記録も、deleteStudyRecords で1問ずつ消せます。
   中の記録を訂正できるのは評価だけです（日付や所要時間は結果の合計と食い違うため）。
-  取り消しはどれも消しておらず、restoreStudyRecords で戻せます
+  削除は本当に消すので戻せません。どれを消すか曖昧なときは、必ず先に利用者へ確かめてください
   （結果と食い違うため断られます）。その場合は study-todo の画面から直してもらってください。
 - 権限は3つに分かれています。
   read（学習状況を見る）/ write（予定・目標を変える）/ records（本人が申告した学習を記録・訂正する）。

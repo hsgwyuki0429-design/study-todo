@@ -20,11 +20,17 @@ on:
   push:
     branches: [main]
     # PWA だけの変更でデプロイしても意味がないので、サーバーに関わるものに絞る。
+    #
+    # src/** をまるごと入れているのは、Worker が判定のしかたを PWA と共有しているため。
+    # server/ から datetime・records-model・plan-items・goals・availability・estimates
+    # などを直接 import していて、その一覧はこれからも増える。
+    # ファイル名を並べて書くと、共有コードを1つ足したときに配り忘れて、
+    # 「ブラウザ側は新しく、サーバー側は古い」というかみ合わない状態になる。
+    # 余分に配るほうが、食い違うより安い。
+    # （どれが共有コードかは test/shell.test.mjs が見張っている）
     paths:
       - 'server/**'
-      - 'src/question-order.js'
-      - 'src/hash.js'
-      - 'src/datetime.js'
+      - 'src/**'
       - 'test/**'
       - 'wrangler.toml'
       - 'package.json'

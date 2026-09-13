@@ -214,12 +214,12 @@ test("目次は教科書の掲載順で、単元ごとのページと問題数�
 /* PWA → 同期 → KV → MCP                                              */
 /* ------------------------------------------------------------------ */
 
-async function pushMaster(app, deviceKey, questions) {
+async function pushMaster(app, deviceKey, questions, { masterVersion = 1 } = {}) {
   const hash = await hashQuestions(questions);
   return call(app, "/api/sync/push", {
     method: "POST",
     token: deviceKey,
-    body: { questions: { hash, questions } },
+    body: { questions: { hash, masterVersion, questions } },
   });
 }
 
@@ -251,6 +251,77 @@ test("指紋が一致すれば問題マスタは送り直されない", async ()
   });
   assert.equal(again.body.questionsStored, false);
   assert.equal(again.body.snapshot.questions.count, questions.length);
+});
+
+/* ------------------------------------------------------------------ */
+/* 版（どちらのマスタが新しいか）                                      */
+/* ------------------------------------------------------------------ */
+
+test("同梱の問題マスタは版を持っている", async () => {
+  const document = await master();
+  assert.ok(Number.isInteger(document.masterVersion) && document.masterVersion >= 1,
+    "data/questions.json に masterVersion が無い（中身を変えたら1つ上げること）");
+});
+
+test("古いマスタを持った端末が、新しいマスタを巻き戻さない", async () => {
+  const { app } = createTestApp();
+  const device = await joinDevice(app);
+  const { questions } = await master();
+
+  // いまのマスタ（版1）がクラウドに入っている。
+  const stored = await pushMaster(app, device.deviceKey, questions, { masterVersion: 1 });
+  assert.equal(stored.body.questionsStored, true);
+
+  // 久しぶりに開いた古い端末。問題が少なく、版も知らない（= 0 扱い）。
+  const old = questions.slice(0, questions.length - 2);
+  const oldDevice = await joinDevice(app, "古いiPad");
+  const pushed = await call(app, "/api/sync/push", {
+    method: "POST",
+    token: oldDevice.deviceKey,
+    body: { questions: { hash: await hashQuestions(old), questions: old } },
+  });
+  assert.equal(pushed.status, 200);
+  assert.equal(pushed.body.questionsStored, false, "古いマスタが受け取られてしまった");
+  assert.equal(pushed.body.questionsIgnored?.reason, "older_master");
+
+  // クラウドは新しいままで、古い端末には新しいマスタが配られる。
+  assert.equal(pushed.body.snapshot.questions.count, questions.length);
+  assert.equal(pushed.body.snapshot.questions.masterVersion, 1);
+  assert.equal(pushed.body.snapshot.questions.questions.length, questions.length);
+
+  const pulled = await call(app, "/api/sync/pull", { token: device.deviceKey });
+  assert.equal(pulled.body.questions.count, questions.length);
+});
+
+test("版が上がったマスタは受け取る", async () => {
+  const { app } = createTestApp();
+  const device = await joinDevice(app);
+  const { questions } = await master();
+  await pushMaster(app, device.deviceKey, questions, { masterVersion: 1 });
+
+  const next = [...questions, { ...questions[0], id: "追加-1", label: "追加 1" }];
+  const pushed = await pushMaster(app, device.deviceKey, next, { masterVersion: 2 });
+  assert.equal(pushed.body.questionsStored, true);
+  assert.equal(pushed.body.snapshot.questions.count, next.length);
+  assert.equal(pushed.body.snapshot.questions.masterVersion, 2);
+
+  // 同じ版のまま中身だけ違うものは受け取らない（どちらが新しいか決められないため）。
+  const sideways = await pushMaster(app, device.deviceKey, questions, { masterVersion: 2 });
+  assert.equal(sideways.body.questionsStored, false);
+  assert.equal(sideways.body.snapshot.questions.count, next.length);
+});
+
+test("クラウドが空なら、版を知らない端末からでも受け取る", async () => {
+  const { app } = createTestApp();
+  const device = await joinDevice(app);
+  const { questions } = await master();
+  const pushed = await call(app, "/api/sync/push", {
+    method: "POST",
+    token: device.deviceKey,
+    body: { questions: { hash: await hashQuestions(questions), questions } },
+  });
+  assert.equal(pushed.body.questionsStored, true, "最初の1台が入れられなかった");
+  assert.equal(pushed.body.snapshot.questions.count, questions.length);
 });
 
 test("MCP から追加した情報を読める", async () => {

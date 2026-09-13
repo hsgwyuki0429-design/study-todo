@@ -1926,12 +1926,18 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       });
     },
 
-    /** 誤って入れた実績を取り消す。消さずに印をつけ、ふだんの集計から外す。 */
-    async voidStudyRecords(args = {}, actor = {}) {
+    /**
+     * 誤って入れた実績を削除する。
+     *
+     * 印をつけるのではなく、本当に消す。消したことは他の端末にも伝わり、
+     * 削除を知らない端末が同じものを送り直しても復活しない。
+     * 戻せないので、どれを消すかが曖昧なときは、勝手に選ばず利用者に確かめること。
+     */
+    async deleteStudyRecords(args = {}, actor = {}) {
       const operationId = readString(args.operationId, "operationId", { required: true, max: 120 });
       const reason = readString(args.reason, "reason", { max: 200 });
       const list = readArray(args.records, "records", { min: 1, max: SERVICE_LIMITS.recordsPerOperation });
-      const voids = list.map((raw, index) => {
+      const deletes = list.map((raw, index) => {
         const field = `records[${index}]`;
         if (typeof raw === "string") return { recordId: raw };
         if (typeof raw !== "object" || raw === null) fail(`${field} は recordId か { recordId, expectedRevision } で渡してください。`, field);
@@ -1944,96 +1950,47 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       });
       return runRecordOperations({
         operationId,
-        fingerprint: recordFingerprint({ voids: voids.map(({ recordId }) => recordId), reason }),
-        voids,
+        fingerprint: recordFingerprint({ deletes: deletes.map(({ recordId }) => recordId), reason }),
+        deletes,
         actorKind: "ai",
         actorName: actor?.clientName ?? actor?.tokenLabel ?? "AI",
-        tool: "voidStudyRecords",
+        tool: "deleteStudyRecords",
         reason,
       });
     },
 
     /**
-     * 取り消した記録・チャレンジを、取り消す前の状態へ戻す。
+     * チャレンジの履歴を1回ぶん削除する。
      *
-     * 取り消しは消さずに印をつけるだけなので、戻すことができる。
-     * チャレンジを1回ぶん戻すと、そのとき道連れで取り消した記録も戻る
-     *（1問だけ個別に取り消してあった分は、取り消したままにする）。
+     * チャレンジは「1回ぶんの通し」なので、結果と、その中で解いた記録をまとめて消す。
+     * 中の1問だけを消したいときは deleteStudyRecords を使う。
      */
-    async restoreStudyRecords(args = {}, actor = {}) {
-      const operationId = readString(args.operationId, "operationId", { required: true, max: 120 });
-      const reason = readString(args.reason, "reason", { max: 200 });
-      const readTargets = (list, key, idKey) => (list ?? []).map((raw, index) => {
-        const field = `${key}[${index}]`;
-        if (typeof raw === "string") return { [idKey]: raw, reason };
-        if (typeof raw !== "object" || raw === null) fail(`${field} は ${idKey} か { ${idKey}, expectedRevision } で渡してください。`, field);
-        rejectUnknownKeys(raw, [idKey, "expectedRevision", "reason"], field);
-        return {
-          [idKey]: readString(raw[idKey], `${field}.${idKey}`, { required: true, max: 80 }),
-          expectedRevision: raw.expectedRevision,
-          reason: readString(raw.reason, `${field}.reason`, { max: 200 }) ?? reason,
-        };
-      });
-      const restores = readTargets(
-        args.records === undefined ? [] : readArray(args.records, "records", { max: SERVICE_LIMITS.recordsPerOperation }),
-        "records", "recordId",
-      );
-      const restoreChallenges = readTargets(
-        args.challenges === undefined ? [] : readArray(args.challenges, "challenges", { max: SERVICE_LIMITS.recordsPerOperation }),
-        "challenges", "challengeId",
-      );
-      if (!restores.length && !restoreChallenges.length) {
-        fail("戻したい記録（records）かチャレンジ（challenges）を1件以上渡してください。", "records");
-      }
-      return runRecordOperations({
-        operationId,
-        fingerprint: recordFingerprint({
-          restores: restores.map(({ recordId }) => recordId),
-          restoreChallenges: restoreChallenges.map(({ challengeId }) => challengeId),
-          reason,
-        }),
-        restores,
-        restoreChallenges,
-        actorKind: "ai",
-        actorName: actor?.clientName ?? actor?.tokenLabel ?? "AI",
-        tool: "restoreStudyRecords",
-        reason,
-      });
-    },
-
-    /**
-     * チャレンジの履歴を取り消す。
-     *
-     * チャレンジは「1回ぶんの通し」なので、1問だけ抜くと合計時間と食い違う。
-     * そのため取り消しは1回まるごとで、中の学習記録もいっしょに取り消す。
-     */
-    async voidChallengeResults(args = {}, actor = {}) {
+    async deleteChallengeResults(args = {}, actor = {}) {
       const operationId = readString(args.operationId, "operationId", { required: true, max: 120 });
       const reason = readString(args.reason, "reason", { max: 200 });
       const list = readArray(args.challenges, "challenges", { min: 1, max: SERVICE_LIMITS.recordsPerOperation });
-      const voidChallenges = list.map((raw, index) => {
+      const deleteChallenges = list.map((raw, index) => {
         const field = `challenges[${index}]`;
         if (typeof raw === "string") return { challengeId: raw, reason };
-        if (typeof raw !== "object" || raw === null) fail(`${field} は challengeId か { challengeId, expectedRevision } で渡してください。`, field);
-        rejectUnknownKeys(raw, ["challengeId", "expectedRevision", "reason"], field);
+        if (typeof raw !== "object" || raw === null) fail(`${field} は challengeId か { challengeId, reason } で渡してください。`, field);
+        rejectUnknownKeys(raw, ["challengeId", "reason"], field);
         return {
           challengeId: readString(raw.challengeId, `${field}.challengeId`, { required: true, max: 80 }),
-          expectedRevision: raw.expectedRevision,
           reason: readString(raw.reason, `${field}.reason`, { max: 200 }) ?? reason,
         };
       });
       return runRecordOperations({
         operationId,
-        fingerprint: recordFingerprint({ voidChallenges: voidChallenges.map(({ challengeId }) => challengeId), reason }),
-        voidChallenges,
+        fingerprint: recordFingerprint({ deleteChallenges: deleteChallenges.map(({ challengeId }) => challengeId), reason }),
+        deleteChallenges,
         actorKind: "ai",
         actorName: actor?.clientName ?? actor?.tokenLabel ?? "AI",
-        tool: "voidChallengeResults",
+        tool: "deleteChallengeResults",
         reason,
       });
     },
 
-    /** 学習記録の追加・訂正・取り消しの履歴。 */
+    /** 学習記録の追加・訂正・削除の履歴。 */
     async getRecordChanges(args = {}) {
       const limit = readInteger(args.limit, "limit", { min: 1, max: 100, fallback: 20 });
       const { total, entries } = await sync.readRecordOperations({ limit });

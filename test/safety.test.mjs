@@ -17,7 +17,7 @@ test("チャレンジ結果を作るツールは存在しない", () => {
 
 test("学習実績を触るツールは、予定の権限とは別の権限を要る", () => {
   const tools = createTools();
-  for (const name of ["addStudyRecords", "updateStudyRecords", "voidStudyRecords"]) {
+  for (const name of ["addStudyRecords", "updateStudyRecords", "deleteStudyRecords", "deleteChallengeResults"]) {
     const tool = tools.find((entry) => entry.name === name);
     assert.ok(tool, `${name} が無い`);
     assert.equal(tool.scope, "records", `${name} の権限が records でない`);
@@ -38,7 +38,8 @@ test("予定を変えるだけの接続では、実績を1件も変えられな�
   for (const [name, args] of [
     ["addStudyRecords", { operationId: "x", records: [{ questionId: QUESTIONS[0].id, date: "2026-09-12" }] }],
     ["updateStudyRecords", { operationId: "x", updates: [{ recordId: "rec1", evaluation: "perfect" }] }],
-    ["voidStudyRecords", { operationId: "x", records: [{ recordId: "rec1" }] }],
+    ["deleteStudyRecords", { operationId: "x", records: [{ recordId: "rec1" }] }],
+    ["deleteChallengeResults", { operationId: "x", challenges: ["chl1"] }],
   ]) {
     const result = await callTool(app, token, name, args);
     assert.equal(result.ok, false, `${name} が権限なしで通ってしまった`);
@@ -48,9 +49,11 @@ test("予定を変えるだけの接続では、実績を1件も変えられな�
   assert.equal((await callTool(app, token, "getStudyStats")).totalRecords, 0);
 });
 
-test("削除・初期化のツールは存在しない", () => {
-  const destructive = toolNames.filter((name) => /delete|remove|clear|reset|wipe/i.test(name));
-  assert.deepEqual(destructive, []);
+test("消せるのは本人が申告した実績だけで、まとめて初期化するツールは無い", () => {
+  // 本人が「あれは無し」と言った1件ずつの削除だけを公開する。
+  // 全部を消す・初期化するような操作は、AIからは一切できない（設定画面からだけ）。
+  const destructive = toolNames.filter((name) => /delete|remove|clear|reset|wipe|purge/i.test(name));
+  assert.deepEqual(destructive.sort(), ["deleteChallengeResults", "deleteStudyRecords"]);
 });
 
 test("タイマー（この端末の状態）を操作するツールは存在しない", () => {

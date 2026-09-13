@@ -27,6 +27,8 @@ export const DEFAULT_CLOUD = Object.freeze({
   lastSyncedAt: null,
   lastPulledAtMs: null,
   questionsHash: null,
+  // 最後に受け取った「すべて削除」の印。これより新しい印が来たときだけ、手元も消す。
+  lastPurgeAtMs: 0,
   lastError: null,
 });
 
@@ -159,6 +161,14 @@ export const admin = {
   log: (config) => request(config, '/api/admin/log', { token: config.ownerKey }),
   releaseDevice: (config, deviceId) =>
     request(config, '/api/admin/devices', { method: 'DELETE', body: { deviceId }, token: config.ownerKey }),
+  // クラウドに預けてある学習データをすべて消す。戻せないので合言葉つきで呼ぶ。
+  purgeData: (config) =>
+    request(config, '/api/admin/data', {
+      method: 'DELETE',
+      body: { confirm: 'DELETE' },
+      token: config.ownerKey,
+      timeoutMs: 60000,
+    }),
 };
 
 /* ------------------------------------------------------------------ */
@@ -178,6 +188,9 @@ export async function joinDevice({ serverUrl, code, deviceName }) {
     deviceName: joined.deviceName ?? deviceName ?? '端末',
     enabled: true,
     lastError: null,
+    // 参加した時点の「すべて削除」の印を、知っているものとして覚えておく。
+    // 昔の削除の巻き添えで、この端末が持ち込んだ記録を消さないため。
+    lastPurgeAtMs: Number(joined.purgedAtMs) || 0,
     // 登録直後は「まだ何も受け取っていない」状態から始める。
     lastPulledAtMs: null,
   });
@@ -265,6 +278,14 @@ export async function undoPlanChange(changeId) {
 /* 同期                                                                */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 同期の「どこまで受け取ったか」を初期状態へ戻す。
+ * 学習データをすべて消したあとに呼ぶ。次の同期を初回と同じ扱いにするため。
+ */
+export async function resetSyncCursor() {
+  await saveCloudConfig({ lastPulledAtMs: null, questionsHash: null, lastSyncedAt: null, lastError: null });
+}
+
 /** 送るものを組み立てる。初回（lastPulledAtMs が無い）はローカルの全部を送る。 */
 async function buildPayload(config) {
   const first = !config.lastPulledAtMs;
@@ -282,6 +303,9 @@ async function buildPayload(config) {
   const queuedRecordIds = new Set(outbox.filter((e) => e.type === 'record').map((e) => e.id));
   const queuedChallengeIds = new Set(outbox.filter((e) => e.type === 'challenge').map((e) => e.id));
   const queuedMoveIds = new Set(outbox.filter((e) => e.type === 'move').map((e) => e.id));
+  // この端末で消したもの。送るまで覚えておく（送らないと次の同期で戻ってくる）。
+  const deletedRecordIds = [...new Set(outbox.filter((e) => e.type === 'record_deleted').map((e) => e.id))];
+  const deletedChallengeIds = [...new Set(outbox.filter((e) => e.type === 'challenge_deleted').map((e) => e.id))];
 
   // 初回はローカルにあるものを全部送る（クラウドが空でも消えないように）。
   const recordsToSend = first ? records : records.filter((r) => queuedRecordIds.has(r.id));
@@ -308,19 +332,32 @@ async function buildPayload(config) {
   }));
 
   const localHash = questions.length ? await hashQuestions(questions) : null;
+  // 問題マスタは版を添えて送る。サーバーは版が今より大きいときだけ受け取るので、
+  // 古いマスタを持ったままの端末が、新しいマスタを巻き戻すことはない。
+  const masterVersion = await api.getQuestionMasterVersion();
   return {
     first,
     localHash,
     outboxKeys: outbox
       .filter((e) => (e.type === 'record' && queuedRecordIds.has(e.id))
         || (e.type === 'challenge' && queuedChallengeIds.has(e.id))
-        || (e.type === 'move' && queuedMoveIds.has(e.id)))
+        || (e.type === 'move' && queuedMoveIds.has(e.id))
+        || e.type === 'record_deleted'
+        || e.type === 'challenge_deleted')
       .map((e) => e.key),
     pushedDates: dirtyDates,
     payload: {
       since: config.lastPulledAtMs ?? null,
+      // この端末が知っている「すべて削除」の印。サーバーはこれより新しい削除が
+      // あれば、送ったものを1つも受け取らない（消したものが戻らないように）。
+      knownPurgeAtMs: Number(config.lastPurgeAtMs) || 0,
       records: recordsToSend.slice(0, PUSH_CHUNK),
       challenges: challengesToSend.slice(0, 100),
+      // 消したもののID。サーバーは先にこれを消してから、送った中身を重ねる。
+      deletions: {
+        records: deletedRecordIds.slice(0, 200),
+        challenges: deletedChallengeIds.slice(0, 200),
+      },
       moves: movesToSend.slice(0, 200),
       // 学習可能時間と見積もりの指定も送る（どちらも消さずに重ねられる）。
       availability,
@@ -328,8 +365,8 @@ async function buildPayload(config) {
       taskPlans: taskPlans.slice(0, 120),
       goals,
       questions: questions.length && localHash !== config.questionsHash
-        ? { hash: localHash, questions }
-        : { hash: localHash },
+        ? { hash: localHash, masterVersion, questions }
+        : { hash: localHash, masterVersion },
     },
     remainingRecords: Math.max(0, recordsToSend.length - PUSH_CHUNK),
   };
@@ -337,15 +374,50 @@ async function buildPayload(config) {
 
 /** 受け取った内容をローカルへ重ねる。ここでも消す操作は一切しない。 */
 async function applySnapshot(snapshot) {
-  const applied = { records: 0, challenges: 0, plans: 0, goals: 0, questions: 0, moves: 0, availability: 0, estimates: 0 };
+  const applied = { records: 0, challenges: 0, deleted: 0, plans: 0, goals: 0, questions: 0, moves: 0, availability: 0, estimates: 0, purged: false };
 
-  // 学習記録は「追加専用」ではなくなった（本人の申告で足したり、訂正・取り消しができる）。
+  // ほかの端末で「学習データをすべて削除」が行われていたら、まずこの端末も消す。
+  //
+  // 全部消すと配るものが無くなるので、端末からは「空が返ってきた」としか見えない。
+  // 同期は届いたものを重ねるだけなので、それだけでは手元の予定や記録が残り続ける。
+  // そこでサーバーは消した日時を印として残し、端末はそれを見て自分の手元も消す。
+  //
+  // 消すのを先にやるのは、このあとに続くサーバーの内容（消したあとに入ったもの）を
+  // そのまま重ねられるようにするため。
+  const config = await getCloudConfig();
+  const purgeAt = Number(snapshot.purge?.atMs) || 0;
+  if (purgeAt > (Number(config.lastPurgeAtMs) || 0)) {
+    await api.purgeStudyData();
+    await saveCloudConfig({
+      lastPurgeAtMs: purgeAt,
+      // 次の同期は最初から取り直す（消したあとの状態を丸ごと受け取る）。
+      lastPulledAtMs: null,
+      questionsHash: null,
+    });
+    applied.purged = true;
+  }
+
+  // 他の端末で消されたものは、この端末からも消す。
+  // 重ねるより先に消しておかないと、同じ同期の中で入り直してしまう。
+  for (const id of snapshot.deletions?.records ?? []) {
+    await idb.del(STORES.records, id).catch(() => {});
+  }
+  for (const id of snapshot.deletions?.challenges ?? []) {
+    await idb.del(STORES.challenges, id).catch(() => {});
+  }
+  const deletedHere = {
+    records: new Set(snapshot.deletions?.records ?? []),
+    challenges: new Set(snapshot.deletions?.challenges ?? []),
+  };
+  applied.deleted = deletedHere.records.size + deletedHere.challenges.size;
+
+  // 学習記録は「追加専用」ではなくなった（本人の申告で足したり、訂正・削除ができる）。
   // 同じ id が来たら、revision の大きいほう（新しいほう）を残す。
   // これで、訂正を知らない端末の内容で古い状態に戻ることがない。
   const localRecords = new Map((await idb.all(STORES.records)).map((r) => [r.id, r]));
   const recordsToSave = [];
   for (const incoming of snapshot.records ?? []) {
-    if (!incoming || !incoming.id) continue;
+    if (!incoming || !incoming.id || deletedHere.records.has(incoming.id)) continue;
     const { syncedAt, ...record } = incoming;
     const current = localRecords.get(record.id);
     if (!current) {
@@ -359,12 +431,11 @@ async function applySnapshot(snapshot) {
     applied.records = recordsToSave.length;
   }
 
-  // チャレンジ結果も、取り消しができるようになったので版で重ね合わせる。
-  // 取り消したチャレンジを、取り消しを知らない端末が戻すことはない。
+  // チャレンジ結果も版で重ね合わせる（古い内容で新しい内容を上書きしない）。
   const localChallenges = new Map((await idb.all(STORES.challenges)).map((c) => [c.id, c]));
   const challengesToSave = [];
   for (const incoming of snapshot.challenges ?? []) {
-    if (!incoming || !incoming.id) continue;
+    if (!incoming || !incoming.id || deletedHere.challenges.has(incoming.id)) continue;
     const { syncedAt, ...result } = incoming;
     const current = localChallenges.get(result.id);
     if (!current) {
@@ -425,11 +496,22 @@ async function applySnapshot(snapshot) {
     applied.moves = newMoves.length;
   }
 
-  // 問題マスタは足すだけ。ローカルにしかない問題を消さない。
+  // 問題マスタは版で決める。送る側と同じ決まりにしておかないと、
+  // 「端末→サーバーは置き換え、サーバー→端末は足すだけ」のように意味が食い違い、
+  // 端末ごとに問題の集合がずれたままになる。
+  //
+  //   ・サーバーのほうが新しい版 … 丸ごと入れ替える（消された問題も消える）
+  //   ・この端末にまだ1問も無い   … そのまま入れる
+  //   ・それ以外（同じか古い）    … 何もしない。次の同期でこちらの版を送る
   const questions = snapshot.questions?.questions;
   if (Array.isArray(questions) && questions.length) {
-    await idb.putAll(STORES.questions, questions);
-    applied.questions = questions.length;
+    const incomingVersion = Math.max(0, Math.floor(Number(snapshot.questions?.masterVersion) || 0));
+    const localVersion = await api.getQuestionMasterVersion();
+    const localCount = (await idb.all(STORES.questions)).length;
+    if (!localCount || incomingVersion > localVersion) {
+      await api.importQuestions(questions, { replace: localCount > 0, masterVersion: incomingVersion });
+      applied.questions = questions.length;
+    }
   }
 
   for (const goal of snapshot.goals ?? []) {
@@ -482,8 +564,15 @@ export async function syncNow({ force = false } = {}) {
       if (built.outboxKeys.length) await api.clearOutboxEntries(built.outboxKeys);
       await saveCloudConfig({
         lastSyncedAt: new Date().toISOString(),
-        lastPulledAtMs: response.snapshot?.serverTimeMs ?? Date.now(),
-        questionsHash: built.localHash ?? null,
+        // ほかの端末の「すべて削除」を受けて手元を消したときは、続きからではなく
+        // 最初から取り直す（消したあとの状態を丸ごと受け取るため）。
+        lastPulledAtMs: applied.purged ? null : (response.snapshot?.serverTimeMs ?? Date.now()),
+        // 受け取ったマスタで入れ替わったなら、覚えておくのはサーバー側のハッシュ。
+        // 送ったときのハッシュのままだと、次の同期でいらない送り直しが起きる。
+        questionsHash: applied.purged ? null
+          : (applied.questions
+            ? (response.snapshot?.questions?.hash ?? null)
+            : (built.localHash ?? null)),
         deviceName: response.device?.deviceName ?? config.deviceName,
         lastError: null,
       });

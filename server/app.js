@@ -304,6 +304,19 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
       return json(await sync.leaveDevice(String(body.deviceId)));
     }
 
+    // クラウドに預けてある学習データをすべて消す。
+    // 戻せないので、設定画面から confirm: "DELETE" を付けて呼んだときだけ実行する。
+    if (path === "/api/admin/data" && request.method === "DELETE") {
+      const body = await readJsonBody(request);
+      if (body.confirm !== "DELETE") {
+        return json({
+          error: "confirm_required",
+          message: 'すべて消すには confirm: "DELETE" を付けて呼んでください。',
+        }, { status: 400 });
+      }
+      return json(await sync.purgeStudyData());
+    }
+
     if (path === "/api/admin/log" && request.method === "GET") {
       const limit = Number(new URL(request.url).searchParams.get("limit") ?? 20);
       return json(await sync.readLog({ limit }));

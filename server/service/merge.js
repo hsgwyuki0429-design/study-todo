@@ -69,8 +69,9 @@ export function mergeRecords(stored = {}, incoming = []) {
 /**
  * チャレンジ結果。形は study-todo のPWAが保存しているものに合わせる。
  *
- * 取り消し（voided）と版（revision）を持つ。間違って始めたチャレンジを、
- * あとから履歴から外せるようにするためで、消さずに印をつけるだけである。
+ * 版（revision）を持つ。古い内容で新しい内容を上書きしないために使う。
+ * voided は、古い版で「取り消し」にした回がまだ残っていることがあるので読めるようにしてある。
+ * いまは取り消しではなく削除なので、新しく付くことはない。
  */
 export function normalizeChallengeResult(raw, { receivedAt = Date.now() } = {}) {
   if (!isObject(raw)) return null;
