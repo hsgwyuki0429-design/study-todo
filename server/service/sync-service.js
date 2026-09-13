@@ -67,6 +67,11 @@ export const SYNC_KEYS = Object.freeze({
   moves: "studytodo:moves",
   // 学習記録の追加・訂正・削除の記録（誰が・いつ・何を・なぜ）。
   recordOps: "studytodo:recordops",
+  // 「学習データをすべて削除」をした日時。
+  // 他の端末は、これを見て自分の手元も消す。全部を消すと配るものが無くなり、
+  // 「空が返ってきた」と「そもそも何も無い」の区別が付かないため、印だけ残しておく。
+  // この鍵は全削除でも消さない。
+  purge: "studytodo:purge",
   // 削除した学習記録・チャレンジのID（墓標）。
   // 中身は残さないが、IDだけは覚えておく。これが無いと、削除を知らない端末が
   // 同じものをもう一度送ってきたときに復活してしまう。
@@ -131,6 +136,7 @@ const DEFAULT_DEVICES = { devices: {}, syncCodeHash: null, syncCodePreview: null
 const DEFAULT_RECORDS = { records: {} };
 const DEFAULT_CHALLENGES = { results: {} };
 const DEFAULT_DELETIONS = { records: {}, challenges: {} };
+const DEFAULT_PURGE = { at: null, atMs: 0, id: null };
 const DEFAULT_GOALS = { goals: [] };
 // masterVersion は「どちらが新しいか」を決める数（ハッシュでは分からない）。
 // version は書き換えた回数で、こちらは同期の目安にしか使わない。
@@ -1058,6 +1064,11 @@ export function createSyncService({ storage, now = () => Date.now() }) {
    * 問題マスタ・端末の登録・AI連携の設定は残す（消すと使えなくなってしまうため）。
    * 戻せないので、呼ぶ側で本人の意思を確かめてある前提。
    */
+  /** いつ全削除したか。端末はこれを見て、自分の手元も消す。 */
+  async function readPurge() {
+    return readDoc(SYNC_KEYS.purge, DEFAULT_PURGE);
+  }
+
   async function purgeStudyData() {
     const [recordKeys, planKeys] = await Promise.all([
       storage.list(SYNC_KEYS.recordsPrefix),
@@ -1077,18 +1088,31 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       SYNC_KEYS.estimates,
     ];
     for (const key of keys) await storage.delete(key);
+
+    // 消し終わってから印を付ける。他の端末は次の同期でこれを見て、自分の手元も消す。
+    // 印が無いと、端末には「空が返ってきた」としか見えず、消したことが伝わらない。
+    const at = new Date(now()).toISOString();
+    const purge = { at, atMs: now(), id: generateToken(8) };
+    await storage.put(SYNC_KEYS.purge, purge);
+
     await appendLog({
       clientName: "設定画面",
       tool: "purgeStudyData",
       summary: `クラウドの学習データをすべて削除（記録${recordKeys.length}か月ぶん・予定${planKeys.length}日ぶん）`,
     });
-    return { ok: true, removed: { recordMonths: recordKeys.length, planDays: planKeys.length } };
+    return {
+      ok: true,
+      purgedAt: at,
+      purgedAtMs: purge.atMs,
+      removed: { recordMonths: recordKeys.length, planDays: planKeys.length },
+    };
   }
 
   return {
     limits: SYNC_LIMITS,
     keys: SYNC_KEYS,
     purgeStudyData,
+    readPurge,
     readDeletions,
     readAllRecords,
     findRecord,
@@ -1189,7 +1213,18 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         };
         document.updatedAt = at;
       }, { defaults: structuredClone(DEFAULT_DEVICES) });
-      return { deviceId, deviceKey, deviceName: deviceName || "端末" };
+      // いまの「すべて削除」の印を、登録した時点で知っているものとして渡す。
+      //
+      // これが無いと、前に一度でも全削除していたクラウドへ新しい端末が入ったとき、
+      // その端末が手元に持っていた学習記録を、昔の削除の巻き添えで消してしまう。
+      // 削除はそのとき参加していた端末に効くもので、あとから来た端末の分は消さない。
+      const purge = await readPurge();
+      return {
+        deviceId,
+        deviceKey,
+        deviceName: deviceName || "端末",
+        purgedAtMs: purge.atMs || 0,
+      };
     },
 
     /** 端末キーから、どの端末かを割り出す。 */
@@ -1229,6 +1264,35 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     async push(deviceId, payload = {}) {
       const at = now();
       const atIso = new Date(at).toISOString();
+
+      // 「すべて削除」を知らない端末が送ってきたものは、1つも受け取らない。
+      //
+      // 端末は自分の手元にあるものを送ってから、返ってきた内容を重ねる。
+      // ここで受け取ってしまうと、消したばかりのものが送り主の手元から
+      // そのまま戻ってきて、消したのに消えていない状態になる。
+      // 受け取らずに印だけ返せば、端末はそれを見て自分の手元を消し、
+      // 次の同期で消えたあとの状態にそろう。
+      const purge = await readPurge();
+      const knownPurgeAtMs = Math.max(0, Math.floor(Number(payload.knownPurgeAtMs) || 0));
+      if (purge.atMs && purge.atMs > knownPurgeAtMs) {
+        await updateDocument(storage, SYNC_KEYS.devices, (document) => {
+          const device = document.devices?.[deviceId];
+          if (device) device.lastSeenAt = atIso;
+          document.updatedAt = atIso;
+        }, { defaults: structuredClone(DEFAULT_DEVICES) });
+        return {
+          savedAt: atIso,
+          // 何も受け取らなかったことを、はっきり返す。
+          ignored: {
+            reason: "purged",
+            purgedAt: purge.at,
+            message: "この端末が知らないうちに学習データがすべて削除されています。"
+              + "送られた内容は受け取っていません。この端末も削除に合わせてください。",
+          },
+          accepted: { records: 0, challenges: 0, taskPlans: 0, goals: 0, moves: 0 },
+          questionsStored: false,
+        };
+      }
 
       const records = Array.isArray(payload.records) ? payload.records : [];
       if (records.length > SYNC_LIMITS.recordsPerPush) {
@@ -1449,7 +1513,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
      */
     async pull({ since = null, questionsHash = null, timezoneOffsetMinutes } = {}) {
       const today = todayKeyOf(timezoneOffsetMinutes, now());
-      const [allRecords, challenges, goals, questions, index, deletions] = await Promise.all([
+      const [allRecords, challenges, goals, questions, index, deletions, purge] = await Promise.all([
         readAllRecords(),
         readChallenges(),
         readGoals({ includeDeleted: true }),
@@ -1457,6 +1521,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         readDeviceIndex(),
         // 消したもののID。端末側でも消えるようにするため、これも配る。
         readDeletions(),
+        readPurge(),
       ]);
       const sinceMs = Number.isFinite(Number(since)) ? Number(since) : null;
       const records = sinceMs === null
@@ -1476,6 +1541,9 @@ export function createSyncService({ storage, now = () => Date.now() }) {
           ? challenges
           : challenges.filter((result) => Number(result.syncedAt ?? 0) > sinceMs),
         taskPlans: plans,
+        // 「すべて削除」をした印。端末はこれを見て、手元のものもまとめて消す。
+        // 前に受け取った印より新しいときだけ消すので、何度同期しても1回しか効かない。
+        purge: purge.atMs ? { at: purge.at, atMs: purge.atMs, id: purge.id } : null,
         // 消したもののID。端末はこれを見て、手元からも消す。
         deletions: {
           records: Object.entries(deletions.records ?? {})

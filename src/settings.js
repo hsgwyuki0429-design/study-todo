@@ -210,6 +210,14 @@ async function buildDangerZone(list) {
     sub: '設定 → バックアップ → JSONで書き出す',
     classes: ['row-indent'],
   }));
+  if (linked) {
+    list.append(row({
+      title: 'ほかの端末について',
+      sub: 'ほかの端末は、次に同期したときに同じように消えます（その端末で操作する必要はありません）。'
+        + ' 消したあとに入れた分は消えません。',
+      classes: ['row-indent'],
+    }));
+  }
 
   const button = el('button', 'btn btn-danger', '学習データをすべて削除');
   button.onclick = async () => {
@@ -223,7 +231,10 @@ async function buildDangerZone(list) {
     if (config.serverUrl && config.ownerKey) {
       // 端末だけ消すと、次の同期でクラウドから戻ってくる。先にクラウドを消す。
       try {
-        await cloud.admin.purgeData(config);
+        const result = await cloud.admin.purgeData(config);
+        // 自分が消した印を覚えておく。覚えないと、次の同期で自分の印を
+        // 「ほかの端末が消した」と読んで、そのあと入れた分まで消してしまう。
+        await cloud.saveCloudConfig({ lastPurgeAtMs: Number(result?.purgedAtMs) || Date.now() });
         cloudNote = ' クラウドの分も削除しました。';
       } catch (error) {
         alert(`クラウドの分を削除できませんでした（${error.message}）。`
@@ -238,7 +249,8 @@ async function buildDangerZone(list) {
     const removed = await api.purgeStudyData();
     await cloud.resetSyncCursor();
     alert(`削除しました（記録${removed.records} / チャレンジ${removed.challenges} / 予定${removed.tasks}`
-      + ` / 目標${removed.goals}）。${cloudNote}`);
+      + ` / 目標${removed.goals}）。${cloudNote}`
+      + (linked ? ' ほかの端末は、次に同期したときに消えます。' : ''));
     location.reload();
   };
   const wrap = el('div', 'setting-actions');

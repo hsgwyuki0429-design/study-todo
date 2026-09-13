@@ -216,3 +216,79 @@ test("古い問題マスタを持った端末が、新しいマスタを巻き�
   await fresh.context.close();
   await old.context.close();
 });
+
+test("片方の端末で「すべて削除」すると、もう片方からも消える", options, async () => {
+  const first = await openDevice();
+  const second = await openDevice();
+  await link(first.page);
+  await link(second.page);
+
+  // 1台目で、記録・予定・目標を作って同期する。
+  await first.page.evaluate(async () => {
+    const api = await import("./src/api.js");
+    const [q1, q2] = await api.listQuestions();
+    await api.addStudyRecord({ questionId: q1.id, evaluation: "perfect", durationSeconds: 200 });
+    await api.updateTodayTasks(
+      [{ id: "task-e2e", kind: "new", questionIds: [q2.id], order: 0 }],
+      api.todayKey(),
+    );
+    await api.addGoal({ title: "E2Eの目標", questionIds: [q1.id] });
+  });
+  assert.equal(await syncNow(first.page), "ok");
+
+  // 2台目が受け取る。
+  assert.equal(await syncNow(second.page), "ok");
+  const shared = await second.page.evaluate(async () => {
+    const api = await import("./src/api.js");
+    return {
+      records: (await api.listRecords()).length,
+      tasks: (await api.getTasksInRange(api.todayKey(), api.todayKey())).length,
+      goals: (await api.getGoals()).length,
+    };
+  });
+  assert.deepEqual(shared, { records: 1, tasks: 1, goals: 1 }, "2台目に届いていない");
+
+  // 1台目で「学習データをすべて削除」（クラウドの分も消す）。
+  await first.page.evaluate(async () => {
+    const api = await import("./src/api.js");
+    const cloud = await import("./src/cloud-sync.js");
+    const config = await cloud.getCloudConfig();
+    const result = await cloud.admin.purgeData(config);
+    await cloud.saveCloudConfig({ lastPurgeAtMs: Number(result?.purgedAtMs) || Date.now() });
+    await api.purgeStudyData();
+    await cloud.resetSyncCursor();
+  });
+
+  // 2台目は、同期しただけで消える（ここが抜けていた）。
+  assert.equal(await syncNow(second.page), "ok");
+  const after = await second.page.evaluate(async () => {
+    const api = await import("./src/api.js");
+    return {
+      records: (await api.listRecords()).length,
+      tasks: (await api.getTasksInRange(api.todayKey(), api.todayKey())).length,
+      goals: (await api.getGoals()).length,
+      questions: (await api.listQuestions()).length,
+    };
+  });
+  assert.equal(after.records, 0, "2台目に記録が残っている");
+  assert.equal(after.tasks, 0, "2台目に予定が残っている");
+  assert.equal(after.goals, 0, "2台目に目標が残っている");
+  assert.ok(after.questions > 0, "問題マスタまで消えてしまった");
+
+  // 2台目がそのあと入れた記録は、もう消されない（印は1回しか効かない）。
+  await second.page.evaluate(async () => {
+    const api = await import("./src/api.js");
+    const [question] = await api.listQuestions();
+    await api.addStudyRecord({ questionId: question.id, evaluation: "perfect", durationSeconds: 60 });
+  });
+  assert.equal(await syncNow(second.page), "ok");
+  assert.equal(await syncNow(second.page), "ok");
+  assert.equal((await counts(second.page)).records, 1, "消したあとに入れた記録まで消えた");
+
+  // 1台目にも、その新しい記録が届く。
+  assert.equal(await syncNow(first.page), "ok");
+  assert.equal((await counts(first.page)).records, 1);
+
+  await first.context.close();
+  await second.context.close();
+});

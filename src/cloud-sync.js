@@ -27,6 +27,8 @@ export const DEFAULT_CLOUD = Object.freeze({
   lastSyncedAt: null,
   lastPulledAtMs: null,
   questionsHash: null,
+  // 最後に受け取った「すべて削除」の印。これより新しい印が来たときだけ、手元も消す。
+  lastPurgeAtMs: 0,
   lastError: null,
 });
 
@@ -186,6 +188,9 @@ export async function joinDevice({ serverUrl, code, deviceName }) {
     deviceName: joined.deviceName ?? deviceName ?? '端末',
     enabled: true,
     lastError: null,
+    // 参加した時点の「すべて削除」の印を、知っているものとして覚えておく。
+    // 昔の削除の巻き添えで、この端末が持ち込んだ記録を消さないため。
+    lastPurgeAtMs: Number(joined.purgedAtMs) || 0,
     // 登録直後は「まだ何も受け取っていない」状態から始める。
     lastPulledAtMs: null,
   });
@@ -343,6 +348,9 @@ async function buildPayload(config) {
     pushedDates: dirtyDates,
     payload: {
       since: config.lastPulledAtMs ?? null,
+      // この端末が知っている「すべて削除」の印。サーバーはこれより新しい削除が
+      // あれば、送ったものを1つも受け取らない（消したものが戻らないように）。
+      knownPurgeAtMs: Number(config.lastPurgeAtMs) || 0,
       records: recordsToSend.slice(0, PUSH_CHUNK),
       challenges: challengesToSend.slice(0, 100),
       // 消したもののID。サーバーは先にこれを消してから、送った中身を重ねる。
@@ -366,7 +374,28 @@ async function buildPayload(config) {
 
 /** 受け取った内容をローカルへ重ねる。ここでも消す操作は一切しない。 */
 async function applySnapshot(snapshot) {
-  const applied = { records: 0, challenges: 0, deleted: 0, plans: 0, goals: 0, questions: 0, moves: 0, availability: 0, estimates: 0 };
+  const applied = { records: 0, challenges: 0, deleted: 0, plans: 0, goals: 0, questions: 0, moves: 0, availability: 0, estimates: 0, purged: false };
+
+  // ほかの端末で「学習データをすべて削除」が行われていたら、まずこの端末も消す。
+  //
+  // 全部消すと配るものが無くなるので、端末からは「空が返ってきた」としか見えない。
+  // 同期は届いたものを重ねるだけなので、それだけでは手元の予定や記録が残り続ける。
+  // そこでサーバーは消した日時を印として残し、端末はそれを見て自分の手元も消す。
+  //
+  // 消すのを先にやるのは、このあとに続くサーバーの内容（消したあとに入ったもの）を
+  // そのまま重ねられるようにするため。
+  const config = await getCloudConfig();
+  const purgeAt = Number(snapshot.purge?.atMs) || 0;
+  if (purgeAt > (Number(config.lastPurgeAtMs) || 0)) {
+    await api.purgeStudyData();
+    await saveCloudConfig({
+      lastPurgeAtMs: purgeAt,
+      // 次の同期は最初から取り直す（消したあとの状態を丸ごと受け取る）。
+      lastPulledAtMs: null,
+      questionsHash: null,
+    });
+    applied.purged = true;
+  }
 
   // 他の端末で消されたものは、この端末からも消す。
   // 重ねるより先に消しておかないと、同じ同期の中で入り直してしまう。
@@ -535,12 +564,15 @@ export async function syncNow({ force = false } = {}) {
       if (built.outboxKeys.length) await api.clearOutboxEntries(built.outboxKeys);
       await saveCloudConfig({
         lastSyncedAt: new Date().toISOString(),
-        lastPulledAtMs: response.snapshot?.serverTimeMs ?? Date.now(),
+        // ほかの端末の「すべて削除」を受けて手元を消したときは、続きからではなく
+        // 最初から取り直す（消したあとの状態を丸ごと受け取るため）。
+        lastPulledAtMs: applied.purged ? null : (response.snapshot?.serverTimeMs ?? Date.now()),
         // 受け取ったマスタで入れ替わったなら、覚えておくのはサーバー側のハッシュ。
         // 送ったときのハッシュのままだと、次の同期でいらない送り直しが起きる。
-        questionsHash: applied.questions
-          ? (response.snapshot?.questions?.hash ?? null)
-          : (built.localHash ?? null),
+        questionsHash: applied.purged ? null
+          : (applied.questions
+            ? (response.snapshot?.questions?.hash ?? null)
+            : (built.localHash ?? null)),
         deviceName: response.device?.deviceName ?? config.deviceName,
         lastError: null,
       });

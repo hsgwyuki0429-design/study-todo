@@ -161,3 +161,130 @@ test("同期コードが違えば端末を登録できない", async () => {
   });
   assert.equal(denied.status, 400);
 });
+
+/* ------------------------------------------------------------------ */
+/* すべて削除したことが、ほかの端末へ伝わる                            */
+/* ------------------------------------------------------------------ */
+
+test("すべて削除したことが、印として他の端末へ届く", async () => {
+  const { app } = createTestApp();
+  const first = await joinDevice(app, "iPhone");
+  const second = await joinDevice(app, "PC");
+
+  await push(app, first.deviceKey, {
+    questions: { questions: QUESTIONS, masterVersion: 1 },
+    records: [record("r1")],
+    taskPlans: [{
+      date: "2026-09-12",
+      tasks: [{ id: "t1", questionIds: [QUESTIONS[0].id], kind: "new", order: 0 }],
+      updatedAt: "2026-09-12T01:00:00Z",
+      revision: 0,
+    }],
+    goals: [{ id: "g1", title: "目標", questionIds: [QUESTIONS[0].id], updatedAt: "2026-09-12T01:00:00Z" }],
+  });
+
+  const before = await call(app, "/api/sync/pull", { token: second.deviceKey });
+  assert.equal(before.body.taskPlans.length, 1);
+  assert.equal(before.body.records.length, 1);
+  assert.equal(before.body.purge, null);
+
+  const purged = await call(app, "/api/admin/data", {
+    method: "DELETE",
+    token: OWNER_KEY,
+    body: { confirm: "DELETE" },
+  });
+  assert.equal(purged.body.ok, true);
+  assert.ok(purged.body.purgedAtMs > 0, "消した日時が返っていない");
+
+  // 全部消すと配るものが無くなるので、印が無いと端末には
+  // 「空が返ってきた」としか見えない。印で消したことが伝わる。
+  const after = await call(app, "/api/sync/pull", { token: second.deviceKey });
+  assert.equal(after.body.taskPlans.length, 0);
+  assert.equal(after.body.records.length, 0);
+  assert.equal(after.body.purge?.atMs, purged.body.purgedAtMs, "消した印が配られていない");
+
+  // 印は消えずに残る（久しぶりに開いた端末にも伝わるように）。
+  const later = await call(app, "/api/sync/pull", { token: first.deviceKey });
+  assert.equal(later.body.purge?.atMs, purged.body.purgedAtMs);
+});
+
+test("削除を知らない端末が送ってきたものは、1つも受け取らない", async () => {
+  const { app } = createTestApp();
+  const device = await joinDevice(app, "iPhone");
+  await push(app, device.deviceKey, {
+    questions: { questions: QUESTIONS, masterVersion: 1 },
+    records: [record("r1")],
+    goals: [{ id: "g1", title: "目標", questionIds: [QUESTIONS[0].id], updatedAt: "2026-09-12T01:00:00Z" }],
+  });
+  const purged = await call(app, "/api/admin/data", {
+    method: "DELETE",
+    token: OWNER_KEY,
+    body: { confirm: "DELETE" },
+  });
+
+  // 端末は、消すより先に「手元にあるもの」を送る。
+  // ここで受け取ってしまうと、消したばかりのものがそのまま戻ってきてしまう。
+  const resent = await push(app, device.deviceKey, {
+    records: [record("r1")],
+    goals: [{ id: "g1", title: "目標", questionIds: [QUESTIONS[0].id], updatedAt: "2026-09-12T01:00:00Z" }],
+    taskPlans: [{
+      date: "2026-09-12",
+      tasks: [{ id: "t1", questionIds: [QUESTIONS[0].id], kind: "new", order: 0 }],
+      updatedAt: "2026-09-12T01:00:00Z",
+      revision: 0,
+    }],
+  });
+  assert.equal(resent.status, 200);
+  assert.equal(resent.body.ignored?.reason, "purged");
+  assert.deepEqual(resent.body.accepted, { records: 0, challenges: 0, taskPlans: 0, goals: 0, moves: 0 });
+
+  const after = await call(app, "/api/sync/pull", { token: device.deviceKey });
+  assert.equal(after.body.records.length, 0, "消したはずの記録が戻った");
+  assert.equal(after.body.goals.length, 0, "消したはずの目標が戻った");
+  assert.equal(after.body.taskPlans.length, 0, "消したはずの予定が戻った");
+  assert.equal(after.body.purge?.atMs, purged.body.purgedAtMs);
+});
+
+test("削除を知った端末は、そのあとの分をふつうに送れる", async () => {
+  const { app } = createTestApp();
+  const device = await joinDevice(app, "iPhone");
+  await push(app, device.deviceKey, { questions: { questions: QUESTIONS, masterVersion: 1 } });
+  const purged = await call(app, "/api/admin/data", {
+    method: "DELETE",
+    token: OWNER_KEY,
+    body: { confirm: "DELETE" },
+  });
+
+  // 印を受け取ったことを伝えれば、そのあとの記録はふつうに預かる。
+  const sent = await push(app, device.deviceKey, {
+    knownPurgeAtMs: purged.body.purgedAtMs,
+    records: [record("r2")],
+  });
+  assert.equal(sent.body.ignored, undefined);
+  assert.equal(sent.body.accepted.records, 1);
+
+  const after = await call(app, "/api/sync/pull", { token: device.deviceKey });
+  assert.equal(after.body.records.length, 1);
+});
+
+test("あとから参加した端末は、昔の削除に巻き込まれない", async () => {
+  const { app } = createTestApp();
+  const first = await joinDevice(app, "iPhone");
+  await push(app, first.deviceKey, {
+    questions: { questions: QUESTIONS, masterVersion: 1 },
+    records: [record("r1")],
+  });
+  await call(app, "/api/admin/data", { method: "DELETE", token: OWNER_KEY, body: { confirm: "DELETE" } });
+
+  // 削除のあとに参加した端末。手元に自分の記録を持っている。
+  const later = await joinDevice(app, "あとから来たPC");
+  assert.ok(later.purgedAtMs > 0, "参加のときに削除の印を渡していない");
+
+  // 参加した時点の印を知っているものとして送れば、ふつうに預かる。
+  const sent = await push(app, later.deviceKey, {
+    knownPurgeAtMs: later.purgedAtMs,
+    records: [record("r9")],
+  });
+  assert.equal(sent.body.ignored, undefined, "あとから来た端末の記録が捨てられた");
+  assert.equal(sent.body.accepted.records, 1);
+});
