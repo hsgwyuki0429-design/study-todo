@@ -8,9 +8,44 @@ import { QUESTIONS, call, callTool, createTestApp, enableAiLink, joinDevice, rec
 
 const toolNames = createTools().map((tool) => tool.name);
 
-test("学習記録・チャレンジ結果を作るツールは存在しない", () => {
-  const forbidden = ["addStudyRecord", "saveChallengeResult", "recordStudy", "addChallengeResult"];
+test("チャレンジ結果を作るツールは存在しない", () => {
+  // 学習実績は本人の申告を代理入力できるようになったが、チャレンジ結果は今も作れない
+  // （制限時間・ラップと食い違うため、実際に挑戦した端末だけが作る）。
+  const forbidden = ["saveChallengeResult", "addChallengeResult", "createChallenge"];
   for (const name of forbidden) assert.ok(!toolNames.includes(name), `${name} が公開されている`);
+});
+
+test("学習実績を触るツールは、予定の権限とは別の権限を要る", () => {
+  const tools = createTools();
+  for (const name of ["addStudyRecords", "updateStudyRecords", "voidStudyRecords"]) {
+    const tool = tools.find((entry) => entry.name === name);
+    assert.ok(tool, `${name} が無い`);
+    assert.equal(tool.scope, "records", `${name} の権限が records でない`);
+    assert.equal(tool.annotations.readOnlyHint, false);
+  }
+  // 予定を変えるツールは、これまでどおり write のまま。
+  for (const name of ["applyTaskChanges", "updateTodayTasks", "updateTasksForDate"]) {
+    assert.equal(tools.find((entry) => entry.name === name).scope, "write");
+  }
+});
+
+test("予定を変えるだけの接続では、実績を1件も変えられない", async () => {
+  const { app } = createTestApp();
+  const device = await joinDevice(app);
+  await call(app, "/api/sync/push", { method: "POST", token: device.deviceKey, body: { questions: { questions: QUESTIONS } } });
+  // read と write だけを許可した接続（これまでの設定のまま）。
+  const token = await enableAiLink(app);
+  for (const [name, args] of [
+    ["addStudyRecords", { operationId: "x", records: [{ questionId: QUESTIONS[0].id, date: "2026-09-12" }] }],
+    ["updateStudyRecords", { operationId: "x", updates: [{ recordId: "rec1", evaluation: "perfect" }] }],
+    ["voidStudyRecords", { operationId: "x", records: [{ recordId: "rec1" }] }],
+  ]) {
+    const result = await callTool(app, token, name, args);
+    assert.equal(result.ok, false, `${name} が権限なしで通ってしまった`);
+    assert.equal(result.error, "permission_denied");
+    assert.equal(result.requiredScope, "records");
+  }
+  assert.equal((await callTool(app, token, "getStudyStats")).totalRecords, 0);
 });
 
 test("削除・初期化のツールは存在しない", () => {

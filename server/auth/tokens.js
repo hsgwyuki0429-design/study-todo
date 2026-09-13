@@ -20,16 +20,27 @@ export const STORAGE_KEYS = Object.freeze({
   tokens: "studytodo:tokens",
 });
 
-/** できることの単位。read は常に必要で、write は「予定・目標を変える」権限。 */
-export const SCOPES = Object.freeze(["read", "write"]);
+/**
+ * できることの単位。
+ *
+ *   read    … 学習状況を見る（常に必要）
+ *   write   … これからの予定・目標を変える
+ *   records … 本人が「やった」と言った学習を、実績として代理で記録・訂正する
+ *
+ * records を write と分けてあるのは、予定を任せることと、実績を書き換えられることが
+ * まったく別の話だからである。すでに発行してある read / write のトークンに、
+ * 黙って実績を触る力が付くことはない。
+ */
+export const SCOPES = Object.freeze(["read", "write", "records"]);
 
 export const SCOPE_LABELS = Object.freeze({
   read: "学習状況を見る",
   write: "予定・目標を変える",
+  records: "本人が申告した学習を記録・訂正する",
 });
 
 /** 初期状態。書き込みは本人が設定画面で明示的に入れるまで使えない。 */
-export const DEFAULT_PERMISSIONS = Object.freeze({ read: true, write: false });
+export const DEFAULT_PERMISSIONS = Object.freeze({ read: true, write: false, records: false });
 export const DEFAULT_SETTINGS = Object.freeze({
   enabled: false,
   permissions: { ...DEFAULT_PERMISSIONS },

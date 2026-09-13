@@ -299,13 +299,24 @@ async function buildPayload(config) {
 async function applySnapshot(snapshot) {
   const applied = { records: 0, challenges: 0, plans: 0, goals: 0, questions: 0, moves: 0, availability: 0, estimates: 0 };
 
-  const existingRecords = new Set((await idb.all(STORES.records)).map((r) => r.id));
-  const newRecords = (snapshot.records ?? [])
-    .filter((r) => r && r.id && !existingRecords.has(r.id))
-    .map(({ syncedAt, ...record }) => record);
-  if (newRecords.length) {
-    await idb.putAll(STORES.records, newRecords);
-    applied.records = newRecords.length;
+  // 学習記録は「追加専用」ではなくなった（本人の申告で足したり、訂正・取り消しができる）。
+  // 同じ id が来たら、revision の大きいほう（新しいほう）を残す。
+  // これで、訂正を知らない端末の内容で古い状態に戻ることがない。
+  const localRecords = new Map((await idb.all(STORES.records)).map((r) => [r.id, r]));
+  const recordsToSave = [];
+  for (const incoming of snapshot.records ?? []) {
+    if (!incoming || !incoming.id) continue;
+    const { syncedAt, ...record } = incoming;
+    const current = localRecords.get(record.id);
+    if (!current) {
+      recordsToSave.push(record);
+      continue;
+    }
+    if (api.mergeStudyRecord(current, record) === record) recordsToSave.push(record);
+  }
+  if (recordsToSave.length) {
+    await idb.putAll(STORES.records, recordsToSave);
+    applied.records = recordsToSave.length;
   }
 
   const existingChallenges = new Set((await idb.all(STORES.challenges)).map((c) => c.id));

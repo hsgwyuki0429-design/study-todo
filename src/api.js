@@ -10,12 +10,20 @@ import { itemsOf, splitPlanItems, withItems } from './plan-items.js';
 import { normalizeGoal, goalAttempts as goalAttemptsOf, questionSatisfied as questionSatisfiedFor } from './goals.js';
 import { normalizeAvailability, availabilityForDate } from './availability.js';
 import { estimateForQuestion } from './estimates.js';
+import {
+  RECORD_SOURCE_LABELS, describeRecord, hasDuration, hasExactTime,
+  isCountedRecord, mergeStudyRecord, normalizeStudyRecord, recordDateOf, sumDurations,
+} from './records-model.js';
 
 // 1.2.0 で問題マスタに book / chapterOrder / sectionOrder / title / page / sectionPage を、
 // 1.3.0 で courses（SELECT STUDY の3コース）と needsReview を足した。
 // 1.4.0 で予定に items（1回の取り組みごとの予定項目）、学習記録に planItemId、
-// 繰り越しの記録（moves）を足した。どれも足すだけで、古いデータはそのまま読める。
-export const DATA_VERSION = '1.4.0';
+// 繰り越しの記録（moves）を足した。
+// 1.5.0 で学習記録に date（実施日）・datePrecision・source（どうやって入った記録か）・
+// revision（訂正の版）・voided（取り消し）・corrections（訂正の履歴）を足し、
+// 評価と所要時間に「未登録（null）」を入れられるようにした。
+// どれも足すだけで、古いデータはそのまま読める（古い記録は timestamp から実施日を出す）。
+export const DATA_VERSION = '1.5.0';
 
 export const EVALUATIONS = [
   { value: 'perfect', symbol: '◯', label: '完璧にできた', tone: 'success' },
@@ -42,6 +50,10 @@ export {
 } from './goals.js';
 export { WEEKDAY_KEYS, WEEKDAY_LABELS, availabilityForDate } from './availability.js';
 export { CONFIDENCE_LABELS } from './estimates.js';
+export {
+  RECORD_SOURCE_LABELS, describeRecord, hasDuration, hasExactTime, isCountedRecord,
+  mergeStudyRecord, recordDateOf, sumDurations,
+} from './records-model.js';
 
 export const uid = (prefix = 'id') =>
   `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
@@ -183,18 +195,35 @@ export async function clearOutboxEntries(keys) {
 /* ------------------------------------------------------------------ */
 
 /**
+ * ふだんの集計に使う学習記録。
+ * 取り消した記録（voided）は、消さずに残してあるが、ここでは返さない。
+ */
+export async function listRecords({ includeVoided = false } = {}) {
+  const records = await idb.all(STORES.records);
+  return includeVoided ? records : records.filter(isCountedRecord);
+}
+
+/**
  * 学習記録を1件足す。
  *
  * 「1回の取り組み＝1件の記録」なので、同じ問題を何度解いても上書きせずに増やす。
  * planItemId は「どの予定に対する取り組みだったか」。予定に無い問題を解いたときは入らない。
  */
 export async function addStudyRecord({ questionId, evaluation, durationSeconds, challengeId, planTaskId, planItemId }) {
+  const now = new Date().toISOString();
   const record = {
     id: uid('rec'),
     questionId,
-    timestamp: new Date().toISOString(),
+    // 実施日（日本時間）。カレンダーや日別の集計はこれを使う。
+    date: dayOf(now),
+    timestamp: now,
+    datePrecision: 'datetime',
     evaluation,
     durationSeconds: Math.max(0, Math.round(durationSeconds)),
+    // アプリのタイマーで測った記録。あとから本人の申告で足した記録とは区別する。
+    source: 'timer',
+    enteredAt: now,
+    revision: 0,
     ...(challengeId ? { challengeId } : {}),
     ...(planTaskId ? { planTaskId } : {}),
     ...(planItemId ? { planItemId } : {}),
@@ -205,7 +234,7 @@ export async function addStudyRecord({ questionId, evaluation, durationSeconds, 
 }
 
 export async function getStudyHistory({ limit = 100, from, to, evaluation, chapter } = {}) {
-  let records = await idb.all(STORES.records);
+  let records = await listRecords();
   records.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   if (from) records = records.filter((r) => r.timestamp >= from);
   if (to) records = records.filter((r) => r.timestamp <= to);
@@ -227,7 +256,7 @@ export async function getRecentMistakes({ days = 7, limit = 50 } = {}) {
 
 export async function getStudyStats() {
   const [records, questions] = await Promise.all([
-    idb.all(STORES.records),
+    listRecords(),
     idb.all(STORES.questions),
   ]);
   const qById = Object.fromEntries(questions.map((q) => [q.id, q]));
@@ -235,14 +264,17 @@ export async function getStudyStats() {
   const byChapter = {};
   let totalSeconds = 0;
   records.forEach((r) => {
-    totalSeconds += r.durationSeconds;
-    byEvaluation[r.evaluation] = (byEvaluation[r.evaluation] || 0) + 1;
+    // 時間が未登録の記録は 0秒として足さない。
+    if (hasDuration(r)) totalSeconds += r.durationSeconds;
+    if (r.evaluation) byEvaluation[r.evaluation] = (byEvaluation[r.evaluation] || 0) + 1;
     const ch = qById[r.questionId]?.chapter ?? '不明';
     byChapter[ch] ??= { count: 0, seconds: 0, byEvaluation: {} };
     byChapter[ch].count += 1;
-    byChapter[ch].seconds += r.durationSeconds;
-    byChapter[ch].byEvaluation[r.evaluation] =
-      (byChapter[ch].byEvaluation[r.evaluation] || 0) + 1;
+    if (hasDuration(r)) byChapter[ch].seconds += r.durationSeconds;
+    if (r.evaluation) {
+      byChapter[ch].byEvaluation[r.evaluation] =
+        (byChapter[ch].byEvaluation[r.evaluation] || 0) + 1;
+    }
   });
   return {
     totalRecords: records.length,
@@ -254,12 +286,15 @@ export async function getStudyStats() {
 }
 
 export async function getTodayStats(date = todayKey()) {
-  const records = await idb.all(STORES.records);
-  const today = records.filter((r) => dayOf(r.timestamp) === date);
+  const records = await listRecords();
+  const today = records.filter((r) => recordDateOf(r) === date);
+  const totals = sumDurations(today);
   return {
-    seconds: today.reduce((s, r) => s + r.durationSeconds, 0),
+    seconds: totals.seconds,
+    // 時間が未登録の取り組みの数。合計に足さずに、件数だけ知らせる。
+    unknownDurationCount: totals.unknownCount,
     count: today.length,
-    records: today.sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
+    records: today.sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp))),
   };
 }
 
@@ -329,21 +364,22 @@ export async function getTasksInRange(fromDate, toDate) {
 
 /** 問題ID -> 最新の評価。カレンダーの目盛りの色分けに使う。 */
 export async function getLatestEvaluations() {
-  const records = await idb.all(STORES.records);
-  records.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const records = await listRecords();
+  records.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
   const map = {};
   records.forEach((r) => {
-    map[r.questionId] = r.evaluation;
+    // 評価が未登録の記録では、前の評価を消さない（未登録は「不正解」ではない）。
+    if (r.evaluation) map[r.questionId] = r.evaluation;
   });
   return map;
 }
 
 /** 日付 -> その日に記録された問題IDの集合。達成率の算出に使う。 */
 export async function getRecordedByDate() {
-  const records = await idb.all(STORES.records);
+  const records = await listRecords();
   const map = {};
   records.forEach((r) => {
-    const day = dayOf(r.timestamp);
+    const day = recordDateOf(r);
     (map[day] ??= new Set()).add(r.questionId);
   });
   return map;
@@ -372,22 +408,26 @@ export async function saveTask(task) {
 
 /** すでに取り組まれた予定項目（学習記録が結び付いているもの）のID。 */
 export async function getDoneItemIds() {
-  const records = await idb.all(STORES.records);
+  const records = await listRecords();
   return new Set(records.filter((r) => r.planItemId).map((r) => r.planItemId));
 }
 
 /** 1つの問題への取り組みを、古い順に全部返す（1回＝1件）。 */
-export async function getQuestionAttempts(questionId) {
+export async function getQuestionAttempts(questionId, { includeVoided = false } = {}) {
   const records = await idb.byIndex(STORES.records, 'questionId', questionId);
-  return records.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
+  return records
+    .filter((record) => includeVoided || isCountedRecord(record))
+    // 実施日の順。日付だけの記録も混ざるので、日付 → 時刻で見る。
+    .sort((a, b) => String(recordDateOf(a)).localeCompare(String(recordDateOf(b)))
+      || String(a.timestamp).localeCompare(String(b.timestamp)));
 }
 
 /** 期間の学習記録を、日付ごとにまとめる（カレンダーの実績マスに使う）。 */
 export async function getAttemptsByDate(fromDate, toDate) {
-  const records = await idb.all(STORES.records);
+  const records = await listRecords();
   const byDate = {};
   for (const record of records) {
-    const day = dayOf(record.timestamp);
+    const day = recordDateOf(record);
     if (day < fromDate || day > toDate) continue;
     (byDate[day] ??= []).push(record);
   }
@@ -577,7 +617,7 @@ export async function deleteGoal(id) {
  * 同じ問題を別の目的で解いた記録は流用しない。
  */
 export async function getGoalProgressLocal(goal) {
-  const [records, tasks] = await Promise.all([idb.all(STORES.records), idb.all(STORES.tasks)]);
+  const [records, tasks] = await Promise.all([listRecords(), idb.all(STORES.tasks)]);
   const itemGoalMap = new Map();
   for (const task of tasks) {
     for (const item of itemsOf(task)) {
@@ -675,10 +715,8 @@ export async function setManualEstimate(questionId, seconds) {
 
 /** その日に使える時間（画面に「予定○分／使える○分」を出すために使う）。 */
 export async function availabilityForDay(dateKey) {
-  const [availability, records] = await Promise.all([getAvailability(), idb.all(STORES.records)]);
-  const spentSeconds = records
-    .filter((r) => dayOf(r.timestamp) === dateKey)
-    .reduce((sum, r) => sum + (r.durationSeconds ?? 0), 0);
+  const [availability, records] = await Promise.all([getAvailability(), listRecords()]);
+  const spentSeconds = sumDurations(records.filter((r) => recordDateOf(r) === dateKey)).seconds;
   return availabilityForDate(availability, dateKey, { spentSeconds, isToday: dateKey === todayKey() });
 }
 
@@ -716,7 +754,7 @@ export async function estimateForQuestionId(questionId, { inChallenge = false } 
  */
 export async function createDayPlanner() {
   const [records, challenges, entries, availability, questions] = await Promise.all([
-    idb.all(STORES.records),
+    listRecords(),
     idb.all(STORES.challenges),
     getEstimateEntries(),
     getAvailability(),
@@ -730,8 +768,9 @@ export async function createDayPlanner() {
   }
   const spentByDate = new Map();
   for (const record of records) {
-    const day = dayOf(record.timestamp);
-    spentByDate.set(day, (spentByDate.get(day) ?? 0) + (record.durationSeconds ?? 0));
+    if (!hasDuration(record)) continue;
+    const day = recordDateOf(record);
+    spentByDate.set(day, (spentByDate.get(day) ?? 0) + record.durationSeconds);
   }
   const truncated = new Set(challenges.filter((c) => c.succeeded === false).map((c) => c.id));
   const today = todayKey();
@@ -783,7 +822,7 @@ export async function createDayPlanner() {
 export async function plannedMinutesFor(dateKey) {
   const [tasks, records] = await Promise.all([
     idb.byIndex(STORES.tasks, 'date', dateKey),
-    idb.all(STORES.records),
+    listRecords(),
   ]);
   let seconds = 0;
   for (const task of tasks) {

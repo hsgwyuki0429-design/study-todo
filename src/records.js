@@ -4,7 +4,7 @@
 // ここが受け持つのは「この問題を、これまで何回、どうだったか」だけである。
 
 import * as api from './api.js';
-import { EVAL_MAP, dayOf } from './api.js';
+import { EVAL_MAP, RECORD_SOURCE_LABELS, hasDuration, hasExactTime, recordDateOf } from './api.js';
 import { state, q, qLabel, render } from './state.js';
 import { el, fmtMS, fmtTime, fmtDate, row, emptyState } from './ui.js';
 import { attemptDetailCard, attemptSquare, squareRow } from './squares.js';
@@ -51,13 +51,13 @@ async function tocView(screen) {
       list.append(row({
         title: `取り組み ${attempts.length}回`,
         sub: [
-          `直近 ${fmtDate(dayOf(last.timestamp))} ${EVAL_MAP[last.evaluation]?.label ?? '評価なし'}`,
+          `直近 ${fmtDate(recordDateOf(last))} ${EVAL_MAP[last.evaluation]?.label ?? '評価は未登録'}`,
           question ? question.type : null,
         ].filter(Boolean).join(' ・ '),
       }));
       // 古い順に並べる。マスはスケジュール画面と同じもの。
       const squares = attempts.map((record) => attemptSquare(record, {
-        label: `${fmtDate(dayOf(record.timestamp))} ${qLabel(record.questionId)}`,
+        label: `${fmtDate(recordDateOf(record))} ${qLabel(record.questionId)}`,
         onClick: () => {
           toc.attemptId = toc.attemptId === record.id ? null : record.id;
           render();
@@ -70,9 +70,13 @@ async function tocView(screen) {
       if (opened) list.append(attemptDetailCard(opened));
       for (const record of attempts) {
         const node = row({
-          title: fmtDate(dayOf(record.timestamp)),
-          sub: `${fmtTime(record.timestamp)}${record.challengeId ? ' ・ チャレンジ' : ''}`,
-          right: el('span', 'row-time', fmtMS(record.durationSeconds)),
+          title: fmtDate(recordDateOf(record)),
+          sub: [
+            hasExactTime(record) ? fmtTime(record.timestamp) : '時刻は未登録',
+            record.challengeId ? 'チャレンジ' : null,
+            record.source && record.source !== 'timer' ? RECORD_SOURCE_LABELS[record.source] : null,
+          ].filter(Boolean).join(' ・ '),
+          right: el('span', 'row-time', hasDuration(record) ? fmtMS(record.durationSeconds) : '—'),
           onClick: () => {
             toc.attemptId = toc.attemptId === record.id ? null : record.id;
             render();

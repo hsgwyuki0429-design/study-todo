@@ -188,6 +188,24 @@ export async function renderCloudCard(list, rerender) {
     }));
 
     list.append(row({
+      title: '権限：学習の記録を代理入力する',
+      sub: '「昨日の分を記録し忘れた」と伝えたときに、AIが実績を足したり直したりできるようにする。'
+        + ' 予定を変える権限とは別で、許していなければ実績は1件も変わりません。',
+      right: button(status.permissions.records ? '許可中' : '許可しない', async () => {
+        await cloud.admin.updateSettings(config, { permissions: { records: !status.permissions.records } });
+        rerender();
+      }, 'link-btn'),
+    }));
+    if (status.permissions.records) {
+      list.append(row({
+        title: 'AIが作れるのは「本人が言った分」だけ',
+        sub: '予定が入っているだけでは実績になりません。評価や時間が分からないときは、'
+          + '埋めずに「未登録」で保存されます。取り消した記録も消えず、履歴に残ります。',
+        classes: ['row-indent'],
+      }));
+    }
+
+    list.append(row({
       title: '接続トークン（AIへ渡す鍵）',
       sub: status.token
         ? `${status.token.preview} ・ 権限 ${status.token.scopes.join(' / ')} ・ 最終利用 ${fmtDateTime(status.token.lastUsedAt)}`
@@ -202,7 +220,9 @@ export async function renderCloudCard(list, rerender) {
     }
     list.append(actions(
       button(status.token ? 'トークンを再発行' : 'トークンを発行', async () => {
-        const scopes = status.permissions.write ? ['read', 'write'] : ['read'];
+        const scopes = ['read'];
+        if (status.permissions.write) scopes.push('write');
+        if (status.permissions.records) scopes.push('records');
         try {
           const issued = await cloud.admin.issueToken(config, scopes);
           issuedToken = issued.token;

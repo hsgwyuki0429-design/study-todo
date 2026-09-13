@@ -4,9 +4,15 @@
 // 実際の処理は server/service/study-service.js にあり、
 // 管理API（設定画面）からも同じ処理を使える。
 //
-// このサーバーからは、学習記録（StudyRecord）とチャレンジ結果を
-// 「作る」ツールを一切公開しない。実績を作れるのは、実際に学習した
-// study-todo のPWAだけである。
+// 学習実績の扱いについての決めごと（ここがこのサーバーの要）:
+//
+//   ・AIが実績を作れるのは、**本人が「やった」と言ったとき**の代理入力だけである。
+//     予定が入っていること、時間の見積もり、AIの推測は、実績の根拠にならない。
+//   ・実績を触るには records 権限が要る（予定を変える write とは別の権限）。
+//     すでに配ってある read / write のトークンでは、実績は1件も変えられない。
+//   ・分からない評価・時間は埋めない。未登録として保存する。
+//   ・取り消しは消すのではなく、印をつけて集計から外す（履歴は残る）。
+//   ・チャレンジ結果は、このサーバーからは作れない（実際に挑戦した端末だけが作る）。
 
 import { toolResult } from "./core/mcp.js";
 import { PermissionError, requireScope } from "./auth/tokens.js";
@@ -16,6 +22,7 @@ import { EVALUATIONS, MISTAKE_EVALUATIONS, TASK_KINDS } from "./service/merge.js
 import { CHANGE_LIMITS } from "./service/task-changes.js";
 import { GOAL_COMPLETION_TYPES, GOAL_STATUSES } from "../src/goals.js";
 import { WEEKDAY_KEYS } from "../src/availability.js";
+import { EVALUATION_VALUES } from "../src/records-model.js";
 
 const TIMEZONE_PROPERTY = {
   type: "integer",
@@ -611,6 +618,177 @@ export function createTools() {
     }),
 
     defineTool({
+      name: "addStudyRecords",
+      title: "本人が申告した学習を記録",
+      description: [
+        "利用者が「やったのに記録し忘れた」と言った学習を、実績としてまとめて記録する。",
+        "**作ってよいのは、本人が実際に取り組んだと言ったものだけ**。予定が入っていることや、",
+        "時間の見積もりを根拠に実績を作ってはいけない（予定の自動完了・評価の推測・見積もり時間の転記は禁止）。",
+        "分からないことは埋めない。evaluation を渡さなければ「評価は未登録」、durationSeconds を渡さなければ「時間は未登録」として保存する。",
+        "「解いた」というだけでは perfect にしないこと。評価がはっきりしなければ渡さない（未登録）。",
+        "日付は date（YYYY-MM-DD）で渡す。「昨日」は getAppInfo の today（日本時間）から自分で年月日に直すこと。",
+        "時刻が分かるときだけ time を渡す（分からないなら渡さない。架空の時刻を作らない）。",
+        "同じ問題でも、同じ日に2回解くことはふつうにある。日付と問題が同じでも別の取り組みとして記録する。",
+        "通信が切れて送り直すときは、同じ operationId を使えば二重に記録されない。",
+      ].join(""),
+      scope: "records",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          operationId: {
+            type: "string",
+            maxLength: 120,
+            description: "この登録を表す、自分で決める文字列。送り直すときは同じ値にする（同じ値・同じ内容なら二重にならない）。",
+          },
+          records: {
+            type: "array",
+            minItems: 1,
+            maxItems: 50,
+            description: "記録する取り組み。1件＝1回の取り組み。",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["questionId", "date"],
+              properties: {
+                questionId: {
+                  type: "string",
+                  maxLength: 120,
+                  description: "問題ID。searchQuestions / listQuestions で確かめる。数学Iと数学Aで同じ例題番号があるので、教科まで合っているか必ず確かめること。",
+                },
+                date: { ...DATE_PROPERTY, description: "実施した日（日本時間）。未来の日付は入れられない。" },
+                time: { type: "string", maxLength: 5, description: "実施した時刻（14:30 の形）。**分かるときだけ**渡す。" },
+                evaluation: {
+                  type: "string",
+                  enum: [...EVALUATION_VALUES],
+                  description: "その回の評価。本人がはっきり言ったときだけ渡す。渡さなければ「未登録」になる（正解にも不正解にも数えない）。",
+                },
+                durationSeconds: {
+                  type: "integer",
+                  minimum: 0,
+                  maximum: 21600,
+                  description: "かかった時間（秒）。本人が言ったときだけ渡す。渡さなければ「未登録」（0秒にはしない）。",
+                },
+                planItemId: {
+                  type: "string",
+                  maxLength: 120,
+                  description: "本人が「この予定を終えた」と示したときだけ、その予定項目のID。曖昧なら渡さない（予定に結び付けずに保存される）。",
+                },
+                note: { type: "string", maxLength: 200, description: "その1件についての、本人の言葉の短い覚え書き。" },
+              },
+            },
+          },
+          totalDurationSeconds: {
+            type: "integer",
+            minimum: 0,
+            maximum: 86400,
+            description: "「4問で合計40分」のように、まとまりでしか時間が分からないときの合計（秒）。"
+              + " 1問ずつに割り振らず、まとまりの申告時間として保存する（二重には数えない）。",
+          },
+          claimSummary: {
+            type: "string",
+            maxLength: 200,
+            description: "本人の申告の短い要約（例: 「昨日、数学Iの例題50〜53を解いた」）。履歴に残る。会話の全文は入れない。",
+          },
+        },
+        required: ["operationId", "records"],
+      },
+      run: (args, { service, actor }) => service.addStudyRecords(args, actor),
+    }),
+
+    defineTool({
+      name: "updateStudyRecords",
+      title: "記録した学習を訂正",
+      description: [
+        "すでにある実績を、本人の申告にもとづいて直す。渡した項目だけが変わり、記録ID（recordId）は変わらない。",
+        "対象は getQuestionAttempts / getStudyHistory の recordId で指定する。候補が複数あるときは、",
+        "勝手に選ばず、どれのことか利用者に確かめること。",
+        "expectedRevision を渡すと、読み取ったあとに別の場所から変更されていた場合は何もせずに断る。",
+        "評価や時間を「分からない」に戻したいときは null を渡す。",
+        "チャレンジの中の記録は、ここからは直せない（チャレンジ結果と食い違うため断る）。",
+      ].join(""),
+      scope: "records",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          operationId: { type: "string", maxLength: 120, description: "送り直しても二重にならないようにするための、自分で決める文字列。" },
+          updates: {
+            type: "array",
+            minItems: 1,
+            maxItems: 50,
+            description: "直す内容。",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["recordId"],
+              properties: {
+                recordId: { type: "string", maxLength: 80, description: "直す記録のID。" },
+                expectedRevision: { type: "integer", minimum: 0, description: "読み取ったときの revision。食い違えば何も変えずに断る。" },
+                date: { ...DATE_PROPERTY, description: "実施日の訂正（「今日と入れたが本当は昨日」など）。" },
+                time: { type: "string", maxLength: 5, description: "実施時刻の訂正（14:30 の形）。" },
+                evaluation: { type: ["string", "null"], enum: [...EVALUATION_VALUES, null], description: "評価の訂正。null で「未登録」に戻す。" },
+                durationSeconds: { type: ["integer", "null"], minimum: 0, maximum: 21600, description: "所要時間の訂正。null で「未登録」に戻す。" },
+                questionId: { type: "string", maxLength: 120, description: "問題を取り違えていたときの訂正。" },
+                planItemId: { type: ["string", "null"], maxLength: 120, description: "対応する予定の付け替え。null で結び付けを外す。" },
+                reason: { type: "string", maxLength: 200, description: "この1件を直す理由。" },
+              },
+            },
+          },
+          reason: { type: "string", maxLength: 200, description: "訂正の理由（全体）。履歴に残る。" },
+        },
+        required: ["operationId", "updates"],
+      },
+      run: (args, { service, actor }) => service.updateStudyRecords(args, actor),
+    }),
+
+    defineTool({
+      name: "voidStudyRecords",
+      title: "記録した学習を取り消す",
+      description: [
+        "誤って入れた実績を取り消す。記録は消さずに「取り消した」印をつけ、ふだんの集計・カレンダー・統計から外す。",
+        "履歴には残るので、あとから何を取り消したか確かめられる。",
+        "同じ取り組みを二重に入れてしまったときは、**どちらを残すか**を利用者に確かめてから片方だけを取り消すこと。",
+      ].join(""),
+      scope: "records",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          operationId: { type: "string", maxLength: 120, description: "送り直しても二重にならないようにするための、自分で決める文字列。" },
+          records: {
+            type: "array",
+            minItems: 1,
+            maxItems: 50,
+            description: "取り消す記録。",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["recordId"],
+              properties: {
+                recordId: { type: "string", maxLength: 80 },
+                expectedRevision: { type: "integer", minimum: 0, description: "読み取ったときの revision。食い違えば何も変えずに断る。" },
+                reason: { type: "string", maxLength: 200 },
+              },
+            },
+          },
+          reason: { type: "string", maxLength: 200, description: "取り消す理由。履歴に残る。" },
+        },
+        required: ["operationId", "records"],
+      },
+      run: (args, { service, actor }) => service.voidStudyRecords(args, actor),
+    }),
+
+    defineTool({
+      name: "getRecordChanges",
+      title: "学習記録の追加・訂正の履歴",
+      description: "本人の申告で足した記録や、訂正・取り消しの履歴を新しい順に返す。いつ・誰が・何を・なぜ変えたか（変更前後つき）が分かる。",
+      scope: "read",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: { limit: { type: "integer", minimum: 1, maximum: 100, description: "返す件数。既定は20。" } },
+      },
+      run: (args, { service }) => service.getRecordChanges(args),
+    }),
+
+    defineTool({
       name: "addGoal",
       title: "目標を追加",
       description: [
@@ -981,7 +1159,34 @@ export const SERVER_INSTRUCTIONS = `study-todo は、青チャート（数学の
   unknown_goal＝目標IDが違う / over_capacity は警告（断りはしないが、利用者に伝える）。
 - 繰り越しが多い予定を見て、「難しいから進まない」と決めつけないでください。
   理由（reason）が unspecified の移動は、理由が分かっていないという意味です。
-- 学習記録とチャレンジ結果は、このサーバーからは作れません。実際に study-todo で
-  学習したときだけ記録されます。実績を推測で書き込むことはできません。
-- 予定・目標の変更は、利用者が study-todo の設定画面で「予定を変更する」権限を
-  許可したときだけ行えます。権限が無い場合はその旨が返るので、利用者に設定を促してください。`;
+- 学習の実績（学習記録）は、**本人が「やった」と言ったときだけ**、代理で記録・訂正できます。
+  使うのは addStudyRecords / updateStudyRecords / voidStudyRecords で、records の権限が要ります。
+
+    1. getAppInfo で今日の日付（日本時間）を確かめる。「昨日」は today から年月日に直す
+    2. searchQuestions / listQuestions で対象の問題IDを確かめる
+       （数学Iと数学Aで同じ例題番号があるので、教科まで合っているか必ず見る）
+    3. getQuestionAttempts / getTasksInRange で、すでに同じ記録が無いか、
+       関係する予定があるかを確かめる
+    4. はっきりしないところ（どの問題か・どの記録か・評価）は短く聞く
+    5. 本人が言ったとおりに保存する
+    6. 保存できた件数・実施日・評価・未登録のままの項目を短く伝える
+
+  してはいけないこと:
+  ・予定が入っているというだけで実績を作る（予定の自動完了）
+  ・やっていない分に評価をつける、見積もり時間を実績の時間として書く
+  ・「解いた」というだけで perfect にする（はっきりしなければ評価は未登録のままにする）
+  ・分からない時間を0秒や推定値で埋める（「4問で40分」は各10分に割り振らない）
+  ・時刻が分からないのに、それらしい時刻を作る
+  保存できなかったときに「記録しました」と答えないでください。結果の counts を見て伝えます。
+- 実績の訂正・取り消しでは、対象の recordId を必ず確かめてください。候補が複数あるときは
+  勝手に選ばず、どれのことかを聞きます。同じ問題を同じ日に2回解くのはふつうのことなので、
+  日付と問題が同じというだけで重複とみなさないでください。
+- チャレンジ結果は、このサーバーからは作れません。チャレンジの中の記録は訂正・取り消しもできません
+  （結果と食い違うため断られます）。その場合は study-todo の画面から直してもらってください。
+- 権限は3つに分かれています。
+  read（学習状況を見る）/ write（予定・目標を変える）/ records（本人が申告した学習を記録・訂正する）。
+  どれも利用者が study-todo の設定画面で許可したときだけ使えます。
+  権限が無い場合はその旨が返るので、利用者に設定を促してください。
+- 利用者が「追加して」「直して」とはっきり言ったなら、それが確認です。毎回同じ許可を
+  聞き直す必要はありません。ただし、どの問題か・どの記録か・評価がはっきりしないときは、
+  短く確かめてから保存してください。`;

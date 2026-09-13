@@ -12,7 +12,7 @@
 //
 // すき間なく並べても数えられるように、マスの右と下に背景色の細い区切りを入れている。
 
-import { EVAL_MAP, EVALUATIONS, dayOf } from './api.js';
+import { EVAL_MAP, EVALUATIONS, RECORD_SOURCE_LABELS, hasDuration, hasExactTime, recordDateOf } from './api.js';
 import { q, qLabel } from './state.js';
 import { el, fmtMS, fmtDate, fmtTime } from './ui.js';
 
@@ -50,8 +50,9 @@ export function attemptSquare(record, { label = '', onClick = null } = {}) {
   const mark = evalOf(record.evaluation) ?? UNEVALUATED;
   const node = baseSquare(['sq-done', `tone-${mark.tone}`]);
   const text = `${label || qLabel(record.questionId)} ${mark.label}`
-    + (record.durationSeconds ? ` ${fmtMS(record.durationSeconds)}` : '')
-    + (record.challengeId ? '（チャレンジ）' : '');
+    + (hasDuration(record) ? ` ${fmtMS(record.durationSeconds)}` : ' 時間未登録')
+    + (record.challengeId ? '（チャレンジ）' : '')
+    + (record.source && record.source !== 'timer' ? '（あとから登録）' : '');
   node.setAttribute('aria-label', text);
   node.title = text;
   return makeTappable(node, onClick);
@@ -117,10 +118,22 @@ export function attemptDetailCard(record, { planTitle = null } = {}) {
   if (question) {
     card.append(el('div', null, `${question.subject ?? ''} ${question.chapter ?? ''} ・ ${question.section ?? ''}`.trim()));
   }
-  card.append(el('div', null, `${fmtDate(dayOf(record.timestamp))} ${fmtTime(record.timestamp)}`));
-  card.append(el('div', null, `評価: ${ev.symbol} ${ev.label}`));
-  card.append(el('div', null, `所要時間: ${fmtMS(record.durationSeconds)}`));
+  // 時刻が分からない記録に、それらしい時刻を出さない。
+  card.append(el('div', null, `${fmtDate(recordDateOf(record))}${hasExactTime(record) ? ` ${fmtTime(record.timestamp)}` : '（時刻は未登録）'}`));
+  card.append(el('div', null, `評価: ${record.evaluation ? `${ev.symbol} ${ev.label}` : '未登録'}`));
+  card.append(el('div', null, `所要時間: ${hasDuration(record) ? fmtMS(record.durationSeconds)
+    : (record.durationGroup ? `未登録（まとまりで ${fmtMS(record.durationGroup.totalSeconds)}）` : '未登録')}`));
   card.append(el('div', null, record.challengeId ? 'チャレンジの中で解いた' : '通常の学習'));
+  // どうやって入った記録か。あとから足した分・訂正した分が分かるようにする。
+  card.append(el('div', null, `記録: ${RECORD_SOURCE_LABELS[record.source ?? 'timer']}`
+    + (record.enteredBy ? `（${record.enteredBy}）` : '')));
+  if (record.claimSummary) card.append(el('div', null, `申告: ${record.claimSummary}`));
+  for (const correction of (record.corrections ?? []).slice(-3)) {
+    const changed = Object.keys(correction.after ?? {}).join('・') || '内容';
+    card.append(el('div', null, `訂正: ${correction.at ? new Date(correction.at).toLocaleString('ja-JP') : ''}`
+      + ` ${changed}${correction.reason ? `（${correction.reason}）` : ''}`));
+  }
+  if (record.voided) card.append(el('div', null, `取り消し済み${record.voidReason ? `（${record.voidReason}）` : ''}`));
   if (planTitle) card.append(el('div', null, `対応する予定: ${planTitle}`));
   else if (!record.planItemId) card.append(el('div', null, '対応する予定: 分かりません（以前の形式の記録）'));
   return card;

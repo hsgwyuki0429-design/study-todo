@@ -11,7 +11,10 @@
 //   ・過ぎた日にまだ残っている予定は、ここから翌日などへ繰り越せる
 
 import * as api from './api.js';
-import { MOVE_REASONS, MOVE_REASON_LABELS, MOVE_KIND_LABELS, todayKey } from './api.js';
+import {
+  MOVE_REASONS, MOVE_REASON_LABELS, MOVE_KIND_LABELS, RECORD_SOURCE_LABELS,
+  hasDuration, hasExactTime, todayKey,
+} from './api.js';
 import { itemsOf, splitPlanItems } from './plan-items.js';
 import { state, q, qLabel, render, loadTasks } from './state.js';
 import { el, fmtDate, fmtMS, fmtTime, row, emptyState } from './ui.js';
@@ -158,8 +161,12 @@ export async function renderDayDetail(screen, dateKey) {
       const opened = openAttemptId === record.id;
       const node = detailRow({
         title: qLabel(record.questionId),
-        sub: questionSub(record.questionId),
-        right: fmtMS(record.durationSeconds),
+        sub: [
+          questionSub(record.questionId),
+          record.source && record.source !== 'timer' ? RECORD_SOURCE_LABELS[record.source] : null,
+          hasExactTime(record) ? null : '時刻は未登録',
+        ].filter(Boolean).join(' ・ '),
+        right: hasDuration(record) ? fmtMS(record.durationSeconds) : '—',
         onClick: () => {
           openAttemptId = opened ? null : record.id;
           rerender();

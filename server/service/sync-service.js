@@ -18,6 +18,12 @@ import { runTransaction, supportsTransactions, updateDocument } from "../storage
 import { normalizeAvailability } from "../../src/availability.js";
 import { normalizeGoal as normalizeStructuredGoal } from "../../src/goals.js";
 import {
+  describeRecord,
+  isCountedRecord,
+  normalizeStudyRecord,
+  recordDateOf,
+} from "../../src/records-model.js";
+import {
   applyChanges,
   buildUndoChanges,
   emptyPlan,
@@ -29,6 +35,7 @@ import { dateKeyOf, isDateKey, monthKeyOf, todayKeyOf } from "../../src/datetime
 import {
   hashQuestions,
   mergeAvailability,
+  mergeRecords,
   mergeEstimateEntries,
   mergeEvents,
   mergeGoals,
@@ -57,6 +64,8 @@ export const SYNC_KEYS = Object.freeze({
   placements: "studytodo:placements",
   // 予定を別の日へ動かした記録（繰り越し・予定変更）。追加専用。
   moves: "studytodo:moves",
+  // 学習記録の追加・訂正・取り消しの記録（誰が・いつ・何を・なぜ）。
+  recordOps: "studytodo:recordops",
   // 1日に使える学習時間（曜日別・日付ごと・今日の残り）。
   availability: "studytodo:availability",
   // 問題別の見積もり指定（本人の指定とAIの仮見積もり）。実績から計算する分は保存しない。
@@ -76,6 +85,9 @@ export const SYNC_LIMITS = Object.freeze({
   planLookaheadDays: 400,
   // 変更の記録（取り消しに使う）を何件残すか。
   changeEntries: 50,
+  // 学習記録の追加・訂正の記録。1回に扱える件数と、残しておく件数。
+  recordsPerOperation: 50,
+  recordOpEntries: 100,
   // 繰り越しの記録。追加専用で、1回に送れる数と持っておく数の上限。
   movesPerPush: 200,
   moves: 2000,
@@ -116,6 +128,7 @@ const DEFAULT_LOG = { entries: [] };
 const DEFAULT_CHANGES = { entries: [] };
 const DEFAULT_PLACEMENTS = { tasks: {} };
 const DEFAULT_MOVES = { moves: {} };
+const DEFAULT_RECORD_OPS = { entries: [] };
 const DEFAULT_AVAILABILITY_DOC = { weekly: {}, overrides: {}, todayRemaining: null, reserveMinutes: 0, updatedAt: null };
 const DEFAULT_ESTIMATES = { byQuestion: {} };
 
@@ -129,13 +142,36 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     return readDoc(SYNC_KEYS.devices, DEFAULT_DEVICES);
   }
 
-  /** 保存してある学習記録を全部（月ごとに分けて持っている）。 */
-  async function readAllRecords() {
+  /**
+   * 保存してある学習記録（月ごとに分けて持っている）。
+   * 取り消した記録は、ふだんの集計に混ざらないよう既定では返さない。
+   */
+  async function readAllRecords({ includeVoided = false } = {}) {
     const keys = await storage.list(SYNC_KEYS.recordsPrefix);
     const shards = await Promise.all(keys.map((key) => readDoc(key, DEFAULT_RECORDS)));
     const records = [];
-    for (const shard of shards) records.push(...Object.values(shard.records ?? {}));
-    return records.sort((left, right) => String(right.timestamp).localeCompare(String(left.timestamp)));
+    for (const shard of shards) {
+      for (const record of Object.values(shard.records ?? {})) {
+        if (!includeVoided && !isCountedRecord(record)) continue;
+        records.push(record);
+      }
+    }
+    // 新しい順。日付だけの記録も混ざるので、実施日 → 時刻の順で見る。
+    return records.sort((left, right) => (
+      String(recordDateOf(right)).localeCompare(String(recordDateOf(left)))
+      || String(right.timestamp).localeCompare(String(left.timestamp))
+    ));
+  }
+
+  /** 1件の記録を id から引く（訂正・取り消しの対象を確かめるため）。 */
+  async function findRecord(recordId) {
+    const keys = await storage.list(SYNC_KEYS.recordsPrefix);
+    for (const key of keys) {
+      const shard = await readDoc(key, DEFAULT_RECORDS);
+      const record = shard.records?.[recordId];
+      if (record) return { record, key };
+    }
+    return null;
   }
 
   async function readChallenges() {
@@ -674,6 +710,242 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     return document.byQuestion;
   }
 
+  /* ------------------------------------------------------------------ */
+  /* 学習記録の追加・訂正・取り消し                                       */
+  /* ------------------------------------------------------------------ */
+
+  /** 同じ操作IDで、すでに実行された記録の操作があるか（送り直しの見分け）。 */
+  async function findRecordOperation(operationId) {
+    if (!operationId) return null;
+    const document = await readDoc(SYNC_KEYS.recordOps, DEFAULT_RECORD_OPS);
+    return (document.entries ?? []).find((entry) => entry.operationId === operationId) ?? null;
+  }
+
+  /** 学習記録の操作の履歴（新しい順）。 */
+  async function readRecordOperations({ limit = 20 } = {}) {
+    const document = await readDoc(SYNC_KEYS.recordOps, DEFAULT_RECORD_OPS);
+    const entries = document.entries ?? [];
+    return {
+      total: entries.length,
+      entries: entries.slice(0, Math.max(1, Math.min(limit, SYNC_LIMITS.recordOpEntries))),
+    };
+  }
+
+  const recordsKeyFor = (record) => SYNC_KEYS.records(recordDateOf(record).slice(0, 7));
+
+  /**
+   * 学習記録をまとめて追加・訂正・取り消しする。
+   *
+   * ・全部の確認を通ったときだけ書き込む（1つでも通らなければ1件も変えない）
+   * ・同じ operationId の送り直しでは、前回の結果を返すだけで二重にならない
+   * ・訂正は revision を1つ進め、変更前後を履歴に残す
+   * ・取り消しは消さずに印をつける（ふだんの集計からは外れる）
+   *
+   * 実際の中身の確かめ（問題IDが正しいか、日付が未来でないかなど）は、
+   * 呼び出し側（study-service）が先に済ませている前提。ここでは保存の正しさだけを見る。
+   */
+  async function applyRecordOperations({
+    operationId,
+    fingerprint,
+    adds = [],
+    updates = [],
+    voids = [],
+    actorKind = "ai",
+    actorName = "AI",
+    tool = "addStudyRecords",
+    claimSummary = null,
+    reason = null,
+  }) {
+    const at = new Date(now()).toISOString();
+
+    return runTransaction(storage, async (tx) => {
+      const opsDoc = (await tx.get(SYNC_KEYS.recordOps)) ?? structuredClone(DEFAULT_RECORD_OPS);
+      const already = (opsDoc.entries ?? []).find((entry) => entry.operationId === operationId);
+      if (already) {
+        if (already.fingerprint !== fingerprint) {
+          return {
+            ok: false,
+            error: "operation_conflict",
+            operationId,
+            message: "同じ operationId で、内容の違う操作がすでに実行されています。別の operationId を使ってください。",
+            nextAction: "やり直すなら新しい operationId を付け直し、getStudyHistory で今の記録を確かめてください。",
+          };
+        }
+        return { ...already.result, replayed: true };
+      }
+
+      // 1. 触る記録を集める（どの月の箱に入っているかも覚えておく）。
+      const keys = await tx.list(SYNC_KEYS.recordsPrefix);
+      const shards = new Map();
+      for (const key of keys) shards.set(key, (await tx.get(key)) ?? structuredClone(DEFAULT_RECORDS));
+      const locate = (recordId) => {
+        for (const [key, shard] of shards) {
+          if (shard.records?.[recordId]) return { key, record: shard.records[recordId] };
+        }
+        return null;
+      };
+
+      // 2. 先に全部確かめる。
+      const targets = [...updates, ...voids];
+      for (const target of targets) {
+        const found = locate(target.recordId);
+        if (!found) {
+          return {
+            ok: false,
+            error: "record_not_found",
+            recordId: target.recordId,
+            message: `学習記録 ${target.recordId} が見つかりません。`,
+            nextAction: "getStudyHistory / getQuestionAttempts で recordId を確かめてください。",
+          };
+        }
+        if (target.expectedRevision !== undefined && target.expectedRevision !== null
+          && Number(target.expectedRevision) !== Number(found.record.revision ?? 0)) {
+          return {
+            ok: false,
+            error: "revision_conflict",
+            recordId: target.recordId,
+            expectedRevision: Number(target.expectedRevision),
+            currentRevision: Number(found.record.revision ?? 0),
+            message: "その記録は、読み取ったあとに別の場所から変更されています。何も変えていません。",
+            nextAction: "getQuestionAttempts で今の内容と revision を取り直してください。",
+          };
+        }
+        // チャレンジの中の記録は、結果（ラップや合計時間）と食い違うので、ここからは触らない。
+        if (found.record.challengeId) {
+          return {
+            ok: false,
+            error: "challenge_record",
+            recordId: target.recordId,
+            challengeId: found.record.challengeId,
+            message: "チャレンジの中の記録は、ここからは訂正・取り消しできません（チャレンジ結果と食い違ってしまうため）。",
+            nextAction: "利用者に study-todo の画面から直してもらってください。",
+          };
+        }
+        target.found = found;
+      }
+
+      // 3. 書き込む。
+      const put = (record) => {
+        const key = recordsKeyFor(record);
+        if (!shards.has(key)) shards.set(key, structuredClone(DEFAULT_RECORDS));
+        shards.get(key).records[record.id] = record;
+      };
+      const added = [];
+      for (const draft of adds) {
+        const record = normalizeStudyRecord({
+          ...draft,
+          enteredAt: at,
+          enteredBy: actorName,
+          revision: 0,
+          ...(claimSummary ? { claimSummary } : {}),
+        }, { receivedAt: now() });
+        if (!record) {
+          return {
+            ok: false,
+            error: "invalid_record",
+            message: "記録の形が正しくありません（問題IDと実施日が必要です）。何も保存していません。",
+          };
+        }
+        put(record);
+        added.push(record);
+      }
+
+      const changed = [];
+      for (const target of updates) {
+        const before = target.found.record;
+        const next = normalizeStudyRecord({
+          ...before,
+          ...target.patch,
+          revision: Number(before.revision ?? 0) + 1,
+          updatedAt: at,
+          corrections: [
+            ...(before.corrections ?? []),
+            {
+              at,
+              by: actorName,
+              reason: target.reason ?? reason ?? null,
+              before: target.beforeSummary ?? {},
+              after: target.afterSummary ?? {},
+            },
+          ],
+        }, { receivedAt: now() });
+        if (!next) {
+          return { ok: false, error: "invalid_record", recordId: target.recordId, message: "訂正後の形が正しくありません。何も保存していません。" };
+        }
+        // 実施日を直すと、入っている月の箱が変わることがある。古いほうから外す。
+        if (target.found.key !== recordsKeyFor(next)) delete shards.get(target.found.key).records[next.id];
+        put(next);
+        changed.push({ before, after: next });
+      }
+
+      const voidedRecords = [];
+      for (const target of voids) {
+        const before = target.found.record;
+        const next = normalizeStudyRecord({
+          ...before,
+          voided: true,
+          voidedAt: at,
+          voidReason: target.reason ?? reason ?? null,
+          revision: Number(before.revision ?? 0) + 1,
+          updatedAt: at,
+          corrections: [
+            ...(before.corrections ?? []),
+            { at, by: actorName, reason: target.reason ?? reason ?? null, before: { voided: false }, after: { voided: true } },
+          ],
+        }, { receivedAt: now() });
+        put(next);
+        voidedRecords.push(next);
+      }
+
+      for (const [key, shard] of shards) await tx.put(key, shard);
+
+      const result = {
+        ok: true,
+        operationId,
+        at,
+        added: added.map(describeRecord),
+        updated: changed.map((entry) => describeRecord(entry.after)),
+        voided: voidedRecords.map(describeRecord),
+        counts: { added: added.length, updated: changed.length, voided: voidedRecords.length },
+      };
+
+      opsDoc.entries = [{
+        operationId,
+        fingerprint,
+        at,
+        actorKind,
+        actorName,
+        tool,
+        reason: reason ?? null,
+        claimSummary: claimSummary ?? null,
+        result,
+        // あとから「何がどう変わったか」を追えるようにしておく。
+        changes: [
+          ...added.map((record) => ({ recordId: record.id, kind: "add", after: describeRecord(record) })),
+          ...changed.map((entry) => ({
+            recordId: entry.after.id,
+            kind: "update",
+            before: describeRecord(entry.before),
+            after: describeRecord(entry.after),
+          })),
+          ...voidedRecords.map((record) => ({ recordId: record.id, kind: "void", after: describeRecord(record) })),
+        ],
+      }, ...(opsDoc.entries ?? [])].slice(0, SYNC_LIMITS.recordOpEntries);
+      await tx.put(SYNC_KEYS.recordOps, opsDoc);
+
+      await appendLogTx(tx, {
+        clientName: actorName,
+        tool,
+        summary: `学習記録を${added.length ? `${added.length}件追加` : ""}`
+          + `${changed.length ? `${added.length ? "・" : ""}${changed.length}件訂正` : ""}`
+          + `${voidedRecords.length ? `${added.length || changed.length ? "・" : ""}${voidedRecords.length}件取り消し` : ""}`
+          + `${claimSummary ? `（申告: ${claimSummary}）` : ""}`,
+      });
+
+      return result;
+    });
+  }
+
   /** 保存先が何を保証できるか。画面とAIへ正直に返すために使う。 */
   function storageCapabilities() {
     return {
@@ -689,6 +961,10 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     limits: SYNC_LIMITS,
     keys: SYNC_KEYS,
     readAllRecords,
+    findRecord,
+    applyRecordOperations,
+    findRecordOperation,
+    readRecordOperations,
     readChallenges,
     readGoals,
     writeGoals,
@@ -844,21 +1120,25 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       if (goals.length > SYNC_LIMITS.goalsPerPush) fail(`目標は${SYNC_LIMITS.goalsPerPush}件までです。`, "goals");
 
       // 学習記録は月ごとに分けて預かる。増えても1回の書き込みが重くならない。
+      // 訂正や取り消しも届くので、id が同じものは revision の大きいほうを残す
+      // （訂正を知らない端末が古い内容を送ってきても、戻らない）。
       const byMonth = new Map();
       let skippedRecords = 0;
       for (const raw of records) {
         const record = normalizeRecord(raw, { receivedAt: at });
         if (!record) { skippedRecords += 1; continue; }
-        const month = monthKeyOf(record.timestamp);
+        const month = recordDateOf(record).slice(0, 7);
         if (!byMonth.has(month)) byMonth.set(month, []);
         byMonth.get(month).push(record);
       }
       let addedRecords = 0;
+      let updatedRecords = 0;
       for (const [month, list] of byMonth) {
         await updateDocument(storage, SYNC_KEYS.records(month), (document) => {
-          const { merged, added } = mergeEvents(document.records ?? {}, list);
+          const { merged, added, updated } = mergeRecords(document.records ?? {}, list);
           document.records = merged;
           addedRecords += added;
+          updatedRecords += updated;
         }, { defaults: structuredClone(DEFAULT_RECORDS) });
       }
 
@@ -956,6 +1236,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         savedAt: atIso,
         accepted: {
           records: addedRecords,
+          updatedRecords,
           duplicatedRecords: records.length - addedRecords - skippedRecords,
           invalidRecords: skippedRecords,
           challenges: addedChallenges,
@@ -977,7 +1258,9 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     async pull({ since = null, questionsHash = null, timezoneOffsetMinutes } = {}) {
       const today = todayKeyOf(timezoneOffsetMinutes, now());
       const [allRecords, challenges, goals, questions, index] = await Promise.all([
-        readAllRecords(),
+        // 取り消した記録も配る。端末側でも集計から外れるようにするため
+        // （配らないと、端末には取り消し前の記録が残ったままになる）。
+        readAllRecords({ includeVoided: true }),
         readChallenges(),
         readGoals({ includeDeleted: true }),
         readQuestions(),
@@ -995,7 +1278,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       return {
         serverTime: new Date(now()).toISOString(),
         serverTimeMs: now(),
-        totalRecords: allRecords.length,
+        totalRecords: allRecords.filter(isCountedRecord).length,
         records,
         challenges: sinceMs === null
           ? challenges

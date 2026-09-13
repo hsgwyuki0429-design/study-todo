@@ -29,6 +29,14 @@ import {
 import { StorageCapabilityError } from "../storage/driver.js";
 import { MOVE_REASONS, itemsOf, splitPlanItems } from "../../src/plan-items.js";
 import {
+  EVALUATION_VALUES,
+  describeRecord,
+  hasDuration,
+  hasExactTime,
+  recordDateOf,
+  sumDurations,
+} from "../../src/records-model.js";
+import {
   GOAL_COMPLETION_TYPES,
   GOAL_STATUSES,
   normalizeGoal,
@@ -47,7 +55,7 @@ import {
 } from "./planning.js";
 import { buildOutline, compareQuestions, questionHaystack } from "../../src/question-order.js";
 
-export const DATA_VERSION = "1.4.0";
+export const DATA_VERSION = "1.5.0";
 
 export const SERVICE_LIMITS = Object.freeze({
   listLimitDefault: 50,
@@ -57,6 +65,8 @@ export const SERVICE_LIMITS = Object.freeze({
   tasksPerDay: 50,
   questionIdsPerTask: 100,
   goals: 100,
+  // 1回の操作で扱える学習記録の数。
+  recordsPerOperation: 50,
 });
 
 const EVALUATION_LABELS = Object.freeze({
@@ -95,8 +105,18 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       label: question?.label ?? record.questionId,
       chapter: question?.chapter ?? null,
       section: question?.section ?? null,
-      evaluationLabel: EVALUATION_LABELS[record.evaluation] ?? record.evaluation,
-      date: dateKeyOf(record.timestamp),
+      // 評価が未登録の記録は、正解にも不正解にもしない。
+      evaluationLabel: record.evaluation ? (EVALUATION_LABELS[record.evaluation] ?? record.evaluation) : "未登録",
+      evaluationKnown: Boolean(record.evaluation),
+      durationKnown: hasDuration(record),
+      recordId: record.id,
+      revision: Number(record.revision ?? 0),
+      source: record.source ?? "timer",
+      // 実施日（登録した日ではない）。
+      date: recordDateOf(record),
+      // 時刻まで分かっている記録だけ、時刻を出す。
+      timestamp: hasExactTime(record) ? record.timestamp : null,
+      datePrecision: record.datePrecision ?? "datetime",
     };
   }
 
@@ -368,27 +388,100 @@ export function createStudyService({ sync, now = () => Date.now() }) {
   /** その日の学習記録を、AIが読める形にする（1件＝1回の取り組み）。 */
   function describeAttempt(record, questions) {
     const question = questions.get(record.questionId);
+    const described = describeRecord(record);
     return {
+      ...described,
+      // 訂正・取り消しのときに使う識別子と版。
       recordId: record.id,
-      questionId: record.questionId,
       label: question?.label ?? record.questionId,
       type: question?.type ?? null,
       subject: question?.subject ?? null,
       chapter: question?.chapter ?? null,
       section: question?.section ?? null,
-      timestamp: record.timestamp,
-      date: dateKeyOf(record.timestamp),
-      evaluation: record.evaluation,
-      evaluationLabel: EVALUATION_LABELS[record.evaluation] ?? record.evaluation,
-      durationSeconds: record.durationSeconds,
+      timestamp: hasExactTime(record) ? record.timestamp : null,
+      evaluationLabel: record.evaluation ? (EVALUATION_LABELS[record.evaluation] ?? record.evaluation) : "未登録",
       inChallenge: Boolean(record.challengeId),
-      challengeId: record.challengeId ?? null,
-      planTaskId: record.planTaskId ?? null,
-      planItemId: record.planItemId ?? null,
       // 予定との対応が分からない、この仕組みより前の記録。
       legacy: !record.planItemId,
     };
   }
+
+  /* ------------------------------------------------------------------ */
+  /* 本人の申告による学習実績の記録・訂正                                 */
+  /* ------------------------------------------------------------------ */
+
+  /** 予定項目（itemId）を探す。実績を予定へ結び付けるときに使う。 */
+  async function findPlanItem(itemId) {
+    const todayKey = todayKeyOf(undefined, now());
+    const plans = await sync.readTaskPlansInRange(shiftDateKey(todayKey, -400), shiftDateKey(todayKey, 400));
+    for (const plan of plans) {
+      for (const task of plan.tasks ?? []) {
+        const item = itemsOf(task).find((entry) => entry.itemId === itemId);
+        if (item) return { plan, task, item };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 「いつやったか」を読む。
+   *
+   * 日付は必ず本人の申告から決める。「昨日」のような言い方は、AIがサーバーの今日
+   * （getAppInfo / getPlanningContext が返す today）を基準に、日本時間で年月日へ直してから渡す。
+   * 時刻は分かるときだけ。分からなければ日付だけの記録として保存する。
+   */
+  function readWhen(raw, field, args) {
+    const date = readDateArg(raw.date, `${field}.date`, args);
+    const todayKey = today(args);
+    if (date > todayKey) {
+      fail(`${field}.date が未来の日付です（${date}）。まだやっていない学習は実績にできません。`, `${field}.date`);
+    }
+    const time = readString(raw.time, `${field}.time`, { max: 5 });
+    if (!time) return { date, datePrecision: "date", timestamp: null };
+    if (!/^\d{2}:\d{2}$/.test(time)) fail(`${field}.time は 14:30 のような形で渡してください。`, `${field}.time`);
+    const offset = normalizeOffset(args.timezoneOffsetMinutes);
+    const ms = Date.parse(`${date}T${time}:00Z`) - offset * 60000;
+    return { date, datePrecision: "datetime", timestamp: new Date(ms).toISOString() };
+  }
+
+  /** 評価。渡されなければ「未登録」（正解にも不正解にも数えない）。 */
+  function readEvaluation(raw, field) {
+    if (raw === undefined || raw === null || raw === "" || raw === "unknown") return null;
+    return readEnum(raw, field, [...EVALUATION_VALUES], { required: true });
+  }
+
+  /** 所要時間。渡されなければ null（0秒で埋めない）。 */
+  function readDurationSeconds(raw, field) {
+    if (raw === undefined || raw === null || raw === "") return null;
+    return readInteger(raw, field, { min: 0, max: 6 * 3600, required: true });
+  }
+
+  /** 同じ問題・同じ日の記録。二重登録になっていないかを本人に確かめてもらうために返す。 */
+  function similarRecords(records, questionId, date) {
+    return records
+      .filter((record) => record.questionId === questionId && recordDateOf(record) === date)
+      .map(describeRecord);
+  }
+
+  const recordFingerprint = (payload) => JSON.stringify(payload);
+
+  /** 保存先がまとめ書きを保証できないときは、黙って書かずに理由を返す。 */
+  async function runRecordOperations(input) {
+    try {
+      return await sync.applyRecordOperations(input);
+    } catch (error) {
+      if (error instanceof StorageCapabilityError) {
+        return {
+          ok: false,
+          error: "storage_not_atomic",
+          message: error.message,
+          nextAction: "利用者に、Durable Object を有効にしてサーバーをデプロイしなおすよう伝えてください。記録は変更していません。",
+        };
+      }
+      throw error;
+    }
+  }
+
 
   /* ------------------------------------------------------------------ */
   /* 計画づくりのための下ごしらえ                                         */
@@ -576,7 +669,8 @@ export function createStudyService({ sync, now = () => Date.now() }) {
     // 5. 日ごとの時間と期限。
     const spentByDate = new Map();
     for (const record of bundle.records) {
-      const date = dateKeyOf(record.timestamp, bundle.timezoneOffsetMinutes);
+      if (typeof record.durationSeconds !== "number") continue;
+      const date = recordDateOf(record, bundle.timezoneOffsetMinutes);
       spentByDate.set(date, (spentByDate.get(date) ?? 0) + record.durationSeconds);
     }
     const days = [];
@@ -844,13 +938,13 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       const days = readInteger(args.days, "days", { min: 1, max: 365 });
       const offset = normalizeOffset(args.timezoneOffsetMinutes);
       if (days !== null) {
-        const fromMs = startOfDayMs(today(args), offset) - (days - 1) * 86400000;
-        records = records.filter((record) => Date.parse(record.timestamp) >= fromMs);
+        const from = dateKeyOf(startOfDayMs(today(args), offset) - (days - 1) * 86400000, offset);
+        records = records.filter((record) => recordDateOf(record, offset) >= from);
       }
       const from = readString(args.from, "from", { max: 10 });
       const to = readString(args.to, "to", { max: 10 });
-      if (from) records = records.filter((record) => dateKeyOf(record.timestamp, offset) >= from);
-      if (to) records = records.filter((record) => dateKeyOf(record.timestamp, offset) <= to);
+      if (from) records = records.filter((record) => recordDateOf(record, offset) >= from);
+      if (to) records = records.filter((record) => recordDateOf(record, offset) <= to);
       const evaluation = readEnum(args.evaluation, "evaluation", [...EVALUATIONS]);
       if (evaluation) records = records.filter((record) => record.evaluation === evaluation);
       const chapter = readString(args.chapter, "chapter", { max: 80 });
@@ -909,6 +1003,11 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         today: todayKey,
         totalRecords: stats.totalRecords,
         totalSeconds: stats.totalSeconds,
+        // 時間や評価が「未登録」の取り組みの数。平均を出すときはこれを除いて考える。
+        durationUnknownCount: stats.durationUnknownCount,
+        evaluationUnknownCount: stats.evaluationUnknownCount,
+        totalsNote: "totalSeconds には、時間が未登録の取り組み（durationUnknownCount 件）は入っていません。"
+          + "まとまりで申告された時間は、そのまとまりにつき1回だけ足しています。",
         uniqueQuestions: stats.uniqueQuestions,
         byEvaluation: stats.byEvaluation,
         byChapter: stats.byChapter,
@@ -939,7 +1038,7 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       ]);
       const plan = stored ?? emptyPlan(date);
       const offset = normalizeOffset(args.timezoneOffsetMinutes);
-      const dayRecords = allRecords.filter((record) => dateKeyOf(record.timestamp, offset) === date);
+      const dayRecords = allRecords.filter((record) => recordDateOf(record, offset) === date);
       const tasks = (plan.tasks ?? []).map((task) => decorateTask(task, plan, questions, allRecords));
       const active = activeStateOf(plan, now());
       return {
@@ -978,7 +1077,7 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       const dates = new Set(plans.map((plan) => plan.date));
       const attemptsByDate = new Map();
       for (const record of allRecords) {
-        const date = dateKeyOf(record.timestamp, offset);
+        const date = recordDateOf(record, offset);
         if (date < from || date > to) continue;
         if (!attemptsByDate.has(date)) attemptsByDate.set(date, []);
         attemptsByDate.get(date).push(record);
@@ -1149,7 +1248,9 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       const offset = normalizeOffset(args.timezoneOffsetMinutes);
       const spent = new Map();
       for (const record of records) {
-        const date = dateKeyOf(record.timestamp, offset);
+        // 時間が未登録の記録は 0秒として足さない（学習していないのと同じにはしない）。
+        if (typeof record.durationSeconds !== "number") continue;
+        const date = recordDateOf(record, offset);
         spent.set(date, (spent.get(date) ?? 0) + record.durationSeconds);
       }
       return {
@@ -1611,6 +1712,265 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       });
       const saved = (await sync.readGoals()).find((entry) => entry.id === id);
       return { ok: true, goal: normalizeGoal(saved, { now: now() }) };
+    },
+
+    /**
+     * 本人が「やった」と言った学習を、実績としてまとめて記録する。
+     *
+     * 作ってよいのは、本人が実際に取り組んだと言ったものだけ。
+     * 予定が入っていることや、時間の見積もりは根拠にならない。
+     * 分からない評価・時間は、埋めずに「未登録」として保存する。
+     */
+    async addStudyRecords(args = {}, actor = {}) {
+      const operationId = readString(args.operationId, "operationId", { required: true, max: 120 });
+      const claimSummary = readString(args.claimSummary, "claimSummary", { max: 200 });
+      const list = readArray(args.records, "records", { min: 1, max: SERVICE_LIMITS.recordsPerOperation });
+      const questions = await questionMap();
+      const existing = await sync.readAllRecords();
+
+      const unknownQuestionIds = [];
+      const drafts = [];
+      const duplicates = [];
+      // まとまりで申告された合計時間（「4問で40分」）。1問ずつに割り振らない。
+      const groupSeconds = readDurationSeconds(args.totalDurationSeconds, "totalDurationSeconds");
+      const groupId = groupSeconds === null ? null : uid("dg");
+
+      list.forEach((raw, index) => {
+        const field = `records[${index}]`;
+        if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+          fail(`${field} はオブジェクトで渡してください。`, field);
+        }
+        rejectUnknownKeys(raw, ["questionId", "date", "time", "evaluation", "durationSeconds", "planItemId", "note"], field);
+        const questionId = readString(raw.questionId, `${field}.questionId`, { required: true, max: 120 });
+        if (!questions.has(questionId)) unknownQuestionIds.push(questionId);
+        const when = readWhen(raw, field, args);
+        const duplicateOf = similarRecords(existing, questionId, when.date);
+        if (duplicateOf.length) duplicates.push({ questionId, date: when.date, existing: duplicateOf });
+        drafts.push({
+          id: uid("rec"),
+          questionId,
+          ...when,
+          evaluation: readEvaluation(raw.evaluation, `${field}.evaluation`),
+          durationSeconds: readDurationSeconds(raw.durationSeconds, `${field}.durationSeconds`),
+          ...(groupId ? { durationGroup: { id: groupId, totalSeconds: groupSeconds, count: list.length } } : {}),
+          ...(raw.planItemId ? { planItemId: readString(raw.planItemId, `${field}.planItemId`, { max: 120 }) } : {}),
+          ...(raw.note ? { claimSummary: readString(raw.note, `${field}.note`, { max: 200 }) } : {}),
+          source: "self_report_ai",
+        });
+      });
+
+      if (unknownQuestionIds.length) {
+        return {
+          ok: false,
+          error: "unknown_question",
+          unknownQuestionIds: [...new Set(unknownQuestionIds)],
+          message: "問題マスタに無い問題IDが含まれています。記録は1件も保存していません。",
+          nextAction: "searchQuestions / listQuestions で正しい question.id を確かめてください"
+            + "（数学Iと数学Aで同じ番号の例題があるので、教科も合わせて確かめること）。",
+        };
+      }
+
+      // 予定との結び付きは、本人が「この予定を終えた」と示したときだけ。
+      const plans = new Map();
+      for (const draft of drafts) {
+        if (!draft.planItemId) continue;
+        const plan = await findPlanItem(draft.planItemId);
+        if (!plan) {
+          return {
+            ok: false,
+            error: "plan_item_not_found",
+            planItemId: draft.planItemId,
+            message: `予定項目 ${draft.planItemId} が見つかりません。記録は1件も保存していません。`,
+            nextAction: "getTasksInRange で itemId を確かめるか、予定と結び付けずに保存してください。",
+          };
+        }
+        if (plan.item.questionId !== draft.questionId) {
+          return {
+            ok: false,
+            error: "plan_item_mismatch",
+            planItemId: draft.planItemId,
+            message: "その予定項目は別の問題のものです。記録は1件も保存していません。",
+          };
+        }
+        const alreadyDone = existing.some((record) => record.planItemId === draft.planItemId);
+        if (alreadyDone) {
+          return {
+            ok: false,
+            error: "plan_item_already_done",
+            planItemId: draft.planItemId,
+            message: "その予定には、すでに取り組みの記録があります。同じ予定を二重に完了にはできません。",
+            nextAction: "解き直しなら、予定と結び付けずに（planItemId なしで）保存してください。",
+          };
+        }
+        plans.set(draft.planItemId, plan);
+      }
+
+      const result = await runRecordOperations({
+        operationId,
+        fingerprint: recordFingerprint({ adds: drafts.map(({ id, ...rest }) => rest), claimSummary }),
+        adds: drafts,
+        actorKind: "ai",
+        actorName: actor?.clientName ?? actor?.tokenLabel ?? "AI",
+        tool: "addStudyRecords",
+        claimSummary,
+      });
+      if (!result.ok) return result;
+      return {
+        ...result,
+        today: today(args),
+        // 同じ問題・同じ日の記録がすでにあった場合は知らせる（勝手に消さない）。
+        possibleDuplicates: duplicates,
+        note: duplicates.length
+          ? "同じ問題・同じ日の記録がすでにあります。同じ取り組みを二重に入れていないか、利用者に確かめてください"
+            + "（同じ日に2回解くこと自体はふつうにあるので、勝手に消さないこと）。"
+          : null,
+        unknownNote: "evaluation が null の記録は「評価が未登録」です。正解にも不正解にも数えません。"
+          + " durationSeconds が null の記録は「時間が未登録」で、平均や見積もりには入りません。",
+      };
+    },
+
+    /**
+     * すでにある実績を、本人の申告にもとづいて部分的に直す。
+     * 渡さなかった項目はそのまま。記録IDは変わらない。
+     */
+    async updateStudyRecords(args = {}, actor = {}) {
+      const operationId = readString(args.operationId, "operationId", { required: true, max: 120 });
+      const reason = readString(args.reason, "reason", { max: 200 });
+      const list = readArray(args.updates, "updates", { min: 1, max: SERVICE_LIMITS.recordsPerOperation });
+      const questions = await questionMap();
+
+      const updates = [];
+      for (const [index, raw] of list.entries()) {
+        const field = `updates[${index}]`;
+        if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+          fail(`${field} はオブジェクトで渡してください。`, field);
+        }
+        rejectUnknownKeys(raw, ["recordId", "expectedRevision", "date", "time", "evaluation", "durationSeconds", "questionId", "planItemId", "reason"], field);
+        const recordId = readString(raw.recordId, `${field}.recordId`, { required: true, max: 80 });
+        const patch = {};
+        const afterSummary = {};
+        if (raw.date !== undefined || raw.time !== undefined) {
+          const found = await sync.findRecord(recordId);
+          const current = found?.record;
+          const when = readWhen({
+            date: raw.date ?? (current ? recordDateOf(current) : undefined),
+            time: raw.time,
+          }, field, args);
+          Object.assign(patch, when);
+          // 時刻を渡していないのに日付だけ直した場合、もとの時刻は当てにならないので落とす。
+          if (raw.time === undefined && current && hasExactTime(current) && raw.date !== undefined) {
+            patch.timestamp = null;
+            patch.datePrecision = "date";
+          }
+          afterSummary.date = when.date;
+        }
+        if (raw.evaluation !== undefined) {
+          patch.evaluation = readEvaluation(raw.evaluation, `${field}.evaluation`);
+          afterSummary.evaluation = patch.evaluation;
+        }
+        if (raw.durationSeconds !== undefined) {
+          patch.durationSeconds = readDurationSeconds(raw.durationSeconds, `${field}.durationSeconds`);
+          afterSummary.durationSeconds = patch.durationSeconds;
+        }
+        if (raw.questionId !== undefined) {
+          const questionId = readString(raw.questionId, `${field}.questionId`, { required: true, max: 120 });
+          if (!questions.has(questionId)) {
+            return {
+              ok: false,
+              error: "unknown_question",
+              unknownQuestionIds: [questionId],
+              message: "問題マスタに無い問題IDです。1件も変更していません。",
+            };
+          }
+          patch.questionId = questionId;
+          afterSummary.questionId = questionId;
+        }
+        if (raw.planItemId !== undefined) {
+          patch.planItemId = raw.planItemId === null ? undefined : readString(raw.planItemId, `${field}.planItemId`, { max: 120 });
+          afterSummary.planItemId = patch.planItemId ?? null;
+        }
+        if (!Object.keys(patch).length) fail(`${field} には直したい項目を1つ以上入れてください。`, field);
+        // 訂正された記録は「本人の申告で直したもの」になる。
+        patch.source = "self_report_ai";
+        updates.push({
+          recordId,
+          expectedRevision: raw.expectedRevision,
+          patch,
+          reason: readString(raw.reason, `${field}.reason`, { max: 200 }) ?? reason,
+          afterSummary,
+        });
+      }
+
+      // 変更前の内容を履歴へ残すため、いまの値を読んでおく。
+      for (const update of updates) {
+        const found = await sync.findRecord(update.recordId);
+        if (found) {
+          update.beforeSummary = {
+            date: recordDateOf(found.record),
+            evaluation: found.record.evaluation ?? null,
+            durationSeconds: hasDuration(found.record) ? found.record.durationSeconds : null,
+            questionId: found.record.questionId,
+            planItemId: found.record.planItemId ?? null,
+          };
+        }
+      }
+
+      return runRecordOperations({
+        operationId,
+        fingerprint: recordFingerprint({ updates: updates.map(({ recordId, patch }) => ({ recordId, patch })), reason }),
+        updates,
+        actorKind: "ai",
+        actorName: actor?.clientName ?? actor?.tokenLabel ?? "AI",
+        tool: "updateStudyRecords",
+        reason,
+      });
+    },
+
+    /** 誤って入れた実績を取り消す。消さずに印をつけ、ふだんの集計から外す。 */
+    async voidStudyRecords(args = {}, actor = {}) {
+      const operationId = readString(args.operationId, "operationId", { required: true, max: 120 });
+      const reason = readString(args.reason, "reason", { max: 200 });
+      const list = readArray(args.records, "records", { min: 1, max: SERVICE_LIMITS.recordsPerOperation });
+      const voids = list.map((raw, index) => {
+        const field = `records[${index}]`;
+        if (typeof raw === "string") return { recordId: raw };
+        if (typeof raw !== "object" || raw === null) fail(`${field} は recordId か { recordId, expectedRevision } で渡してください。`, field);
+        rejectUnknownKeys(raw, ["recordId", "expectedRevision", "reason"], field);
+        return {
+          recordId: readString(raw.recordId, `${field}.recordId`, { required: true, max: 80 }),
+          expectedRevision: raw.expectedRevision,
+          reason: readString(raw.reason, `${field}.reason`, { max: 200 }) ?? reason,
+        };
+      });
+      return runRecordOperations({
+        operationId,
+        fingerprint: recordFingerprint({ voids: voids.map(({ recordId }) => recordId), reason }),
+        voids,
+        actorKind: "ai",
+        actorName: actor?.clientName ?? actor?.tokenLabel ?? "AI",
+        tool: "voidStudyRecords",
+        reason,
+      });
+    },
+
+    /** 学習記録の追加・訂正・取り消しの履歴。 */
+    async getRecordChanges(args = {}) {
+      const limit = readInteger(args.limit, "limit", { min: 1, max: 100, fallback: 20 });
+      const { total, entries } = await sync.readRecordOperations({ limit });
+      return {
+        total,
+        count: entries.length,
+        operations: entries.map((entry) => ({
+          operationId: entry.operationId,
+          at: entry.at,
+          by: entry.actorKind === "ai" ? `AI（${entry.actorName}）` : entry.actorName,
+          tool: entry.tool,
+          reason: entry.reason,
+          claimSummary: entry.claimSummary,
+          counts: entry.result?.counts ?? null,
+          changes: entry.changes ?? [],
+        })),
+      };
     },
 
     /** 配分案を、保存する前に確かめる。実際には何も変えない。 */

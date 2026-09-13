@@ -10,6 +10,7 @@
 // 数えられることを Claude に推測させない。逆に、何を優先するかはここでは決めない。
 
 import { dateKeyOf, shiftDateKey } from "../../src/datetime.js";
+import { hasDuration, recordDateOf } from "../../src/records-model.js";
 import { itemsOf, splitPlanItems } from "../../src/plan-items.js";
 import { goalAttempts, questionSatisfied } from "../../src/goals.js";
 import {
@@ -203,8 +204,10 @@ export function buildDays({
   const planByDate = new Map(plans.map((plan) => [plan.date, plan]));
   const spentByDate = new Map();
   for (const record of records) {
-    const date = dateKeyOf(record.timestamp, timezoneOffsetMinutes);
-    spentByDate.set(date, (spentByDate.get(date) ?? 0) + (record.durationSeconds ?? 0));
+    // 時間が未登録の記録は足さない（0秒として数えると、使える時間の計算が狂う）。
+    if (!hasDuration(record)) continue;
+    const date = recordDateOf(record, timezoneOffsetMinutes);
+    spentByDate.set(date, (spentByDate.get(date) ?? 0) + record.durationSeconds);
   }
 
   return dates.map((date) => {

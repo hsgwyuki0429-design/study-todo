@@ -13,6 +13,13 @@ import { dateKeyOf, isDateKey } from "../../src/datetime.js";
 import { hashQuestions } from "../../src/hash.js";
 import { itemsOf, normalizeMove } from "../../src/plan-items.js";
 import { normalizeGoal } from "../../src/goals.js";
+import {
+  isCountedRecord,
+  mergeStudyRecord,
+  normalizeStudyRecord,
+  recordDateOf,
+  sumDurations,
+} from "../../src/records-model.js";
 import { normalizeAvailability } from "../../src/availability.js";
 
 export const EVALUATIONS = Object.freeze([
@@ -25,27 +32,38 @@ export const TASK_KINDS = Object.freeze(["new", "review", "challenge", "priority
 
 const isObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 
-/** 端末から届いた学習記録を、保存してよい形へ整える。壊れているものは落とす。 */
-export function normalizeRecord(raw, { receivedAt = Date.now() } = {}) {
-  if (!isObject(raw)) return null;
-  const id = typeof raw.id === "string" ? raw.id.trim() : "";
-  const questionId = typeof raw.questionId === "string" ? raw.questionId.trim() : "";
-  const timestamp = typeof raw.timestamp === "string" ? raw.timestamp : "";
-  if (!id || !questionId || !Number.isFinite(Date.parse(timestamp))) return null;
-  if (!EVALUATIONS.includes(raw.evaluation)) return null;
-  return {
-    id: id.slice(0, 80),
-    questionId: questionId.slice(0, 120),
-    timestamp,
-    evaluation: raw.evaluation,
-    durationSeconds: Math.max(0, Math.round(Number(raw.durationSeconds) || 0)),
-    ...(typeof raw.challengeId === "string" && raw.challengeId ? { challengeId: raw.challengeId.slice(0, 80) } : {}),
-    // どの予定に対する取り組みだったか。古い記録には入っていない（null のまま扱う）。
-    ...(typeof raw.planTaskId === "string" && raw.planTaskId ? { planTaskId: raw.planTaskId.slice(0, 80) } : {}),
-    ...(typeof raw.planItemId === "string" && raw.planItemId ? { planItemId: raw.planItemId.slice(0, 120) } : {}),
-    // どの同期で届いたか。次回の差分取得（since）に使う。
-    syncedAt: receivedAt,
-  };
+/**
+ * 端末から届いた学習記録を、保存してよい形へ整える（src/records-model.js）。
+ *
+ * 学習記録は「追加専用」ではなくなった。本人の申告にもとづいて後から足したり、
+ * 訂正したり、取り消したりできる。どれが新しいかは revision で見分ける。
+ */
+export { normalizeStudyRecord as normalizeRecord };
+
+/** 学習記録を重ね合わせる。訂正された内容（revision が大きいほう）を残す。 */
+export function mergeRecords(stored = {}, incoming = []) {
+  const merged = { ...stored };
+  let added = 0;
+  let updated = 0;
+  let ignored = 0;
+  for (const record of incoming) {
+    if (!record) continue;
+    const current = merged[record.id];
+    if (!current) {
+      merged[record.id] = record;
+      added += 1;
+      continue;
+    }
+    const winner = mergeStudyRecord(current, record);
+    if (winner === record && winner !== current) {
+      merged[record.id] = record;
+      updated += 1;
+    } else {
+      // 届いた内容のほうが古い（訂正前）。サーバーの内容を残す。
+      ignored += 1;
+    }
+  }
+  return { merged, added, updated, ignored };
 }
 
 /**
@@ -335,31 +353,45 @@ export function mergeEstimateEntries(stored = {}, incoming = {}) {
 /** 移動（繰り越し）イベントは追加専用。id が同じものは1件として扱う。 */
 export { normalizeMove };
 
-/** 学習記録から統計を数え直す。合計値そのものは同期しない。 */
+/**
+ * 学習記録から統計を数え直す。合計値そのものは同期しない。
+ *
+ *   ・取り消した記録は数えない
+ *   ・時間が分からない記録は 0秒として足さず、件数だけ数える
+ *   ・日付は実施日（date）で見る。あとから足した記録も、実施した日に入る
+ */
 export function computeStats(records, questions = [], { timezoneOffsetMinutes } = {}) {
   const byId = new Map(questions.map((question) => [question.id, question]));
   const byEvaluation = {};
   const byChapter = {};
   const byDate = {};
-  let totalSeconds = 0;
-  for (const record of records) {
-    totalSeconds += record.durationSeconds;
-    byEvaluation[record.evaluation] = (byEvaluation[record.evaluation] || 0) + 1;
+  const counted = records.filter(isCountedRecord);
+  const totals = sumDurations(counted);
+  let unknownEvaluations = 0;
+  for (const record of counted) {
+    const seconds = typeof record.durationSeconds === "number" ? record.durationSeconds : 0;
+    if (record.evaluation) byEvaluation[record.evaluation] = (byEvaluation[record.evaluation] || 0) + 1;
+    else unknownEvaluations += 1;
     const chapter = byId.get(record.questionId)?.chapter ?? "不明";
     byChapter[chapter] ??= { count: 0, seconds: 0, byEvaluation: {} };
     byChapter[chapter].count += 1;
-    byChapter[chapter].seconds += record.durationSeconds;
-    byChapter[chapter].byEvaluation[record.evaluation] =
-      (byChapter[chapter].byEvaluation[record.evaluation] || 0) + 1;
-    const day = dateKeyOf(record.timestamp, timezoneOffsetMinutes);
+    byChapter[chapter].seconds += seconds;
+    if (record.evaluation) {
+      byChapter[chapter].byEvaluation[record.evaluation] =
+        (byChapter[chapter].byEvaluation[record.evaluation] || 0) + 1;
+    }
+    const day = recordDateOf(record, timezoneOffsetMinutes);
     byDate[day] ??= { count: 0, seconds: 0 };
     byDate[day].count += 1;
-    byDate[day].seconds += record.durationSeconds;
+    byDate[day].seconds += seconds;
   }
   return {
-    totalRecords: records.length,
-    totalSeconds,
-    uniqueQuestions: new Set(records.map((record) => record.questionId)).size,
+    totalRecords: counted.length,
+    totalSeconds: totals.seconds,
+    // 時間が登録されていない取り組みの数。平均を出すときはこれを除いて考える。
+    durationUnknownCount: totals.unknownCount,
+    evaluationUnknownCount: unknownEvaluations,
+    uniqueQuestions: new Set(counted.map((record) => record.questionId)).size,
     byEvaluation,
     byChapter,
     byDate,

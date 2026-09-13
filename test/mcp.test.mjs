@@ -47,8 +47,12 @@ test("initialize / tools/list / tools/call が動く", async () => {
   ]) {
     assert.ok(names.includes(expected), `${expected} が tools/list にない`);
   }
-  // 学習記録を作るツールは公開しない。
-  assert.ok(!names.some((name) => /addStudyRecord|saveChallengeResult/.test(name)));
+  // 学習実績は「本人の申告を代理入力する」ツールだけ。権限も別（records）。
+  for (const expected of ["addStudyRecords", "updateStudyRecords", "voidStudyRecords"]) {
+    assert.ok(names.includes(expected), `${expected} が tools/list にない`);
+  }
+  // チャレンジ結果を作るツールは、今も公開しない。
+  assert.ok(!names.some((name) => /saveChallengeResult|addChallengeResult/.test(name)));
 
   const info = await callTool(app, token, "getAppInfo");
   assert.equal(info.questionCount, 3);

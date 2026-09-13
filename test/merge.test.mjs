@@ -15,10 +15,26 @@ import {
 
 test("壊れた学習記録は受け取らない", () => {
   assert.equal(normalizeRecord(null), null);
-  assert.equal(normalizeRecord({ id: "a", questionId: "q", timestamp: "だめ", evaluation: "perfect" }), null);
-  assert.equal(normalizeRecord({ id: "a", questionId: "q", timestamp: "2026-09-12T00:00:00Z", evaluation: "unknown" }), null);
+  // 日付も時刻も無いものは、いつの記録か決められないので受け取らない。
+  assert.equal(normalizeRecord({ id: "a", questionId: "q", timestamp: "だめ" }), null);
+  assert.equal(normalizeRecord({ id: "a", questionId: "q" }), null);
+  assert.equal(normalizeRecord({ questionId: "q", date: "2026-09-12" }), null);
+
   const ok = normalizeRecord({ id: "a", questionId: "q", timestamp: "2026-09-12T00:00:00Z", evaluation: "perfect", durationSeconds: 12.6 });
   assert.equal(ok.durationSeconds, 13);
+  assert.equal(ok.date, "2026-09-12", "古い記録でも timestamp から実施日を出す");
+  assert.equal(ok.source, "timer", "古い記録はアプリで計測したものとして扱う");
+  assert.equal(ok.revision, 0);
+});
+
+test("評価と所要時間は「分からない」を保てる", () => {
+  const unknown = normalizeRecord({ id: "a", questionId: "q", date: "2026-09-12" });
+  assert.equal(unknown.evaluation, null, "知らない評価は null（正解にも不正解にもしない）");
+  assert.equal(unknown.durationSeconds, null, "分からない時間を0秒で埋めない");
+  assert.equal(unknown.datePrecision, "date", "時刻が分からなければ日付だけの記録として扱う");
+
+  // 知らない評価の値は受け取らず、未登録として扱う。
+  assert.equal(normalizeRecord({ id: "a", questionId: "q", date: "2026-09-12", evaluation: "だいたい合ってた" }).evaluation, null);
 });
 
 test("イベントはIDで重複を除き、既にある分を消さない", () => {
