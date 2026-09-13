@@ -11,6 +11,7 @@
 
 import { dateKeyOf, isDateKey } from "../../src/datetime.js";
 import { hashQuestions } from "../../src/hash.js";
+import { itemsOf, normalizeMove } from "../../src/plan-items.js";
 
 export const EVALUATIONS = Object.freeze([
   "perfect", "better_solution", "weak_writing", "calc_error", "wrong_approach",
@@ -37,6 +38,9 @@ export function normalizeRecord(raw, { receivedAt = Date.now() } = {}) {
     evaluation: raw.evaluation,
     durationSeconds: Math.max(0, Math.round(Number(raw.durationSeconds) || 0)),
     ...(typeof raw.challengeId === "string" && raw.challengeId ? { challengeId: raw.challengeId.slice(0, 80) } : {}),
+    // どの予定に対する取り組みだったか。古い記録には入っていない（null のまま扱う）。
+    ...(typeof raw.planTaskId === "string" && raw.planTaskId ? { planTaskId: raw.planTaskId.slice(0, 80) } : {}),
+    ...(typeof raw.planItemId === "string" && raw.planItemId ? { planItemId: raw.planItemId.slice(0, 120) } : {}),
     // どの同期で届いたか。次回の差分取得（since）に使う。
     syncedAt: receivedAt,
   };
@@ -93,7 +97,7 @@ export function normalizeTaskPlan(raw, { date = null, updatedBy = "app", now = D
   const at = new Date(now).toISOString();
   return {
     date: planDate,
-    tasks: tasks.slice(0, 100).map((task, index) => normalizeTask(task, index, { now: at })).filter(Boolean),
+    tasks: tasks.slice(0, 100).map((task, index) => normalizeTask(task, index, { now: at, date: planDate })).filter(Boolean),
     updatedAt: typeof source.updatedAt === "string" && Number.isFinite(Date.parse(source.updatedAt))
       ? source.updatedAt
       : at,
@@ -122,7 +126,7 @@ export function normalizeActive(raw) {
  * （毎回作り直すと、同じタスクを指し示せなくなり、部分更新も履歴もできなくなる。）
  * pinned（利用者が固定した印）は、無ければ false として補う。古いデータもそのまま読める。
  */
-export function normalizeTask(raw, index = 0, { now = null } = {}) {
+export function normalizeTask(raw, index = 0, { now = null, date = null } = {}) {
   if (!isObject(raw)) return null;
   const questionIds = Array.isArray(raw.questionIds)
     ? raw.questionIds.filter((value) => typeof value === "string" && value).slice(0, 100)
@@ -130,8 +134,10 @@ export function normalizeTask(raw, index = 0, { now = null } = {}) {
   const kind = TASK_KINDS.includes(raw.kind) ? raw.kind : "new";
   if (!questionIds.length && !raw.title) return null;
   const at = now ?? new Date().toISOString();
+  const taskId = typeof raw.id === "string" && raw.id ? raw.id.slice(0, 80) : `task_${index}_${Math.random().toString(36).slice(2, 8)}`;
+  const planDate = date;
   return {
-    id: typeof raw.id === "string" && raw.id ? raw.id.slice(0, 80) : `task_${index}_${Math.random().toString(36).slice(2, 8)}`,
+    id: taskId,
     questionIds,
     kind,
     order: Number.isFinite(Number(raw.order)) ? Number(raw.order) : index,
@@ -144,6 +150,9 @@ export function normalizeTask(raw, index = 0, { now = null } = {}) {
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : at,
     updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : at,
     ...(typeof raw.source === "string" ? { source: raw.source.slice(0, 20) } : {}),
+    // 予定項目（この予定の中の「1回の取り組み」1件ずつ）。
+    // 古いデータには無いので questionIds の並びから組み立てる。
+    items: itemsOf({ ...raw, id: taskId, questionIds, date: planDate }),
   };
 }
 
@@ -222,6 +231,8 @@ function carryProtections(stored, incoming, now) {
       // 固定はサーバー側を正とする。外せるのは専用の操作（/api/sync/pin）だけ。
       pinned: before.pinned === true ? true : task.pinned === true,
       createdAt: before.createdAt ?? task.createdAt,
+      // 予定項目のIDは、端末が知らなくても消さない（実績との対応が切れるため）。
+      items: carryItems(before, task),
     };
   });
   const active = stored.active && Date.parse(stored.active.expiresAt ?? "") > now ? stored.active : undefined;
@@ -260,6 +271,28 @@ export function mergeGoals(stored = [], incoming = []) {
   }
   return [...byId.values()];
 }
+
+/**
+ * 予定項目のIDを引き継ぐ。
+ * items を知らない古い端末から届いた予定でも、サーバー側のIDを保つ。
+ */
+function carryItems(before, incoming) {
+  const storedItems = itemsOf(before);
+  const pool = new Map();
+  for (const item of storedItems) {
+    if (!pool.has(item.questionId)) pool.set(item.questionId, []);
+    pool.get(item.questionId).push(item);
+  }
+  return (incoming.items ?? []).map((item) => {
+    const known = storedItems.find((entry) => entry.itemId === item.itemId);
+    if (known) return { ...known, ...item, itemId: known.itemId, originalDate: known.originalDate ?? item.originalDate };
+    const reused = pool.get(item.questionId)?.shift();
+    return reused ? { ...reused, questionId: item.questionId } : item;
+  });
+}
+
+/** 移動（繰り越し）イベントは追加専用。id が同じものは1件として扱う。 */
+export { normalizeMove };
 
 /** 学習記録から統計を数え直す。合計値そのものは同期しない。 */
 export function computeStats(records, questions = [], { timezoneOffsetMinutes } = {}) {

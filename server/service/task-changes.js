@@ -23,8 +23,9 @@ import {
   rejectUnknownKeys,
 } from "../core/validate.js";
 import { isDateKey } from "../../src/datetime.js";
+import { MOVE_KINDS, MOVE_REASONS, itemsOf, newItemId, reconcileItems } from "../../src/plan-items.js";
 
-export const CHANGE_OPS = Object.freeze(["add", "update", "remove", "move", "reorder"]);
+export const CHANGE_OPS = Object.freeze(["add", "update", "remove", "move", "reorder", "carryOver"]);
 
 export const CHANGE_LIMITS = Object.freeze({
   changesPerRequest: 50,
@@ -184,7 +185,7 @@ export function parseChangeRequest(args = {}) {
       };
     }
     if (op === "move") {
-      rejectUnknownKeys(raw, ["op", "taskId", "fromDate", "toDate", "position"], field);
+      rejectUnknownKeys(raw, ["op", "taskId", "fromDate", "toDate", "position", "reason", "reasonNote", "kind"], field);
       return {
         op,
         taskId: readTaskId(raw.taskId, `${field}.taskId`),
@@ -192,6 +193,26 @@ export function parseChangeRequest(args = {}) {
         toDate: readDate(raw.toDate, `${field}.toDate`),
         position: raw.position === undefined ? null
           : readInteger(raw.position, `${field}.position`, { min: 0, max: CHANGE_LIMITS.tasksPerDay }),
+        reason: readEnum(raw.reason, `${field}.reason`, [...MOVE_REASONS], { fallback: "unspecified" }),
+        reasonNote: readString(raw.reasonNote, `${field}.reasonNote`, { max: 200 }),
+        kind: readEnum(raw.kind, `${field}.kind`, [...MOVE_KINDS], { fallback: "reschedule" }),
+      };
+    }
+    if (op === "carryOver") {
+      rejectUnknownKeys(raw, ["op", "taskId", "fromDate", "toDate", "itemIds", "reason", "reasonNote", "kind"], field);
+      return {
+        op,
+        taskId: readTaskId(raw.taskId, `${field}.taskId`),
+        fromDate: readDate(raw.fromDate, `${field}.fromDate`, { required: false }),
+        toDate: readDate(raw.toDate, `${field}.toDate`),
+        itemIds: raw.itemIds === undefined || raw.itemIds === null
+          ? null
+          : readArray(raw.itemIds, `${field}.itemIds`, { min: 1, max: CHANGE_LIMITS.questionIdsPerTask })
+            .map((id, position) => readString(id, `${field}.itemIds[${position}]`, { required: true, max: 120 })),
+        // 理由は任意。渡されなければ「未入力」のまま残す（推測を事実にしない）。
+        reason: readEnum(raw.reason, `${field}.reason`, [...MOVE_REASONS], { fallback: "unspecified" }),
+        reasonNote: readString(raw.reasonNote, `${field}.reasonNote`, { max: 200 }),
+        kind: readEnum(raw.kind, `${field}.kind`, [...MOVE_KINDS], { fallback: "carry_over" }),
       };
     }
     rejectUnknownKeys(raw, ["op", "date", "taskIds"], field);
@@ -236,7 +257,12 @@ function insertAt(plan, task, position) {
 }
 
 function applyBody(task, body, at) {
-  if (body.questionIds !== undefined) task.questionIds = [...body.questionIds];
+  if (body.questionIds !== undefined) {
+    // 問題を入れ替えても、残る問題の予定項目のIDは引き継ぐ
+    // （実績との対応が切れないように）。
+    task.items = reconcileItems(task, [...body.questionIds]);
+    task.questionIds = task.items.map((item) => item.questionId);
+  }
   if (body.kind !== undefined) task.kind = body.kind;
   if (body.title !== undefined) {
     if (body.title) task.title = body.title;
@@ -268,6 +294,8 @@ export function applyChanges({
   actorKind = "ai",
   updatedBy = "ai",
   knownQuestionIds = null,
+  // すでに実施された予定項目（学習記録がある itemId）。繰り越しの対象から外す。
+  doneItemIds = null,
   newId = () => `task_${Math.random().toString(36).slice(2, 10)}`,
 }) {
   const at = new Date(now).toISOString();
@@ -315,6 +343,7 @@ export function applyChanges({
   const removed = [];
   const updated = [];
   const moved = [];
+  const moveEvents = [];
 
   for (let index = 0; index < request.changes.length; index += 1) {
     const change = request.changes[index];
@@ -357,6 +386,7 @@ export function applyChanges({
       const task = applyBody({
         id: newId(),
         questionIds: [],
+        items: [],
         kind: "new",
         order: 0,
         completed: false,
@@ -364,6 +394,8 @@ export function applyChanges({
         createdAt: at,
         source: actorKind,
       }, change.task, at);
+      // 当初の予定日は、作った日のまま（あとで繰り越しても変えない）。
+      task.items = task.items.map((item) => ({ ...item, originalDate: change.date }));
       insertAt(draft[change.date], task, change.task.position ?? null);
       created.push({ date: change.date, taskId: task.id, tempId: change.tempId ?? null });
       touched.add(change.date);
@@ -405,6 +437,127 @@ export function applyChanges({
       renumber(plan);
       updated.push({ date: change.date, taskId: null, field: "order" });
       touched.add(change.date);
+      continue;
+    }
+
+    if (change.op === "carryOver") {
+      const missingTo = needDate(change.toDate);
+      if (missingTo) return missingTo;
+      const found = locate(change.taskId, change.fromDate);
+      if (!found) {
+        return conflict("task_not_found", {
+          where,
+          taskId: change.taskId,
+          message: `タスク ${change.taskId} が見つかりません。日付が違うか、すでに消されています。`,
+          nextAction: "getTasksInRange で今のタスクIDを取り直してください。",
+        });
+      }
+      const missingFrom = needDate(found.date);
+      if (missingFrom) return missingFrom;
+      if (found.date === change.toDate) {
+        return conflict("invalid_change", { where, message: "移動元と移動先が同じ日です。" });
+      }
+      if (actorKind === "ai") {
+        const reason = protectionOf(found.task, draft[found.date], now);
+        if (reason) {
+          return conflict("protected_task", {
+            where, taskId: change.taskId, date: found.date, protection: reason,
+            message: protectionMessage(reason),
+            nextAction: "このタスクはそのままにして、ほかのタスクで調整してください。",
+          });
+        }
+      }
+
+      const done = doneItemIds ?? new Set();
+      const all = itemsOf(found.task);
+      const pending = all.filter((item) => !done.has(item.itemId));
+      const wanted = change.itemIds
+        ? change.itemIds.map((itemId) => all.find((item) => item.itemId === itemId) ?? { itemId, missing: true })
+        : pending;
+      const missingItem = wanted.find((item) => item.missing);
+      if (missingItem) {
+        return conflict("item_not_found", {
+          where,
+          itemId: missingItem.itemId,
+          taskId: found.task.id,
+          date: found.date,
+          message: `予定項目 ${missingItem.itemId} が ${found.date} のタスク ${found.task.id} にありません。`,
+          nextAction: "getTasksInRange で今の itemId を取り直してください。",
+        });
+      }
+      const alreadyDone = wanted.filter((item) => done.has(item.itemId));
+      if (alreadyDone.length) {
+        return conflict("already_done", {
+          where,
+          itemIds: alreadyDone.map((item) => item.itemId),
+          date: found.date,
+          message: "すでに取り組んだ予定は動かせません（実績はその日に残します）。未実施の分だけを指定してください。",
+          nextAction: "getUnfinishedPlanItems か getTasksInRange の pending を見て、未実施の itemId だけを渡してください。",
+        });
+      }
+      if (!wanted.length) {
+        return conflict("nothing_to_carry_over", {
+          where,
+          taskId: found.task.id,
+          date: found.date,
+          message: "未実施の予定がありません（すべて実施済みです）。",
+        });
+      }
+
+      const carried = wanted.map((item) => ({ ...item, carriedCount: (item.carriedCount ?? 0) + 1 }));
+      const carriedIds = new Set(carried.map((item) => item.itemId));
+      const keep = all.filter((item) => !carriedIds.has(item.itemId));
+      const source = draft[found.date].tasks.find((entry) => entry.id === found.task.id);
+
+      if (keep.length) {
+        // 一部だけ動かす。実施済みの分は元の日に残す。
+        source.items = keep;
+        source.questionIds = keep.map((item) => item.questionId);
+        source.updatedAt = at;
+        updated.push({ date: found.date, taskId: source.id, field: "items" });
+      } else {
+        const position = draft[found.date].tasks.findIndex((entry) => entry.id === source.id);
+        draft[found.date].tasks.splice(position, 1);
+        renumber(draft[found.date]);
+        removed.push({ date: found.date, taskId: source.id });
+      }
+
+      if (draft[change.toDate].tasks.length >= CHANGE_LIMITS.tasksPerDay) {
+        return conflict("invalid_change", {
+          where,
+          message: `${change.toDate} の予定は${CHANGE_LIMITS.tasksPerDay}件までです。`,
+        });
+      }
+      const carriedTask = {
+        id: newId(),
+        items: carried,
+        questionIds: carried.map((item) => item.questionId),
+        kind: found.task.kind,
+        order: 0,
+        completed: false,
+        pinned: false,
+        ...(found.task.timeLimitSeconds ? { timeLimitSeconds: found.task.timeLimitSeconds } : {}),
+        ...(found.task.title ? { title: found.task.title } : {}),
+        createdAt: at,
+        updatedAt: at,
+        source: actorKind,
+        // どのタスクから繰り越されたか。
+        carriedFrom: { taskId: found.task.id, date: found.date },
+      };
+      insertAt(draft[change.toDate], carriedTask, null);
+      created.push({ date: change.toDate, taskId: carriedTask.id, tempId: null, carriedFrom: found.date });
+      moveEvents.push({
+        fromDate: found.date,
+        toDate: change.toDate,
+        taskId: found.task.id,
+        toTaskId: carriedTask.id,
+        kind: change.kind ?? "carry_over",
+        reason: change.reason ?? "unspecified",
+        reasonNote: change.reasonNote ?? null,
+        items: carried,
+      });
+      touched.add(found.date);
+      touched.add(change.toDate);
       continue;
     }
 
@@ -483,8 +636,26 @@ export function applyChanges({
     plan.tasks.splice(position, 1);
     renumber(plan);
     task.updatedAt = at;
+    const movedItems = itemsOf(task).map((item) => ({ ...item }));
+    if (change.toDate !== found.date) {
+      // 実施済みの記録は実施日に残る。動くのは「これからやる予定」だけ。
+      task.items = movedItems.map((item) => ({ ...item, carriedCount: (item.carriedCount ?? 0) + 1 }));
+      task.questionIds = task.items.map((item) => item.questionId);
+    }
     insertAt(draft[change.toDate], task, change.position);
     moved.push({ taskId: task.id, from: found.date, to: change.toDate });
+    if (change.toDate !== found.date) {
+      moveEvents.push({
+        fromDate: found.date,
+        toDate: change.toDate,
+        taskId: task.id,
+        toTaskId: task.id,
+        kind: change.kind ?? "reschedule",
+        reason: change.reason ?? "unspecified",
+        reasonNote: change.reasonNote ?? null,
+        items: movedItems,
+      });
+    }
     touched.add(found.date);
     touched.add(change.toDate);
   }
@@ -516,7 +687,9 @@ export function applyChanges({
       removed,
       updated,
       moved,
+      carriedOver: moveEvents.filter((event) => event.kind === "carry_over").length,
     },
+    moves: moveEvents,
   };
 }
 

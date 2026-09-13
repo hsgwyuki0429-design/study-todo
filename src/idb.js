@@ -3,7 +3,7 @@
 // ドメインロジックは api.js 側に置く。
 
 const DB_NAME = 'aochart';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export const STORES = {
   questions: 'questions',
@@ -15,6 +15,9 @@ export const STORES = {
   // クラウドへまだ送れていない変更を貯めておく場所（オフライン時の控え）。
   // 既存のストアには手を触れない、足すだけの追加なのでデータは失われない。
   outbox: 'outbox',
+  // 予定を別の日へ動かした記録（繰り越し・予定変更）。学習記録と同じく追加専用で、
+  // id で重ね合わせるだけなので、同期を何度やり直しても増えない。
+  moves: 'moves',
 };
 
 let dbPromise = null;
@@ -55,6 +58,12 @@ function open() {
       if (!db.objectStoreNames.contains(STORES.outbox)) {
         const s = db.createObjectStore(STORES.outbox, { keyPath: 'key' });
         s.createIndex('type', 'type');
+      }
+      // v3 で足した。既存のストアには触れないので、いままでのデータは残る。
+      if (!db.objectStoreNames.contains(STORES.moves)) {
+        const s = db.createObjectStore(STORES.moves, { keyPath: 'id' });
+        s.createIndex('fromDate', 'fromDate');
+        s.createIndex('toDate', 'toDate');
       }
     };
     req.onsuccess = () => resolve(req.result);

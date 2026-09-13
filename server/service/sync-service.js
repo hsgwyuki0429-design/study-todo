@@ -31,6 +31,7 @@ import {
   mergeTaskPlan,
   normalizeChallengeResult,
   normalizeGoal,
+  normalizeMove,
   normalizeQuestion,
   normalizeRecord,
   normalizeTaskPlan,
@@ -50,6 +51,8 @@ export const SYNC_KEYS = Object.freeze({
   changes: "studytodo:changes",
   // タスクIDごとの「今どの日にあるか」。古い端末が移動前の日へ戻すのを防ぐ。
   placements: "studytodo:placements",
+  // 予定を別の日へ動かした記録（繰り越し・予定変更）。追加専用。
+  moves: "studytodo:moves",
 });
 
 export const SYNC_LIMITS = Object.freeze({
@@ -65,6 +68,10 @@ export const SYNC_LIMITS = Object.freeze({
   planLookaheadDays: 400,
   // 変更の記録（取り消しに使う）を何件残すか。
   changeEntries: 50,
+  // 繰り越しの記録。追加専用で、1回に送れる数と持っておく数の上限。
+  movesPerPush: 200,
+  moves: 2000,
+  movesPerPull: 500,
   // 「いま解いている」の記録を何件覚えておくか／どれだけで期限切れにするか。
   placements: 2000,
   activityTtlSeconds: 15 * 60,
@@ -100,6 +107,7 @@ const DEFAULT_QUESTIONS = { version: 0, hash: null, updatedAt: null, questions: 
 const DEFAULT_LOG = { entries: [] };
 const DEFAULT_CHANGES = { entries: [] };
 const DEFAULT_PLACEMENTS = { tasks: {} };
+const DEFAULT_MOVES = { moves: {} };
 
 export function createSyncService({ storage, now = () => Date.now() }) {
   async function readDoc(key, defaults) {
@@ -287,6 +295,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     updatedBy = "ai",
     tool = "applyTaskChanges",
     knownQuestionIds = null,
+    doneItemIds = null,
     undoOf = null,
   }) {
     const fingerprint = fingerprintOf(request);
@@ -321,6 +330,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         actorKind,
         updatedBy,
         knownQuestionIds,
+        doneItemIds,
         newId: () => uid("task"),
       });
       if (!outcome.ok) {
@@ -338,6 +348,22 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       await tx.put(SYNC_KEYS.placements, recordPlacements(placements, outcome.plans, at));
 
       const changeId = uid("chg");
+      // 予定を別の日へ動かしたことは、追加専用のイベントとしても残す。
+      // 同じ operationId の再送では、ここまで来ないので二重にならない。
+      const moves = (outcome.moves ?? []).map((event, index) => normalizeMove({
+        ...event,
+        id: `${changeId}-m${index}`,
+        at,
+        actorKind,
+        actorName,
+        changeId,
+      }, { now: now() }));
+      if (moves.length) {
+        const document = (await tx.get(SYNC_KEYS.moves)) ?? structuredClone(DEFAULT_MOVES);
+        const { merged } = mergeEvents(document.moves ?? {}, moves);
+        document.moves = capMoves(merged);
+        await tx.put(SYNC_KEYS.moves, document);
+      }
       const result = {
         ok: true,
         changeId,
@@ -345,6 +371,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         reason: request.reason || null,
         revisions: outcome.revisions,
         summary: outcome.summary,
+        moves,
         days: Object.values(outcome.plans).map(summarizePlan),
       };
       const record = {
@@ -493,6 +520,50 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     return { ok: true, date, taskId, expiresAt: taskId === null ? null : expiresAt };
   }
 
+  /** 繰り越しの記録は追加専用。増えすぎたら古いものから捨てる。 */
+  function capMoves(moves) {
+    const entries = Object.entries(moves);
+    if (entries.length <= SYNC_LIMITS.moves) return moves;
+    entries.sort((left, right) => String(right[1].at).localeCompare(String(left[1].at)));
+    return Object.fromEntries(entries.slice(0, SYNC_LIMITS.moves));
+  }
+
+  /**
+   * 繰り越し・予定変更の記録を新しい順に返す。
+   * 件数が多いので、必ず上限つきで返し、続きがあることを知らせる。
+   */
+  async function readMoves({ limit = 50, offset = 0, from = null, to = null, itemId = null, questionId = null } = {}) {
+    const document = await readDoc(SYNC_KEYS.moves, DEFAULT_MOVES);
+    // 同じ時刻の記録が並んだときは、あとから入ったものを新しいものとして扱う。
+    let list = Object.values(document.moves ?? {}).reverse();
+    if (from) list = list.filter((move) => move.toDate >= from || move.fromDate >= from);
+    if (to) list = list.filter((move) => move.toDate <= to || move.fromDate <= to);
+    if (itemId) list = list.filter((move) => move.items.some((item) => item.itemId === itemId));
+    if (questionId) list = list.filter((move) => move.items.some((item) => item.questionId === questionId));
+    list.sort((left, right) => String(right.at).localeCompare(String(left.at)));
+    const page = list.slice(offset, offset + limit);
+    return {
+      total: list.length,
+      offset,
+      count: page.length,
+      nextOffset: offset + page.length < list.length ? offset + page.length : null,
+      moves: page,
+    };
+  }
+
+  /** 端末から届いた繰り越しの記録を預かる（id で重複を除くだけ）。 */
+  async function saveMoves(incoming = []) {
+    const normalized = incoming.map((move) => normalizeMove(move, { now: now() })).filter(Boolean);
+    if (!normalized.length) return { added: 0 };
+    let added = 0;
+    await updateDocument(storage, SYNC_KEYS.moves, (document) => {
+      const merged = mergeEvents(document.moves ?? {}, normalized);
+      document.moves = capMoves(merged.merged);
+      added = merged.added;
+    }, { defaults: structuredClone(DEFAULT_MOVES) });
+    return { added };
+  }
+
   /** 保存先が何を保証できるか。画面とAIへ正直に返すために使う。 */
   function storageCapabilities() {
     return {
@@ -519,6 +590,8 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     applyTaskChanges,
     undoTaskChange,
     readChanges,
+    readMoves,
+    saveMoves,
     readPlacements,
     setTaskPinned,
     reportActivity,
@@ -647,6 +720,10 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       if (taskPlans.length > SYNC_LIMITS.taskPlansPerPush) {
         fail(`1回に送れる予定は${SYNC_LIMITS.taskPlansPerPush}日ぶんまでです。`, "taskPlans");
       }
+      const moves = Array.isArray(payload.moves) ? payload.moves : [];
+      if (moves.length > SYNC_LIMITS.movesPerPush) {
+        fail(`1回に送れる繰り越しの記録は${SYNC_LIMITS.movesPerPush}件までです。`, "moves");
+      }
       const goals = Array.isArray(payload.goals) ? payload.goals : [];
       if (goals.length > SYNC_LIMITS.goalsPerPush) fail(`目標は${SYNC_LIMITS.goalsPerPush}件までです。`, "goals");
 
@@ -710,6 +787,8 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         }, { defaults: structuredClone(DEFAULT_PLACEMENTS) });
       }
 
+      const addedMoves = (await saveMoves(moves)).added;
+
       if (goals.length) {
         const incoming = goals.map((goal) => normalizeGoal(goal, { now: at })).filter(Boolean);
         await updateDocument(storage, SYNC_KEYS.goals, (document) => {
@@ -751,6 +830,8 @@ export function createSyncService({ storage, now = () => Date.now() }) {
           invalidRecords: skippedRecords,
           challenges: addedChallenges,
           taskPlans: planOutcomes,
+          moves: addedMoves,
+          duplicatedMoves: moves.length - addedMoves,
           goals: goals.length,
         },
         questionsStored,
@@ -788,6 +869,8 @@ export function createSyncService({ storage, now = () => Date.now() }) {
           ? challenges
           : challenges.filter((result) => Number(result.syncedAt ?? 0) > sinceMs),
         taskPlans: plans,
+        // 繰り越しの記録も配る（追加専用なので、重ねても増えない）。
+        moves: (await readMoves({ limit: SYNC_LIMITS.movesPerPull })).moves,
         goals,
         questions: {
           version: questions.version,

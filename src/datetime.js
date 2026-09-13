@@ -58,6 +58,17 @@ export function isDateKey(value) {
   return Number.isFinite(ms) && dateKeyOf(ms, 0) === value;
 }
 
+/**
+ * その日が属する週の初日（月曜）。カレンダーは月曜はじまりで数える。
+ * 曜日の計算は地域差を避けるため UTC で行う（日付キーは日本時間で作られている）。
+ */
+export function startOfWeekKey(dateKey) {
+  const ms = Date.parse(`${dateKey}T00:00:00Z`);
+  if (!Number.isFinite(ms)) return dateKey;
+  const weekday = new Date(ms).getUTCDay();
+  return dateKeyOf(ms - ((weekday + 6) % 7) * DAY_MS, 0);
+}
+
 /** 学習記録の月シャード用のキー（YYYY-MM）。 */
 export function monthKeyOf(value, offsetMinutes = DEFAULT_TIMEZONE_OFFSET_MINUTES) {
   const key = dateKeyOf(value, offsetMinutes);

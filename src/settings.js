@@ -53,21 +53,9 @@ export async function renderSettings(screen) {
 
   const list = el('div', 'list');
 
-  list.append(el('div', 'section-head', 'カレンダー'));
-  list.append(
-    choiceRow('表示方式', '日ごとの達成率の見せ方',
-      [['ring', 'リング型'], ['fill', '塗り型']],
-      state.settings.calendarStyle,
-      (v) => update({ calendarStyle: v }))
-  );
-  list.append(
-    choiceRow('塗り型のカラーバリエーション', '塗り型を選んでいるときのみ有効',
-      [['random', 'ランダム'], ['month', '月ごと'], ['week', '週ごと']],
-      state.settings.fillVariation,
-      (v) => update({ fillVariation: v }),
-      state.settings.calendarStyle !== 'fill')
-  );
-
+  // カレンダーは週ぎめの正方形のマスに統一したため、
+  // 月表示の「リング型／塗り型」の切り替えは無くなった。
+  // 保存済みの設定値は消さずに残してある（古いバックアップもそのまま読める）。
   list.append(el('div', 'section-head', '表示'));
   list.append(
     choiceRow('ダークモード', null,

@@ -14,7 +14,7 @@ import {
   readString,
   rejectUnknownKeys,
 } from "../core/validate.js";
-import { dateKeyOf, isDateKey, normalizeOffset, startOfDayMs, todayKeyOf } from "../../src/datetime.js";
+import { dateKeyOf, isDateKey, normalizeOffset, shiftDateKey, startOfDayMs, todayKeyOf } from "../../src/datetime.js";
 import { EVALUATIONS, MISTAKE_EVALUATIONS, TASK_KINDS, computeStats } from "./merge.js";
 import {
   CHANGE_LIMITS,
@@ -25,9 +25,10 @@ import {
   protectionOf,
 } from "./task-changes.js";
 import { StorageCapabilityError } from "../storage/driver.js";
+import { MOVE_REASONS, itemsOf, splitPlanItems } from "../../src/plan-items.js";
 import { buildOutline, compareQuestions, questionHaystack } from "../../src/question-order.js";
 
-export const DATA_VERSION = "1.3.0";
+export const DATA_VERSION = "1.4.0";
 
 export const SERVICE_LIMITS = Object.freeze({
   listLimitDefault: 50,
@@ -283,6 +284,12 @@ export function createStudyService({ sync, now = () => Date.now() }) {
     };
   }
 
+  /** すでに取り組まれた予定項目（学習記録が結び付いているもの）。 */
+  async function doneItemIds() {
+    const records = await sync.readAllRecords();
+    return new Set(records.filter((record) => record.planItemId).map((record) => record.planItemId));
+  }
+
   /** 保存先が保証できないときは、黙って書かずに理由を返す。 */
   async function runChanges({ request, actor, toolName, knownQuestionIds, actorKind = "ai" }) {
     const actorName = actor?.clientName ?? actor?.tokenLabel ?? "AI";
@@ -294,6 +301,7 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         updatedBy: actorKind === "ai" ? `ai:${actorName}` : "app",
         tool: toolName,
         knownQuestionIds,
+        doneItemIds: await doneItemIds(),
       });
     } catch (error) {
       if (error instanceof StorageCapabilityError) {
@@ -308,9 +316,21 @@ export function createStudyService({ sync, now = () => Date.now() }) {
     }
   }
 
-  /** 予定1件を、AIが読める形（保護の状態つき）にする。 */
-  function decorateTask(task, plan, questions) {
+  /**
+   * 予定1件を、AIが読める形（保護の状態・予定項目つき）にする。
+   *
+   * items は「この予定の中の1回の取り組み」1件ずつで、itemId が安定した識別子。
+   * done / pending は、学習記録の planItemId と突き合わせた結果。
+   */
+  function decorateTask(task, plan, questions, records = []) {
     const protection = protectionOf(task, plan, now());
+    const split = splitPlanItems(task, records, { date: plan.date, allowLegacyMatch: false });
+    const describe = (item) => ({
+      ...item,
+      label: questions.get(item.questionId)?.label ?? item.questionId,
+      type: questions.get(item.questionId)?.type ?? null,
+      carriedOver: Boolean(item.originalDate && item.originalDate !== plan.date),
+    });
     return {
       ...task,
       pinned: task.pinned === true,
@@ -319,6 +339,35 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       locked: Boolean(protection),
       lockedReason: protection,
       labels: (task.questionIds ?? []).map((id) => questions.get(id)?.label ?? id),
+      items: split.items.map(describe),
+      doneItemIds: split.done.map((item) => item.itemId),
+      pendingItemIds: split.pending.map((item) => item.itemId),
+      ...(task.carriedFrom ? { carriedFrom: task.carriedFrom } : {}),
+    };
+  }
+
+  /** その日の学習記録を、AIが読める形にする（1件＝1回の取り組み）。 */
+  function describeAttempt(record, questions) {
+    const question = questions.get(record.questionId);
+    return {
+      recordId: record.id,
+      questionId: record.questionId,
+      label: question?.label ?? record.questionId,
+      type: question?.type ?? null,
+      subject: question?.subject ?? null,
+      chapter: question?.chapter ?? null,
+      section: question?.section ?? null,
+      timestamp: record.timestamp,
+      date: dateKeyOf(record.timestamp),
+      evaluation: record.evaluation,
+      evaluationLabel: EVALUATION_LABELS[record.evaluation] ?? record.evaluation,
+      durationSeconds: record.durationSeconds,
+      inChallenge: Boolean(record.challengeId),
+      challengeId: record.challengeId ?? null,
+      planTaskId: record.planTaskId ?? null,
+      planItemId: record.planItemId ?? null,
+      // 予定との対応が分からない、この仕組みより前の記録。
+      legacy: !record.planItemId,
     };
   }
 
@@ -476,7 +525,10 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       records.forEach((record) => { counts[record.evaluation] = (counts[record.evaluation] || 0) + 1; });
       return {
         question,
+        // 「この問題に何回取り組んだか」。同じ日に2回解けば2回と数える。
         attempts: records.length,
+        totalAttempts: records.length,
+        attemptsNote: "1回の取り組み＝1件の記録です。全部を見るときは getQuestionAttempts（区切って取れる）を使ってください。",
         evaluationCounts: counts,
         lastEvaluation: records[0]?.evaluation ?? null,
         averageSeconds: records.length
@@ -582,23 +634,33 @@ export function createStudyService({ sync, now = () => Date.now() }) {
 
     async getTasksForDate(args = {}) {
       const date = readDateArg(args.date, "date", args);
-      const [stored, questions] = await Promise.all([sync.readTaskPlan(date), questionMap()]);
+      const [stored, questions, allRecords] = await Promise.all([
+        sync.readTaskPlan(date), questionMap(), sync.readAllRecords(),
+      ]);
       const plan = stored ?? emptyPlan(date);
-      const tasks = (plan.tasks ?? []).map((task) => decorateTask(task, plan, questions));
+      const offset = normalizeOffset(args.timezoneOffsetMinutes);
+      const dayRecords = allRecords.filter((record) => dateKeyOf(record.timestamp, offset) === date);
+      const tasks = (plan.tasks ?? []).map((task) => decorateTask(task, plan, questions, allRecords));
       const active = activeStateOf(plan, now());
       return {
         date,
         isToday: date === today(args),
         taskCount: tasks.length,
         tasks,
+        // その日に実際に取り組んだ記録（予定に無かったものも入る）。
+        attempts: dayRecords.map((record) => describeAttempt(record, questions)),
+        attemptCount: dayRecords.length,
+        pendingItemCount: tasks.reduce((sum, task) => sum + task.pendingItemIds.length, 0),
         // 予定を変えるときは、この revision をそのまま expectedRevisions へ渡す。
         revision: planRevisionOf(plan),
         updatedAt: plan.updatedAt ?? null,
         updatedBy: plan.updatedBy ?? null,
         active: active ? { taskId: active.taskId, questionId: active.questionId ?? null, startedAt: active.startedAt } : null,
         lockedTaskIds: tasks.filter((task) => task.locked).map((task) => task.id),
-        note: tasks.length ? null : `${date} の予定はまだありません。`,
+        note: tasks.length || dayRecords.length ? null : `${date} の予定も記録もまだありません。`,
         protectionNote: "locked が true のタスク（完了済み・実行中・固定）は、AIからは変更・削除・移動できません。",
+        attemptNote: "attempts は「実際に取り組んだ1回」ごとの記録です。同じ問題を2回解けば2件になります。"
+          + " planItemId が入っていない記録は、この仕組みより前のもので、予定との対応は分かりません。",
       };
     },
 
@@ -606,24 +668,134 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       const from = readDateArg(args.from, "from", args);
       const to = readDateArg(args.to, "to", args);
       if (to < from) fail("to は from 以降の日付にしてください。", "to");
-      const [plans, questions] = await Promise.all([sync.readTaskPlansInRange(from, to), questionMap()]);
+      const includeAttempts = args.includeAttempts !== false;
+      const offset = normalizeOffset(args.timezoneOffsetMinutes);
+      const [plans, questions, allRecords] = await Promise.all([
+        sync.readTaskPlansInRange(from, to), questionMap(), sync.readAllRecords(),
+      ]);
+      const byDate = new Map(plans.map((plan) => [plan.date, plan]));
+      // 予定が無くても、その日に取り組んだ記録があれば日として返す。
+      const dates = new Set(plans.map((plan) => plan.date));
+      const attemptsByDate = new Map();
+      for (const record of allRecords) {
+        const date = dateKeyOf(record.timestamp, offset);
+        if (date < from || date > to) continue;
+        if (!attemptsByDate.has(date)) attemptsByDate.set(date, []);
+        attemptsByDate.get(date).push(record);
+        dates.add(date);
+      }
       return {
         from,
         to,
-        days: plans.map((plan) => {
+        days: [...dates].sort().map((date) => {
+          const plan = byDate.get(date) ?? emptyPlan(date);
           const active = activeStateOf(plan, now());
+          const tasks = (plan.tasks ?? []).map((task) => decorateTask(task, plan, questions, allRecords));
+          const dayRecords = attemptsByDate.get(date) ?? [];
           return {
-            date: plan.date,
-            taskCount: (plan.tasks ?? []).length,
+            date,
+            taskCount: tasks.length,
             revision: planRevisionOf(plan),
-            updatedAt: plan.updatedAt,
-            updatedBy: plan.updatedBy,
+            updatedAt: plan.updatedAt ?? null,
+            updatedBy: plan.updatedBy ?? null,
             active: active ? { taskId: active.taskId, questionId: active.questionId ?? null } : null,
-            tasks: (plan.tasks ?? []).map((task) => decorateTask(task, plan, questions)),
+            tasks,
+            attemptCount: dayRecords.length,
+            pendingItemCount: tasks.reduce((sum, task) => sum + task.pendingItemIds.length, 0),
+            ...(includeAttempts ? { attempts: dayRecords.map((record) => describeAttempt(record, questions)) } : {}),
           };
         }),
         protectionNote: "locked が true のタスク（完了済み・実行中・固定）は、AIからは変更・削除・移動できません。",
         changeNote: "予定を変えるときは、変える日すべての date と revision を expectedRevisions に入れて applyTaskChanges を呼んでください。",
+      };
+    },
+
+    /** まだ取り組まれていない予定項目。繰り越しの相談に使う。 */
+    async getUnfinishedPlanItems(args = {}) {
+      const to = readDateArg(args.to, "to", args);
+      const from = args.from === undefined || args.from === null || args.from === ""
+        ? shiftDateKey(to, -30)
+        : readDateArg(args.from, "from", args);
+      if (to < from) fail("to は from 以降の日付にしてください。", "to");
+      const [plans, questions, records] = await Promise.all([
+        sync.readTaskPlansInRange(from, to), questionMap(), sync.readAllRecords(),
+      ]);
+      const todayKey = today(args);
+      const days = plans.map((plan) => {
+        const tasks = (plan.tasks ?? [])
+          .map((task) => {
+            const split = splitPlanItems(task, records, { date: plan.date, allowLegacyMatch: false });
+            if (!split.pending.length) return null;
+            return {
+              taskId: task.id,
+              kind: task.kind,
+              ...(task.title ? { title: task.title } : {}),
+              locked: Boolean(protectionOf(task, plan, now())),
+              doneItemCount: split.done.length,
+              pendingItems: split.pending.map((item) => ({
+                ...item,
+                label: questions.get(item.questionId)?.label ?? item.questionId,
+                carriedOver: Boolean(item.originalDate && item.originalDate !== plan.date),
+              })),
+            };
+          })
+          .filter(Boolean);
+        return { date: plan.date, overdue: plan.date < todayKey, revision: planRevisionOf(plan), tasks };
+      }).filter((day) => day.tasks.length);
+      return {
+        from,
+        to,
+        today: todayKey,
+        total: days.reduce((sum, day) => sum + day.tasks.reduce((n, task) => n + task.pendingItems.length, 0), 0),
+        days,
+        note: "繰り越すときは applyTaskChanges の carryOver に、この itemId を渡してください。"
+          + " 理由（reason）は利用者が言ったときだけ入れ、推測で埋めないでください。",
+      };
+    },
+
+    /** 1つの問題の、すべての取り組み（古い順）。件数が多いので必ず区切って返す。 */
+    async getQuestionAttempts(args = {}) {
+      const questionId = readString(args.id, "id", { required: true, max: 120 });
+      const questions = await questionMap();
+      const records = (await sync.readAllRecords())
+        .filter((record) => record.questionId === questionId)
+        .sort((left, right) => String(left.timestamp).localeCompare(String(right.timestamp)));
+      const limit = readInteger(args.limit, "limit", { min: 1, max: SERVICE_LIMITS.historyLimitMax, fallback: 50 });
+      const offset = readInteger(args.offset, "offset", { min: 0, fallback: 0 });
+      const page = records.slice(offset, offset + limit);
+      return {
+        questionId,
+        question: questions.get(questionId) ?? null,
+        // 「その問題に何回取り組んだか」。教材全体の周回数とは別のもの。
+        totalAttempts: records.length,
+        offset,
+        count: page.length,
+        nextOffset: offset + page.length < records.length ? offset + page.length : null,
+        attempts: page.map((record) => describeAttempt(record, questions)),
+        note: "古い順です。チャレンジの中で解いた分も1回として入り、二重には数えません。",
+      };
+    },
+
+    /** 予定を別の日へ動かした記録（繰り越し・予定変更）。 */
+    async getPlanMoves(args = {}) {
+      const limit = readInteger(args.limit, "limit", { min: 1, max: 200, fallback: 50 });
+      const offset = readInteger(args.offset, "offset", { min: 0, fallback: 0 });
+      const from = args.from ? readDateArg(args.from, "from", args) : null;
+      const to = args.to ? readDateArg(args.to, "to", args) : null;
+      const questionId = readString(args.questionId, "questionId", { max: 120 });
+      const result = await sync.readMoves({ limit, offset, from, to, questionId });
+      const questions = await questionMap();
+      return {
+        ...result,
+        moves: result.moves.map((move) => ({
+          ...move,
+          items: move.items.map((item) => ({
+            ...item,
+            label: questions.get(item.questionId)?.label ?? item.questionId,
+          })),
+        })),
+        reasons: [...MOVE_REASONS],
+        note: "1件＝1回の移動です。繰り越しても取り組み回数は増えません（実績は実施した日にだけ残ります）。",
       };
     },
 

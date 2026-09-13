@@ -228,21 +228,25 @@ export async function undoPlanChange(changeId) {
 /** 送るものを組み立てる。初回（lastPulledAtMs が無い）はローカルの全部を送る。 */
 async function buildPayload(config) {
   const first = !config.lastPulledAtMs;
-  const [records, challenges, goals, questions, outbox, planMeta] = await Promise.all([
+  const [records, challenges, goals, questions, outbox, planMeta, moves] = await Promise.all([
     idb.all(STORES.records),
     idb.all(STORES.challenges),
     api.getGoals({ includeDeleted: true }),
     idb.all(STORES.questions),
     api.listOutbox(),
     api.getPlanMeta(),
+    idb.all(STORES.moves),
   ]);
 
   const queuedRecordIds = new Set(outbox.filter((e) => e.type === 'record').map((e) => e.id));
   const queuedChallengeIds = new Set(outbox.filter((e) => e.type === 'challenge').map((e) => e.id));
+  const queuedMoveIds = new Set(outbox.filter((e) => e.type === 'move').map((e) => e.id));
 
   // 初回はローカルにあるものを全部送る（クラウドが空でも消えないように）。
   const recordsToSend = first ? records : records.filter((r) => queuedRecordIds.has(r.id));
   const challengesToSend = first ? challenges : challenges.filter((c) => queuedChallengeIds.has(c.id));
+  // 繰り越しの記録も追加専用。同じ id を何度送っても増えない。
+  const movesToSend = first ? moves : moves.filter((m) => queuedMoveIds.has(m.id));
 
   // 予定は、この端末で変更した日ぶん（初回はローカルにある全日ぶん）。
   const tasks = await idb.all(STORES.tasks);
@@ -267,13 +271,16 @@ async function buildPayload(config) {
     first,
     localHash,
     outboxKeys: outbox
-      .filter((e) => (e.type === 'record' && queuedRecordIds.has(e.id)) || (e.type === 'challenge' && queuedChallengeIds.has(e.id)))
+      .filter((e) => (e.type === 'record' && queuedRecordIds.has(e.id))
+        || (e.type === 'challenge' && queuedChallengeIds.has(e.id))
+        || (e.type === 'move' && queuedMoveIds.has(e.id)))
       .map((e) => e.key),
     pushedDates: dirtyDates,
     payload: {
       since: config.lastPulledAtMs ?? null,
       records: recordsToSend.slice(0, PUSH_CHUNK),
       challenges: challengesToSend.slice(0, 100),
+      moves: movesToSend.slice(0, 200),
       taskPlans: taskPlans.slice(0, 120),
       goals,
       questions: questions.length && localHash !== config.questionsHash
@@ -286,7 +293,7 @@ async function buildPayload(config) {
 
 /** 受け取った内容をローカルへ重ねる。ここでも消す操作は一切しない。 */
 async function applySnapshot(snapshot) {
-  const applied = { records: 0, challenges: 0, plans: 0, goals: 0, questions: 0 };
+  const applied = { records: 0, challenges: 0, plans: 0, goals: 0, questions: 0, moves: 0 };
 
   const existingRecords = new Set((await idb.all(STORES.records)).map((r) => r.id));
   const newRecords = (snapshot.records ?? [])
@@ -304,6 +311,14 @@ async function applySnapshot(snapshot) {
   if (newChallenges.length) {
     await idb.putAll(STORES.challenges, newChallenges);
     applied.challenges = newChallenges.length;
+  }
+
+  // 繰り越しの記録も、無いものだけ足す（消さない・上書きしない）。
+  const existingMoves = new Set((await idb.all(STORES.moves)).map((m) => m.id));
+  const newMoves = (snapshot.moves ?? []).filter((m) => m && m.id && !existingMoves.has(m.id));
+  if (newMoves.length) {
+    await idb.putAll(STORES.moves, newMoves);
+    applied.moves = newMoves.length;
   }
 
   // 問題マスタは足すだけ。ローカルにしかない問題を消さない。

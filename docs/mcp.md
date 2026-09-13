@@ -166,8 +166,11 @@ OAuth 2.1 + PKCE（S256）に対応しているので、Bearer を直接設定�
 | `getStudyStats` | 学習時間・評価別・章別の統計、ミス率の高い章 |
 | `getRecentChallengeResult` | 直近のチャレンジ結果 |
 | `getChallengeResults` | チャレンジ結果の一覧 |
-| `getTodayTasks` | 今日（または指定日）の予定 |
-| `getTasksInRange` | 期間の予定 |
+| `getTodayTasks` | 今日（または指定日）の予定と、その日に実際に取り組んだ記録 |
+| `getTasksInRange` | 期間の予定と実績（日ごと） |
+| `getQuestionAttempts` | 1つの問題への取り組みを1回ずつ（古い順・ページングあり） |
+| `getUnfinishedPlanItems` | まだ取り組んでいない予定（繰り越しの相談に使う） |
+| `getPlanMoves` | 繰り越し・予定変更の履歴（当初の予定日と回数つき） |
 | `getGoals` | 長期の目標 |
 | `getRecentAiChanges` | AIが行った変更の記録 |
 
@@ -185,6 +188,83 @@ OAuth 2.1 + PKCE（S256）に対応しているので、Bearer を直接設定�
 | `updateGoal` | 長期の目標を書き換える |
 
 ---
+
+## 予定と実績の考え方
+
+3つを区別しています。
+
+| ことば | 何か | 識別子 |
+|---|---|---|
+| 問題 | 例題50 のような、問題マスタ上の対象 | `question.id` |
+| 予定項目 | 「その問題に今回取り組む」1件の予定 | `item.itemId` |
+| 学習記録 | 「実際に今回取り組んだ」1件の結果 | `record.id` |
+
+**1回の取り組み＝1件の学習記録**です。
+
+- 同じ問題を2周目に解けば記録は2件。同じ日に2回解いても2件です（上書きしません）。
+- やらなかった予定を別の日へ繰り越しても、**取り組み回数は増えません**。
+- 学習記録の `planItemId` で、どの予定に対する取り組みだったかが分かります。
+  この仕組みより前の記録には入っていないので `legacy: true` で返ります。
+  同じ問題・同じ日というだけで対応付けを作ることはしません。
+
+`getTodayTasks` / `getTasksInRange` は、この両方を返します。
+
+```jsonc
+{
+  "date": "2026-09-12",
+  "tasks": [{
+    "id": "task_ab12",
+    "kind": "new",
+    "items": [
+      { "itemId": "task_ab12#0", "questionId": "数学I-例題-90", "label": "基本例題 90",
+        "originalDate": "2026-09-11", "carriedCount": 1, "carriedOver": true },
+      { "itemId": "task_ab12#1", "questionId": "数学I-例題-91", "label": "基本例題 91",
+        "originalDate": "2026-09-12", "carriedCount": 0, "carriedOver": false }
+    ],
+    "doneItemIds": ["task_ab12#0"],
+    "pendingItemIds": ["task_ab12#1"],
+    "locked": false
+  }],
+  "attempts": [
+    { "recordId": "rec_1", "questionId": "数学I-例題-90", "evaluation": "perfect",
+      "durationSeconds": 320, "inChallenge": false, "planItemId": "task_ab12#0", "legacy": false }
+  ],
+  "attemptCount": 1,
+  "pendingItemCount": 1,
+  "revision": 7
+}
+```
+
+## 繰り越し（やり残しを別の日へ）
+
+1. `getUnfinishedPlanItems` で、まだ取り組んでいない `itemId` を確かめる
+2. `applyTaskChanges` の `carryOver` で動かす
+
+```jsonc
+{
+  "operationId": "2026-09-12-carry-over",
+  "expectedRevisions": [
+    { "date": "2026-09-12", "revision": 7 },
+    { "date": "2026-09-13", "revision": 2 }
+  ],
+  "changes": [
+    { "op": "carryOver", "taskId": "task_ab12", "fromDate": "2026-09-12", "toDate": "2026-09-13",
+      "itemIds": ["task_ab12#1"], "reason": "time_shortage" }
+  ]
+}
+```
+
+- `itemIds` を省くと、そのタスクの**未実施の分すべて**が動きます。
+- すでに取り組んだ分を混ぜると `already_done` で断られます（実績は実施した日に残します）。
+- 予定項目のID（`itemId`）は動かしても変わりません。`originalDate`（当初の予定日）も変わらず、
+  `carriedCount` が1つ増えます。
+- **理由（`reason`）は、利用者が言ったときだけ**入れてください。
+  `time_shortage`（時間不足）/ `too_hard`（難しかった）/ `schedule_change`（予定変更）/
+  `other` / `unspecified`（未入力）。推測した理由を事実として保存してはいけません。
+- 動かしたことは追加専用の記録として残り、`getPlanMoves` で読めます。
+  同じ `operationId` の再送でも、記録は重複しません。
+
+アプリ側でも、スケジュールの日別の詳細から、理由をワンタップで選んで繰り越せます。
 
 ## 予定の変え方（applyTaskChanges）
 
@@ -324,6 +404,7 @@ AIが予定を変えるときの流れは、いつも同じ4段です。
 | 実行中の知らせ | する（片道・期限つき） | 端末 → サーバーのみ。オフラインの端末のぶんは分からない |
 | 予定の変更履歴 | する | 直近50件。取り消しに使う |
 | 目標（Goal） | する | `id` ごとに `updatedAt` が新しいほうを採る |
+| 繰り越しの記録（move） | する | 追加専用イベント。`id` で重複排除。再送しても増えない |
 | 問題マスタ | する | 指紋（hash）が変わったときだけ送り直す |
 | セッション状態（タイマー） | **しない** | 計測中の状態はその端末だけのもの |
 | 表示設定（テーマ・カレンダー） | **しない** | 端末ごとの好み |
@@ -382,6 +463,9 @@ AIが利用者へ更新を促します。設定画面にも同じ案内が出ま
 - 「例題50〜65を3日間に分けて」 → `listQuestions` → `applyTaskChanges` 1回（3日ぶんの `add`）
 - 「さっきの変更を取り消して」 → `getPlanChanges` → `undoTaskChanges`
 - 「最近、計算ミスと方針ミスはどちらが多い？」 → `getRecentMistakes`（`calcErrors` / `wrongApproaches`）
+- 「昨日やり残した分を今日に回して」 → `getUnfinishedPlanItems` → `applyTaskChanges`（`carryOver`）
+- 「例題90は何回解いた？」 → `getQuestionAttempts`（`totalAttempts` と1回ずつの評価）
+- 「何回繰り越した？」 → `getPlanMoves`（`carriedCount` と当初の予定日）
 - 「明日は例題84〜92と復習3問に変更して」 → `listQuestions` → `updateTasksForDate`
 
 AIが予定を変えると、次に study-todo を開いて同期したときに、ホーム画面のTODOと

@@ -6,10 +6,13 @@
 import { idb, STORES } from './idb.js';
 import { dateKeyOf, todayKeyOf } from './datetime.js';
 import { buildOutline, compareQuestions, normalizeQuestion, questionHaystack } from './question-order.js';
+import { itemsOf, splitPlanItems, withItems } from './plan-items.js';
 
 // 1.2.0 で問題マスタに book / chapterOrder / sectionOrder / title / page / sectionPage を、
 // 1.3.0 で courses（SELECT STUDY の3コース）と needsReview を足した。
-export const DATA_VERSION = '1.3.0';
+// 1.4.0 で予定に items（1回の取り組みごとの予定項目）、学習記録に planItemId、
+// 繰り越しの記録（moves）を足した。どれも足すだけで、古いデータはそのまま読める。
+export const DATA_VERSION = '1.4.0';
 
 export const EVALUATIONS = [
   { value: 'perfect', symbol: '◯', label: '完璧にできた', tone: 'success' },
@@ -27,6 +30,8 @@ export const TASK_KINDS = {
   challenge: { label: '挑戦', tone: 'violet' },
   priority: { label: '優先', tone: 'danger' },
 };
+
+export { itemsOf, splitPlanItems, MOVE_REASONS, MOVE_REASON_LABELS, MOVE_KIND_LABELS } from './plan-items.js';
 
 export const uid = (prefix = 'id') =>
   `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
@@ -167,7 +172,13 @@ export async function clearOutboxEntries(keys) {
 /* 学習記録                                                            */
 /* ------------------------------------------------------------------ */
 
-export async function addStudyRecord({ questionId, evaluation, durationSeconds, challengeId }) {
+/**
+ * 学習記録を1件足す。
+ *
+ * 「1回の取り組み＝1件の記録」なので、同じ問題を何度解いても上書きせずに増やす。
+ * planItemId は「どの予定に対する取り組みだったか」。予定に無い問題を解いたときは入らない。
+ */
+export async function addStudyRecord({ questionId, evaluation, durationSeconds, challengeId, planTaskId, planItemId }) {
   const record = {
     id: uid('rec'),
     questionId,
@@ -175,6 +186,8 @@ export async function addStudyRecord({ questionId, evaluation, durationSeconds, 
     evaluation,
     durationSeconds: Math.max(0, Math.round(durationSeconds)),
     ...(challengeId ? { challengeId } : {}),
+    ...(planTaskId ? { planTaskId } : {}),
+    ...(planItemId ? { planItemId } : {}),
   };
   await idb.put(STORES.records, record);
   await enqueueOutbox('record', record.id);
@@ -269,7 +282,7 @@ export async function updateTodayTasks(tasks, date = todayKey(), { markDirty = t
   const existing = await idb.byIndex(STORES.tasks, 'date', date);
   await Promise.all(existing.map((t) => idb.del(STORES.tasks, t.id)));
   const now = new Date().toISOString();
-  const normalized = tasks.map((t, i) => ({
+  const normalized = tasks.map((t, i) => withItems({
     // IDは渡されたものを必ず残す。作り直すと、クラウド側の同じタスクと結び付かなくなる。
     id: t.id || uid('task'),
     date,
@@ -283,7 +296,11 @@ export async function updateTodayTasks(tasks, date = todayKey(), { markDirty = t
     createdAt: t.createdAt ?? now,
     updatedAt: t.updatedAt ?? now,
     ...(t.source ? { source: t.source } : {}),
+    ...(t.carriedFrom ? { carriedFrom: t.carriedFrom } : {}),
     ...(t.title ? { title: t.title } : {}),
+    // 予定項目（この予定の中の「1回の取り組み」1件ずつ）。
+    // 古いデータには無いので questionIds から組み立てる（IDは決め打ちなので毎回同じ）。
+    items: t.items,
   }));
   await idb.putAll(STORES.tasks, normalized);
   if (markDirty) {
@@ -337,6 +354,132 @@ export async function saveTask(task) {
   // 完了の付け外しもその日の予定の変更なので、次の同期で送る。
   await setPlanMeta(task.date, { updatedAt: new Date().toISOString(), dirty: true, updatedBy: 'app' });
   return task;
+}
+
+/* ------------------------------------------------------------------ */
+/* 予定と実績の対応                                                    */
+/* ------------------------------------------------------------------ */
+
+/** すでに取り組まれた予定項目（学習記録が結び付いているもの）のID。 */
+export async function getDoneItemIds() {
+  const records = await idb.all(STORES.records);
+  return new Set(records.filter((r) => r.planItemId).map((r) => r.planItemId));
+}
+
+/** 1つの問題への取り組みを、古い順に全部返す（1回＝1件）。 */
+export async function getQuestionAttempts(questionId) {
+  const records = await idb.byIndex(STORES.records, 'questionId', questionId);
+  return records.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
+}
+
+/** 期間の学習記録を、日付ごとにまとめる（カレンダーの実績マスに使う）。 */
+export async function getAttemptsByDate(fromDate, toDate) {
+  const records = await idb.all(STORES.records);
+  const byDate = {};
+  for (const record of records) {
+    const day = dayOf(record.timestamp);
+    if (day < fromDate || day > toDate) continue;
+    (byDate[day] ??= []).push(record);
+  }
+  Object.values(byDate).forEach((list) => list.sort((a, b) => a.timestamp.localeCompare(b.timestamp)));
+  return byDate;
+}
+
+/** 期間の予定を、日付ごとにまとめる。 */
+export async function getTasksByDate(fromDate, toDate) {
+  const tasks = await getTasksInRange(fromDate, toDate);
+  const byDate = {};
+  for (const task of tasks) (byDate[task.date] ??= []).push(task);
+  return byDate;
+}
+
+/* ------------------------------------------------------------------ */
+/* 繰り越し（予定を別の日へ動かす）                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 予定を別の日へ動かした記録。学習記録と同じく「追加専用のイベント」で、
+ * id で重ね合わせるだけなので、同期を何度やり直しても増えない。
+ */
+export async function listMoves({ from = null, to = null } = {}) {
+  const moves = await idb.all(STORES.moves);
+  return moves
+    .filter((move) => (!from || move.toDate >= from || move.fromDate >= from))
+    .filter((move) => (!to || move.toDate <= to || move.fromDate <= to))
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)));
+}
+
+export async function addMove(move) {
+  await idb.put(STORES.moves, move);
+  await enqueueOutbox('move', move.id);
+  return move;
+}
+
+/**
+ * まだ取り組んでいない予定項目だけを、別の日へ繰り越す。
+ *
+ * ・実施済みの分は動かさない（実績は実施した日に残る）
+ * ・予定項目のID（itemId）は変えない。動かしても「同じ予定」であり続ける
+ * ・繰り越しても取り組み回数は増えない（学習記録には手を触れない）
+ * ・動かしたことは移動イベントとして残り、あとから履歴を追える
+ *
+ * ここで変えるのは、この端末の予定だけである。変えた日は dirty として印を付け、
+ * ふだんの同期でクラウドへ送られる（サーバー側で版を見て重ね合わせる）。
+ */
+export async function carryOverPlanItems({
+  fromDate, taskId, itemIds = null, toDate,
+  reason = 'unspecified', kind = 'carry_over', actorName = null,
+}) {
+  const dayTasks = await idb.byIndex(STORES.tasks, 'date', fromDate);
+  const task = dayTasks.find((t) => t.id === taskId);
+  if (!task) return { ok: false, error: 'not_found' };
+  const done = await getDoneItemIds();
+  const all = itemsOf(task);
+  const pending = all.filter((item) => !done.has(item.itemId));
+  const wanted = itemIds ? pending.filter((item) => itemIds.includes(item.itemId)) : pending;
+  if (!wanted.length) return { ok: false, error: 'nothing_to_carry_over' };
+
+  const carriedIds = new Set(wanted.map((item) => item.itemId));
+  const carried = wanted.map((item) => ({ ...item, carriedCount: (item.carriedCount ?? 0) + 1 }));
+  const keep = all.filter((item) => !carriedIds.has(item.itemId));
+
+  // 移動元。全部動かすならタスクごと消え、一部なら残った分だけになる。
+  const remaining = dayTasks
+    .filter((t) => t.id !== taskId)
+    .concat(keep.length ? [{ ...task, items: keep, questionIds: keep.map((i) => i.questionId) }] : []);
+  await updateTodayTasks(remaining, fromDate);
+
+  // 移動先。繰り越した分を、新しいタスクとして足す。
+  const target = await idb.byIndex(STORES.tasks, 'date', toDate);
+  const carriedTask = {
+    id: uid('task'),
+    kind: task.kind,
+    ...(task.timeLimitSeconds ? { timeLimitSeconds: task.timeLimitSeconds } : {}),
+    ...(task.title ? { title: task.title } : {}),
+    items: carried,
+    questionIds: carried.map((item) => item.questionId),
+    completed: false,
+    pinned: false,
+    source: 'app',
+    carriedFrom: { taskId: task.id, date: fromDate },
+  };
+  await updateTodayTasks([...target, carriedTask], toDate);
+
+  const move = {
+    id: uid('mv'),
+    fromDate,
+    toDate,
+    at: new Date().toISOString(),
+    actorKind: 'user',
+    actorName: actorName ?? 'この端末',
+    kind,
+    reason,
+    taskId: task.id,
+    toTaskId: carriedTask.id,
+    items: carried,
+  };
+  await addMove(move);
+  return { ok: true, move, carried, task: carriedTask };
 }
 
 /* ------------------------------------------------------------------ */
@@ -409,6 +552,9 @@ export const EMPTY_SESSION = {
   active: false,
   mode: 'idle',
   currentQuestionId: null,
+  // いま解いているのが「どの予定の、どの1回ぶん」か。予定外に解いたときは null。
+  currentPlanItemId: null,
+  currentPlanTaskId: null,
   currentChallengeId: null,
   questionElapsed: {},
   currentStartedAt: null,
@@ -463,12 +609,13 @@ export async function setSessionState(value) {
 /* ------------------------------------------------------------------ */
 
 export async function exportAll() {
-  const [questions, records, tasks, challenges, goals, settings] = await Promise.all([
+  const [questions, records, tasks, challenges, goals, moves, settings] = await Promise.all([
     idb.all(STORES.questions),
     idb.all(STORES.records),
     idb.all(STORES.tasks),
     idb.all(STORES.challenges),
     idb.all(STORES.goals),
+    idb.all(STORES.moves),
     getSettings(),
   ]);
   return {
@@ -479,6 +626,8 @@ export async function exportAll() {
     tasks,
     challenges,
     goals,
+    // 繰り越し・予定変更の記録。予定と実績の食い違いを後から追うために残す。
+    moves,
     settings,
   };
 }

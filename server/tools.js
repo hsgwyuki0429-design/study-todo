@@ -115,8 +115,8 @@ const CHANGE_SCHEMA = {
   properties: {
     op: {
       type: "string",
-      enum: ["add", "update", "remove", "move", "reorder"],
-      description: "add=タスクを足す / update=既存のタスクの項目を変える / remove=消す / move=別の日へ移す（IDは変わらない） / reorder=その日の並びを決める。",
+      enum: ["add", "update", "remove", "move", "reorder", "carryOver"],
+      description: "add=タスクを足す / update=既存のタスクの項目を変える / remove=消す / move=タスクごと別の日へ移す（IDは変わらない） / reorder=その日の並びを決める / carryOver=まだ取り組んでいない分だけを別の日へ繰り越す。",
     },
     date: { ...DATE_PROPERTY, description: "add・reorder では必須。update・remove では省略でき、その場合は expectedRevisions の日から探す。" },
     taskId: { type: "string", maxLength: 80, description: "update・remove・move の対象。getTodayTasks が返す task.id。" },
@@ -142,6 +142,24 @@ const CHANGE_SCHEMA = {
       maxItems: CHANGE_LIMITS.tasksPerDay,
       description: "reorder のときの、その日のタスクIDを希望する順に並べたもの。過不足があると断られる。",
     },
+    itemIds: {
+      type: "array",
+      items: { type: "string", maxLength: 120 },
+      maxItems: CHANGE_LIMITS.questionIdsPerTask,
+      description: "carryOver で動かす予定項目（1回の取り組み）のID。省略すると、そのタスクの未実施の分すべて。"
+        + " すでに取り組んだ分を含めると断られる（実績は実施した日に残す）。",
+    },
+    kind: {
+      type: "string",
+      enum: ["carry_over", "reschedule"],
+      description: "move / carryOver の種類。carry_over=やり残しの繰り越し / reschedule=事前の予定変更。",
+    },
+    reason: {
+      type: "string",
+      enum: ["time_shortage", "too_hard", "schedule_change", "other", "unspecified"],
+      description: "移動の理由。**利用者が言ったときだけ**入れる。推測で埋めず、分からなければ渡さない（unspecified のまま残る）。",
+    },
+    reasonNote: { type: "string", maxLength: 200, description: "利用者の言葉をそのまま残したいときだけ。推測を書かない。" },
   },
 };
 
@@ -351,13 +369,14 @@ export function createTools() {
     defineTool({
       name: "getTasksInRange",
       title: "期間の予定",
-      description: "from から to までの各日の予定をまとめて返す。「今週の予定」「来週どこまで進む予定か」を見るときや、複数日へ問題を割り振る前の下調べに使う。",
+      description: "from から to までの各日の「予定」と「実際に取り組んだ記録」をまとめて返す。予定が無くても、その日に取り組んだ記録があれば日として返る。各タスクの items（1回の取り組み1件ずつ）に itemId があり、pendingItemIds がまだ取り組んでいない分。「今週の予定」「どこまで進んだか」を見るときや、繰り越しの前の下調べに使う。",
       scope: "read",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         properties: {
           from: { ...DATE_PROPERTY, description: "開始日（YYYY-MM-DD）。省略すると今日。" },
           to: { ...DATE_PROPERTY, description: "終了日（YYYY-MM-DD）。省略すると今日。" },
+          includeAttempts: { type: "boolean", description: "false にすると、その日に実際に取り組んだ記録（attempts）を省く。既定は true。" },
           timezoneOffsetMinutes: TIMEZONE_PROPERTY,
         },
       },
@@ -382,6 +401,57 @@ export function createTools() {
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: { properties: { limit: { type: "integer", minimum: 1, maximum: 100, description: "返す件数。既定は20。" } } },
       run: (args, { service }) => service.getOperationLog(args),
+    }),
+
+    defineTool({
+      name: "getQuestionAttempts",
+      title: "問題ごとの取り組み履歴",
+      description: "1つの問題に取り組んだ回数と、その1回ずつ（日時・評価・所要時間・通常かチャレンジか・どの予定に対するものか）を古い順に返す。同じ問題を2周目に解けば2件、同じ日に2回解いても2件になる。件数が多いときは nextOffset で続きを読む（返った分だけで全部と決めつけない）。",
+      scope: "read",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          id: { type: "string", description: "問題ID。listQuestions / searchQuestions が返す question.id。" },
+          limit: { type: "integer", minimum: 1, maximum: SERVICE_LIMITS.historyLimitMax, description: "返す件数。既定は50。" },
+          offset: { type: "integer", minimum: 0, description: "続きを読むときの開始位置。前回の nextOffset を渡す。" },
+        },
+        required: ["id"],
+      },
+      run: (args, { service }) => service.getQuestionAttempts(args),
+    }),
+
+    defineTool({
+      name: "getUnfinishedPlanItems",
+      title: "まだ取り組んでいない予定",
+      description: "期間の中で、予定したのにまだ取り組んでいない分（予定項目）を日ごとに返す。overdue が true の日は、過ぎたのに残っている分。繰り越すときは、ここで分かった itemId を applyTaskChanges の carryOver に渡す。",
+      scope: "read",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          from: { ...DATE_PROPERTY, description: "開始日。省略すると to の30日前。" },
+          to: { ...DATE_PROPERTY, description: "終了日。省略すると今日。" },
+          timezoneOffsetMinutes: TIMEZONE_PROPERTY,
+        },
+      },
+      run: (args, { service }) => service.getUnfinishedPlanItems(args),
+    }),
+
+    defineTool({
+      name: "getPlanMoves",
+      title: "繰り越し・予定変更の履歴",
+      description: "予定を別の日へ動かした記録を新しい順に返す。いつ・誰が（本人かAIか）・どの予定項目を・どの日からどの日へ・どんな理由で動かしたか、当初の予定日（originalDate）と繰り越した回数（carriedCount）が分かる。件数が多いときは nextOffset で続きを読む。繰り越しても取り組み回数は増えない（実績は実施した日にだけ残る）。",
+      scope: "read",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          from: { ...DATE_PROPERTY, description: "この日以降に関わる移動だけ。" },
+          to: { ...DATE_PROPERTY, description: "この日以前に関わる移動だけ。" },
+          questionId: { type: "string", maxLength: 120, description: "その問題を含む移動だけに絞る。" },
+          limit: { type: "integer", minimum: 1, maximum: 200, description: "返す件数。既定は50。" },
+          offset: { type: "integer", minimum: 0, description: "続きを読むときの開始位置。" },
+        },
+      },
+      run: (args, { service }) => service.getPlanMoves(args),
     }),
 
     defineTool({
@@ -568,6 +638,17 @@ export const SERVER_INSTRUCTIONS = `study-todo は、青チャート（数学の
   ただし EXERCISES の難易度は読み取りが未確認で、needsReview が true になっています。
   難易度で厳密に絞りたいときは例題を対象にしてください。
 - 「今日やる予定」は getTodayTasks、別の日や期間は getTasksInRange です。
+  どちらも「予定（tasks）」と「実際に取り組んだ記録（attempts）」の両方を返します。
+- 予定と実績は別のものです。
+  ・予定の中の1回の取り組みは items の1件で、itemId が安定した識別子です。
+  ・学習記録は「実際に取り組んだ1回」で、planItemId でどの予定に対する分かが分かります。
+  ・同じ問題を2周目に解けば記録は2件になります。同じ日に2回解いても2件です。
+  ・やらなかった予定を別の日へ繰り越しても、取り組み回数は増えません。
+  ・1つの問題の全部の取り組みは getQuestionAttempts（区切って返るので nextOffset を追う）。
+- やり残しを別の日へ動かすときは、getUnfinishedPlanItems で未実施の itemId を確かめ、
+  applyTaskChanges の carryOver に渡してください（実施済みの分は動かせません。実績はその日に残します）。
+  理由（reason）は**利用者が言ったときだけ**入れてください。推測した理由を事実として保存しないでください。
+  過去の移動は getPlanMoves で分かります（当初の予定日と繰り越した回数つき）。
 - 評価は5段階です。perfect(◯完璧) / better_solution(解もっと良い解法) /
   weak_writing(記記述が甘い) / calc_error(△計算ミス) / wrong_approach(✕方針が違った)。
   「弱点」を聞かれたら getRecentMistakes と getStudyStats の weakChapters を見てください。
