@@ -55,7 +55,15 @@ function buildTabBar() {
     b.dataset.tab = name;
     const m = document.createElement('span');
     m.className = 'tab-mark';
-    m.textContent = mark;
+    m.setAttribute('aria-hidden', 'true');
+    // Inline vectors stay available offline and inherit the selected tab color.
+    const paths = {
+      home: '<path d="M2 13 14 2l12 11-2 2-2-2v13h-6v-8h-4v8H6V13l-2 2z"/>',
+      records: '<g fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M10 5h15M10 14h15M10 23h15"/></g><circle cx="3" cy="5" r="1.6"/><circle cx="3" cy="14" r="1.6"/><circle cx="3" cy="23" r="1.6"/>',
+      schedule: '<path d="M6 1h2v3h12V1h2v3h2a3 3 0 0 1 3 3v17a3 3 0 0 1-3 3H4a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3h2zm-2 9v14h20V10z"/><path d="M7 13h3v3H7zm6 0h3v3h-3zm6 0h3v3h-3zM7 19h3v3H7zm6 0h3v3h-3zm6 0h3v3h-3z"/>',
+      settings: '<path fill-rule="evenodd" d="m11 1 6 0 1 4 3 1 3-1 3 5-3 3v3l3 3-3 5-4-1-2 2-1 3h-6l-1-4-3-1-3 1-3-5 3-3v-3L1 10l3-5 4 1 2-2zm3 8a5 5 0 1 0 0 10 5 5 0 0 0 0-10"/>',
+    };
+    m.innerHTML = `<svg viewBox="0 0 28 28" fill="currentColor" focusable="false">${paths[name]}</svg>`;
     b.append(m, document.createTextNode(label));
     b.onclick = () => {
       // スケジュールは、タブを押すたびに今日を真ん中へ持ってくる。

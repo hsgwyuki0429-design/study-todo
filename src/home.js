@@ -651,6 +651,10 @@ function challengePanel(panel) {
 export function renderHome(screen) {
   const s = state.session;
   screen.innerHTML = '';
+  screen.dataset.mode = s.mode;
+  const head = el('div', 'view-head');
+  head.append(el('h1', 'view-title', 'ホーム'));
+  screen.append(head);
   screen.append(timerPanel());
 
   if (s.mode === 'idle') {
