@@ -26,7 +26,7 @@ function announceActivity(questionId) {
     ? state.tasks.find((t) => (t.questionIds ?? []).includes(questionId) && !t.completed)
     : null;
   const date = api.todayKey();
-  reportActivity(date, task?.id ?? null, questionId ?? null).catch(() => {});
+  reportActivity(date, task?.id ?? null, questionId ?? null, state.session.sessionId).catch(() => {});
 }
 
 /**
@@ -41,7 +41,7 @@ export function heartbeatActivity() {
 
 /** 学習をやめた・止めたときに、実行中の知らせを取り下げる。 */
 function clearActivity() {
-  reportActivity(api.todayKey(), null).catch(() => {});
+  reportActivity(api.todayKey(), null, null, state.session.sessionId).catch(() => {});
 }
 
 /* ================================================================== */
@@ -165,6 +165,8 @@ const currentChallengeTask = () =>
 
 async function startSession() {
   const s = state.session;
+  if (s.active || endingSession) return;
+  s.sessionId = crypto.randomUUID();
   s.active = true;
   s.mode = 'task_list';
   s.sessionElapsed = 0;
@@ -179,13 +181,23 @@ async function startSession() {
   render();
 }
 
+let endingSession = false;
+let recording = null;
 async function endSession() {
-  commitCurrent();
-  commitSession();
-  clearActivity();
-  state.session = { ...api.EMPTY_SESSION, questionElapsed: {} };
-  await persist();
-  render();
+  if (endingSession || !state.session.active) return;
+  endingSession = true;
+  try {
+    // A preceding evaluation tap must finish its local record write first.
+    await recording;
+    commitCurrent();
+    commitSession();
+    await api.finishStudySession(state.session.sessionId);
+    clearActivity();
+    state.session = await api.getSessionState();
+    render();
+    // Session is durable and UI has ended before any network/provider work.
+    syncInBackground();
+  } finally { endingSession = false; }
 }
 
 async function togglePause() {
@@ -236,6 +248,8 @@ async function tapChallengeQuestion(questionId) {
 
 async function openChallenge(task) {
   const s = state.session;
+  if (endingSession) return;
+  s.sessionId ??= crypto.randomUUID();
   commitCurrent();
   s.active = true;
   s.mode = 'challenge';
@@ -249,7 +263,7 @@ async function openChallenge(task) {
   startQuestion(task.questionIds[0]);
   s.currentPlanTaskId = task.id;
   s.currentPlanItemId = itemsOf(task)[0]?.itemId ?? null;
-  reportActivity(api.todayKey(), task.id, task.questionIds[0]).catch(() => {});
+  reportActivity(api.todayKey(), task.id, task.questionIds[0], s.sessionId).catch(() => {});
   await persist();
   render();
 }
@@ -287,7 +301,13 @@ async function finishChallenge() {
   render();
 }
 
-async function recordEvaluation(evaluation) {
+function recordEvaluation(evaluation) {
+  if (recording || endingSession) return recording;
+  recording = saveEvaluation(evaluation).finally(() => { recording = null; });
+  return recording;
+}
+
+async function saveEvaluation(evaluation) {
   const s = state.session;
   if (s.mode === 'challenge_review') return recordChallengeEvaluation(evaluation);
 

@@ -50,6 +50,7 @@ import {
 } from "./merge.js";
 
 export const SYNC_KEYS = Object.freeze({
+  replanEvent: (sessionId) => `studytodo:replan:study_end:${sessionId}`,
   devices: "studytodo:devices",
   records: (month) => `studytodo:records:${month}`,
   recordsPrefix: "studytodo:records:",
@@ -318,13 +319,13 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     if (supportsTransactions(storage)) {
       return runTransaction(storage, async (tx) => {
         const stored = await tx.get(key);
-        const outcome = await mutate(stored);
+        const outcome = await mutate(stored, tx);
         if (outcome?.plan) await tx.put(key, outcome.plan);
         return outcome;
       });
     }
     const stored = await storage.get(key);
-    const outcome = await mutate(stored);
+    const outcome = await mutate(stored, storage);
     if (outcome?.plan) await storage.put(key, outcome.plan);
     return outcome;
   }
@@ -611,20 +612,24 @@ export function createSyncService({ storage, now = () => Date.now() }) {
    * 期限つきで預かり、期限を過ぎたら実行中ではなくなる。
    * 圏外の端末は知らせられないので、この情報は「サーバーが知っている範囲」でしかない。
    */
-  async function reportActivity({ date, taskId, questionId = null, deviceId = null, ttlSeconds = null }) {
+  async function reportActivity({ date, taskId, questionId = null, deviceId = null, ttlSeconds = null, sessionId = null }) {
     const ttl = Math.max(60, Math.min(Number(ttlSeconds) || SYNC_LIMITS.activityTtlSeconds, SYNC_LIMITS.activityMaxTtlSeconds));
     const at = new Date(now()).toISOString();
     const expiresAt = new Date(now() + ttl * 1000).toISOString();
-    const outcome = await mutatePlan(date, (stored) => {
+    const outcome = await mutatePlan(date, async (stored, tx) => {
+      if (sessionId && await tx.get(SYNC_KEYS.replanEvent(sessionId))) return { ok: true };
       const base = stored ?? { ...emptyPlan(date), updatedAt: at, updatedBy: "app" };
       const plan = structuredClone(base);
       if (taskId === null) {
+        if (sessionId && plan.active && (plan.active.deviceId !== deviceId || plan.active.sessionId !== sessionId)) {
+          return { ok: true };
+        }
         delete plan.active;
       } else {
         if (!(plan.tasks ?? []).some((task) => task.id === taskId)) {
           return { ok: false, error: "not_found", message: `タスク ${taskId} が ${date} にありません。` };
         }
-        plan.active = { taskId, ...(questionId ? { questionId } : {}), deviceId, startedAt: at, expiresAt };
+        plan.active = { taskId, ...(questionId ? { questionId } : {}), ...(sessionId ? { sessionId } : {}), deviceId, startedAt: at, expiresAt };
       }
       // 実行中の知らせは予定の中身を変えないので、revision は進めない
       // （進めると、端末とAIが持っている revision が理由なく古くなってしまう）。

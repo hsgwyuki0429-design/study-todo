@@ -23,6 +23,7 @@ import {
 import { SERVER_INSTRUCTIONS, createTools } from "./tools.js";
 import { createSyncService } from "./service/sync-service.js";
 import { DATA_VERSION, createStudyService } from "./service/study-service.js";
+import { createReplanEvents, readStudyEnd } from './service/replan-events.js';
 
 export const SERVER_INFO = Object.freeze({
   name: "study-todo",
@@ -100,12 +101,13 @@ export function readConfig(env = {}) {
  * サーバー本体を組み立てる。
  * storage（保存先）と env（設定）を差し替えるだけで、どの環境でも動く。
  */
-export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now() }) {
+export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(), waitUntil, routineFetch }) {
   const config = readConfig(env);
   const sync = createSyncService({ storage, now });
   const service = createStudyService({ sync, now });
   const auth = createAuth({ storage, ownerKey: config.ownerKey, now });
   const oauth = createOAuth({ storage, now });
+  const replans = createReplanEvents({ storage, env, now, waitUntil, fetchImpl: routineFetch });
   const mcp = createMcpServer({
     serverInfo: SERVER_INFO,
     instructions: SERVER_INSTRUCTIONS,
@@ -346,6 +348,25 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
       }, { status: 401 });
     }
 
+    if (path === '/api/sync/study-end' && request.method === 'POST') {
+      const event = readStudyEnd(await readJsonBody(request));
+      try {
+        const settings = await auth.readSettings();
+        const replan = await replans.end(event, device.deviceId,
+          settings.enabled && settings.permissions.read && settings.permissions.write);
+        return json({ ok: true, studyEnd: 'success', replan });
+      } catch (error) {
+        if (error instanceof ValidationError) throw error;
+        return json({ ok: true, studyEnd: 'success', replan: {
+          eventId: event.eventId, state: 'failed', error: 'planning_storage', retryable: true,
+        } });
+      }
+    }
+    if (path === '/api/sync/replan' && request.method === 'GET') {
+      const result = await replans.status(new URL(request.url).searchParams.get('sessionId') ?? '', device.deviceId);
+      return json(result ?? { error: 'not_found' }, { status: result ? 200 : 404 });
+    }
+
     if (path === "/api/sync/push" && request.method === "POST") {
       const body = await readJsonBody(request);
       const saved = await sync.push(device.deviceId, body);
@@ -386,12 +407,16 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
     // 「いまこのタスクを解いている」の知らせ。期限つきで預かる。
     if (path === "/api/sync/activity" && request.method === "POST") {
       const body = await readJsonBody(request);
+      if (body.sessionId && (typeof body.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(body.sessionId))) {
+        return json({ error: 'invalid_input' }, { status: 400 });
+      }
       const result = await sync.reportActivity({
         date: String(body.date ?? ""),
         taskId: body.taskId === null || body.taskId === undefined ? null : String(body.taskId),
         questionId: body.questionId ? String(body.questionId) : null,
         deviceId: device.deviceId,
         ttlSeconds: body.ttlSeconds ?? null,
+        sessionId: body.sessionId ?? null,
       });
       return json(result, { status: result.ok ? 200 : 404 });
     }

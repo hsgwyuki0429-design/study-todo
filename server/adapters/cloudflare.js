@@ -36,6 +36,7 @@ export class StudyTodoStore {
       this.app = createStudyTodoMcpApp({
         storage: createDurableObjectDriver(this.state.storage),
         env: this.env,
+        waitUntil: (promise) => this.state.waitUntil(promise),
       });
     }
     return this.app.fetch(request);
