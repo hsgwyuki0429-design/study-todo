@@ -14,7 +14,7 @@ import {
   readString,
   rejectUnknownKeys,
 } from "../core/validate.js";
-import { dateKeyOf, isDateKey, normalizeOffset, shiftDateKey, startOfDayMs, todayKeyOf } from "../../src/datetime.js";
+import { dateKeyOf, isDateKey, normalizeOffset, shiftDateKey, startOfDayMs, studyTodayKeyOf, todayKeyOf } from "../../src/datetime.js";
 import { EVALUATIONS, MISTAKE_EVALUATIONS, TASK_KINDS, computeStats } from "./merge.js";
 import {
   CHANGE_LIMITS,
@@ -31,6 +31,7 @@ import { MOVE_REASONS, itemsOf, splitPlanItems } from "../../src/plan-items.js";
 import {
   EVALUATION_VALUES,
   describeRecord,
+  durationEntriesByStudyDate,
   hasDuration,
   hasExactTime,
   recordDateOf,
@@ -80,9 +81,9 @@ const EVALUATION_LABELS = Object.freeze({
 const uid = (prefix) => `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
 export function createStudyService({ sync, now = () => Date.now() }) {
-  /** 「今日」を決める。引数の time zone を尊重し、既定は日本時間。 */
+  /** 学習上の「今日」を決める。03:00までは前日で、引数のtime zoneも尊重する。 */
   function today(args = {}) {
-    return todayKeyOf(args.timezoneOffsetMinutes, now());
+    return studyTodayKeyOf(args.timezoneOffsetMinutes, now());
   }
 
   function readDateArg(value, field, args) {
@@ -669,9 +670,9 @@ export function createStudyService({ sync, now = () => Date.now() }) {
     // 5. 日ごとの時間と期限。
     const spentByDate = new Map();
     for (const record of bundle.records) {
-      if (typeof record.durationSeconds !== "number") continue;
-      const date = recordDateOf(record, bundle.timezoneOffsetMinutes);
-      spentByDate.set(date, (spentByDate.get(date) ?? 0) + record.durationSeconds);
+      for (const [date, seconds] of durationEntriesByStudyDate(record, bundle.timezoneOffsetMinutes)) {
+        spentByDate.set(date, (spentByDate.get(date) ?? 0) + seconds);
+      }
     }
     const days = [];
     let overCapacity = false;
@@ -1248,10 +1249,9 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       const offset = normalizeOffset(args.timezoneOffsetMinutes);
       const spent = new Map();
       for (const record of records) {
-        // 時間が未登録の記録は 0秒として足さない（学習していないのと同じにはしない）。
-        if (typeof record.durationSeconds !== "number") continue;
-        const date = recordDateOf(record, offset);
-        spent.set(date, (spent.get(date) ?? 0) + record.durationSeconds);
+        for (const [date, seconds] of durationEntriesByStudyDate(record, offset)) {
+          spent.set(date, (spent.get(date) ?? 0) + seconds);
+        }
       }
       return {
         availability,

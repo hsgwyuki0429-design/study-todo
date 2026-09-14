@@ -91,6 +91,56 @@ function tx(store, mode, fn) {
 }
 
 export const idb = {
+  /** Read the affected state and commit an undo with its tombstone and plan metadata. */
+  undoAttempt(recordId, update) {
+    return open().then(db => new Promise((resolve, reject) => {
+      const t = db.transaction([STORES.records, STORES.tasks, STORES.meta, STORES.outbox], 'readwrite');
+      const records = t.objectStore(STORES.records), tasks = t.objectStore(STORES.tasks), meta = t.objectStore(STORES.meta);
+      const requests = [records.get(recordId), records.getAll(), tasks.getAll(), meta.get('planMeta')];
+      let ready = 0, result = { ok: false, error: 'not_found' };
+      for (const request of requests) request.onsuccess = () => {
+        if (++ready !== requests.length || !requests[0].result) return;
+        try {
+          const record = requests[0].result;
+          const changes = update(record, requests[1].result.filter(r => r.id !== recordId), requests[2].result, requests[3].result?.value ?? {});
+          records.delete(recordId);
+          const outbox = t.objectStore(STORES.outbox);
+          outbox.delete(`record:${recordId}`);
+          outbox.put({ key: `record_deleted:${recordId}`, type: 'record_deleted', id: recordId,
+            queuedAt: Date.now(), version: crypto.randomUUID() });
+          for (const task of changes.tasks) tasks.put(task);
+          meta.put({ key: 'planMeta', value: changes.planMeta });
+          result = { ok: true, record };
+        } catch (error) { t.abort(); reject(error); }
+      };
+      t.oncomplete = () => resolve(result);
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error);
+    }));
+  },
+  /** Evaluation, consumed draft and synchronization outbox commit atomically. */
+  commitAttempt(record, expected, nextSession) {
+    return open().then(db => new Promise((resolve, reject) => {
+      const t = db.transaction([STORES.records, STORES.meta, STORES.outbox], 'readwrite');
+      let result = { saved: false };
+      const meta = t.objectStore(STORES.meta);
+      const request = meta.get('session');
+      request.onsuccess = () => {
+        const current = request.result?.value;
+        if (!current?.active || current.sessionId !== expected.sessionId
+          || current.currentQuestionId !== expected.currentQuestionId || current.mode !== expected.mode
+          || current.currentPlanItemId !== expected.currentPlanItemId) return;
+        t.objectStore(STORES.records).put(record);
+        t.objectStore(STORES.outbox).put({ key: `record:${record.id}`, type: 'record', id: record.id,
+          queuedAt: Date.now(), version: crypto.randomUUID() });
+        meta.put({ key: 'session', value: nextSession });
+        result = { saved: true, record };
+      };
+      t.oncomplete = () => resolve(result);
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error);
+    }));
+  },
   /** Do not acknowledge an edit queued while a previous version was in flight. */
   acknowledgeOutbox(entries) {
     return open().then((db) => new Promise((resolve, reject) => {

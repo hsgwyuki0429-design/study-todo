@@ -262,14 +262,14 @@ test("古い記録（予定との対応が無いもの）も失われず、再�
   assert.equal(history.attempts[0].planItemId, null);
 });
 
-test("日本時間の日付の境目でも、正しい日の実績になる", async () => {
+test("03:00より前の実績は、前の学習日に入る", async () => {
   const { app, token } = await setup({
-    // 日本時間 2026-09-13 の 0:30（UTC では 2026-09-12 の 15:30）。
+    // 日本時間 2026-09-13 の 0:30は、2026-09-12の学習日。
     records: [attempt("r1", { timestamp: "2026-09-12T15:30:00Z" })],
     now: () => Date.parse("2026-09-13T01:00:00Z"),
   });
   const range = await callTool(app, token, "getTasksInRange", { from: "2026-09-12", to: "2026-09-13" });
-  assert.deepEqual(range.days.map((day) => [day.date, day.attemptCount]), [["2026-09-13", 1]]);
+  assert.deepEqual(range.days.map((day) => [day.date, day.attemptCount]), [["2026-09-12", 1]]);
 });
 
 test("問題ごとの履歴は、多いときに区切って返る", async () => {

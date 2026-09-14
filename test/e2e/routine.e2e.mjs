@@ -201,11 +201,11 @@ test('evaluation write finishes before end, and an already-running sync cannot f
     state.session.questionElapsed[q.id] = 180;
     state.session.mode = 'record_input';
     await api.setSessionState(state.session);
-    const put = idb.put;
+    const commitAttempt = idb.commitAttempt;
     const recordGate = new Promise((resolve) => { window.releaseRecordForTest = resolve; });
-    idb.put = async (store, value) => {
-      if (store === STORES.records) await recordGate;
-      return put(store, value);
+    idb.commitAttempt = async (...args) => {
+      await recordGate;
+      return commitAttempt(...args);
     };
     render();
     document.querySelector('.eval-btn:last-child').click();

@@ -14,7 +14,7 @@
 //   実績を作ってよいのは「本人が実際にやったと言ったとき」だけである。
 //   予定が入っていることや、時間の見積もりは、実績の根拠にならない。
 
-import { dateKeyOf, isDateKey } from './datetime.js';
+import { isDateKey, studyDateKeyOf } from './datetime.js';
 
 /** 5段階の評価。ここは変えない。評価が分からないときは null にする。 */
 export const EVALUATION_VALUES = Object.freeze([
@@ -43,6 +43,25 @@ const readDuration = (value) => {
   return Math.round(number);
 };
 
+// Optional measured breakdown. Old records stay unclassified; never invent a split.
+export function normalizedTiming(raw) {
+  const duration = readDuration(raw.durationSeconds);
+  const solve = readDuration(raw.solveSeconds), review = readDuration(raw.reviewSeconds);
+  const unclassified = readDuration(raw.unclassifiedSeconds) ?? 0;
+  const result = {};
+  if (duration !== null && solve !== null && review !== null && solve + review + unclassified === duration) {
+    Object.assign(result, { solveSeconds: solve, reviewSeconds: review }, unclassified ? { unclassifiedSeconds: unclassified } : {});
+  }
+  if (isObject(raw.studySecondsByDate)) {
+    const entries = Object.entries(raw.studySecondsByDate);
+    if (entries.length && entries.length <= 730 && entries.every(([date, seconds]) => isDateKey(date) && readDuration(seconds) !== null)
+      && entries.reduce((sum, [, seconds]) => sum + readDuration(seconds), 0) === duration) {
+      result.studySecondsByDate = Object.fromEntries(entries.map(([date, seconds]) => [date, readDuration(seconds)]));
+    }
+  }
+  return result;
+}
+
 /**
  * 学習記録を、保存してよい形へ整える。
  * 古い記録（date も source も無いもの）は、timestamp から日付を出し、
@@ -59,7 +78,7 @@ export function normalizeStudyRecord(raw, { receivedAt = Date.now(), timezoneOff
     : null;
   const date = isDateKey(raw.date)
     ? raw.date
-    : (timestamp ? dateKeyOf(timestamp, timezoneOffsetMinutes) : null);
+    : (timestamp ? studyDateKeyOf(timestamp, timezoneOffsetMinutes) : null);
   if (!date) return null;
 
   const precision = DATE_PRECISIONS.includes(raw.datePrecision)
@@ -80,6 +99,7 @@ export function normalizeStudyRecord(raw, { receivedAt = Date.now(), timezoneOff
     evaluation,
     // 所要時間が分からない記録は null。0秒として平均や見積もりに混ぜない。
     durationSeconds: readDuration(raw.durationSeconds),
+    ...normalizedTiming(raw),
     // 「4問で合計40分」のような、まとまりでの申告時間。
     // 1問ずつの時間はでっち上げず、まとまりの合計として持つ。
     ...(isObject(raw.durationGroup) && raw.durationGroup.id
@@ -129,7 +149,7 @@ export function normalizeStudyRecord(raw, { receivedAt = Date.now(), timezoneOff
 
 /** その記録がどの日のものか。古い記録は timestamp から出す。 */
 export const recordDateOf = (record, timezoneOffsetMinutes) =>
-  (isDateKey(record?.date) ? record.date : dateKeyOf(record?.timestamp, timezoneOffsetMinutes));
+  (isDateKey(record?.date) ? record.date : studyDateKeyOf(record?.timestamp, timezoneOffsetMinutes));
 
 /** ふだんの集計に数える記録か（取り消したものは数えない）。 */
 export const isCountedRecord = (record) => Boolean(record) && record.voided !== true;
@@ -139,6 +159,31 @@ export const hasExactTime = (record) => record?.datePrecision !== 'date';
 
 /** 所要時間が分かっているか。 */
 export const hasDuration = (record) => typeof record?.durationSeconds === 'number';
+
+/**
+ * 計測時間を学習日ごとに返す。
+ * 03:00をまたいだ新しい記録は studySecondsByDate の実測配分を使い、
+ * 古い記録は従来どおり record.date（無ければtimestamp）へ全時間を置く。
+ */
+export function durationEntriesByStudyDate(record, timezoneOffsetMinutes) {
+  if (!isCountedRecord(record) || !hasDuration(record)) return [];
+  const split = record.studySecondsByDate;
+  if (isObject(split)) {
+    const entries = Object.entries(split)
+      .filter(([date, seconds]) => isDateKey(date) && readDuration(seconds) !== null)
+      .map(([date, seconds]) => [date, readDuration(seconds)]);
+    if (entries.length && entries.reduce((sum, [, seconds]) => sum + seconds, 0) === record.durationSeconds) {
+      return entries;
+    }
+  }
+  const date = recordDateOf(record, timezoneOffsetMinutes);
+  return date ? [[date, record.durationSeconds]] : [];
+}
+
+export function durationOnStudyDate(record, date, timezoneOffsetMinutes) {
+  return durationEntriesByStudyDate(record, timezoneOffsetMinutes)
+    .reduce((sum, [entryDate, seconds]) => sum + (entryDate === date ? seconds : 0), 0);
+}
 
 /**
  * 学習時間の合計。
@@ -204,6 +249,7 @@ export function describeRecord(record) {
     evaluation: record.evaluation ?? null,
     evaluationKnown: Boolean(record.evaluation),
     durationSeconds: hasDuration(record) ? record.durationSeconds : null,
+    ...normalizedTiming(record),
     durationKnown: hasDuration(record),
     ...(record.durationGroup ? { durationGroup: record.durationGroup } : {}),
     source: record.source ?? 'timer',

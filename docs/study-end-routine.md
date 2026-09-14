@@ -9,7 +9,9 @@ MCP / validation / revision / atomic updateを再利用し、自動起動を`dai
 PWAはGitHub Pagesで動き、IndexedDBにsession・本人の学習記録・同期outboxを保存する。
 `src/home.js`の終了処理は進行中の評価保存を待ち、既存タイマーを止め、
 `api.finishStudySession`でsession終了と終了通知を同一IndexedDB transactionに保存する。
-時間は既存の`durationSeconds`のまま。未入力の評価・学習実績は生成しない。
+計測・途中再開は[学習sessionの仕様](./study-session.md)を参照。
+`durationSeconds`の合計を維持し、新しい計測では解答／採点・暗記の内訳も保存する。
+未入力の評価・学習実績は生成しない。
 
 通常終了の通知は`type: session_end`、keyは`session_end:<sessionId>`。
 記録・予定などの同期を先に完了してから、端末認証付き`POST /api/sync/study-end`を送る。
