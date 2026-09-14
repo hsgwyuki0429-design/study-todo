@@ -165,3 +165,5 @@ npm run test:all
 自動テストのClaude APIは模擬応答。実課金・実Claude実行・本番DOへの書き込みは行わない。
 DO adapterテストのstorageもtest double。本番CloudflareからClaudeへの疎通と実Routineの
 推論結果は上記の実機確認で検証する必要がある。
+
+<!-- trigger Cloudflare preview build -->
