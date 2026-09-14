@@ -28,6 +28,10 @@ test('JST planning date is explicit, including UTC/JST day and year boundaries',
   assert.deepEqual(dailyEvent(scheduledTime), { trigger: 'daily_3am', eventId: 'daily_replan_2026-09-15', date: '2026-09-15' });
   assert.equal(dailyEvent(Date.parse('2026-12-31T18:00:00Z')).date, '2027-01-01');
   assert.equal(dailyEvent(Date.parse('2026-09-14T14:59:59Z')).date, '2026-09-14');
+  // 0:00〜3:00 JST はまだ前の日の学習日。アプリ側（api.todayKey）と同じ区切りで数えないと、
+  // この時間帯に動かしたときだけ /api/sync/replan が1日ずれて見つからなくなる。
+  assert.equal(dailyEvent(Date.parse('2026-09-14T15:00:00Z')).date, '2026-09-14');
+  assert.equal(dailyEvent(Date.parse('2026-09-14T17:59:59Z')).date, '2026-09-14');
   assert.throws(() => dailyEvent('2026-09-15'));
 });
 
