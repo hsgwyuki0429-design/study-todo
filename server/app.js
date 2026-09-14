@@ -101,13 +101,13 @@ export function readConfig(env = {}) {
  * サーバー本体を組み立てる。
  * storage（保存先）と env（設定）を差し替えるだけで、どの環境でも動く。
  */
-export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(), waitUntil, routineFetch }) {
+export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(), waitUntil, routineFetch, onReplan }) {
   const config = readConfig(env);
   const sync = createSyncService({ storage, now });
   const service = createStudyService({ sync, now });
   const auth = createAuth({ storage, ownerKey: config.ownerKey, now });
   const oauth = createOAuth({ storage, now });
-  const replans = createReplanEvents({ storage, env, now, waitUntil, fetchImpl: routineFetch });
+  const replans = createReplanEvents({ storage, env, now, waitUntil, fetchImpl: routineFetch, onReplan });
   const mcp = createMcpServer({
     serverInfo: SERVER_INFO,
     instructions: SERVER_INSTRUCTIONS,
@@ -351,19 +351,17 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
     if (path === '/api/sync/study-end' && request.method === 'POST') {
       const event = readStudyEnd(await readJsonBody(request));
       try {
-        const settings = await auth.readSettings();
-        const replan = await replans.end(event, device.deviceId,
-          settings.enabled && settings.permissions.read && settings.permissions.write);
+        const replan = await replans.end(event, device.deviceId);
         return json({ ok: true, studyEnd: 'success', replan });
       } catch (error) {
         if (error instanceof ValidationError) throw error;
-        return json({ ok: true, studyEnd: 'success', replan: {
-          eventId: event.eventId, state: 'failed', error: 'planning_storage', retryable: true,
-        } });
+        // The local session is already safe, but the server must not acknowledge an
+        // end it failed to persist. The PWA retains this notification for retry.
+        return json({ ok: false, error: 'session_end_storage' }, { status: 503 });
       }
     }
     if (path === '/api/sync/replan' && request.method === 'GET') {
-      const result = await replans.status(new URL(request.url).searchParams.get('sessionId') ?? '', device.deviceId);
+      const result = await replans.status(new URL(request.url).searchParams.get('date') ?? '');
       return json(result ?? { error: 'not_found' }, { status: result ? 200 : 404 });
     }
 
@@ -417,6 +415,7 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
         deviceId: device.deviceId,
         ttlSeconds: body.ttlSeconds ?? null,
         sessionId: body.sessionId ?? null,
+        sessionActive: body.sessionActive === true,
       });
       return json(result, { status: result.ok ? 200 : 404 });
     }
@@ -678,6 +677,7 @@ code{background:#f0f0f3;padding:2px 6px;border-radius:6px}:root{color-scheme:lig
 
   return {
     config,
+    replans,
     service,
     sync,
     auth,

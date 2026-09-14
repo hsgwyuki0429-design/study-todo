@@ -107,7 +107,7 @@ export const idb = {
       t.onabort = () => reject(t.error);
     }));
   },
-  /** Session and its study_end outbox entry commit together, including across tabs. */
+  /** Session and its reliable end notification commit together, including across tabs. */
   updateSession(mutate) {
     return open().then((db) => new Promise((resolve, reject) => {
       const t = db.transaction([STORES.meta, STORES.outbox], 'readwrite');

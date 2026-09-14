@@ -240,13 +240,13 @@ export async function pushPin(date, taskId, pinned) {
  * サーバーが知っている実行中の状態は「オンラインの端末のぶんだけ」である。
  * 届かなくても学習は止めないし、ローカルのタイマーも記録も一切変わらない。
  */
-export async function reportActivity(date, taskId, questionId = null, sessionId = null) {
+export async function reportActivity(date, taskId, questionId = null, sessionId = null, sessionActive = false) {
   const config = await getCloudConfig();
   if (!isActive(config)) return { ok: false, reason: 'disabled' };
   try {
     return await request(config, '/api/sync/activity', {
       method: 'POST',
-      body: { date, taskId, questionId, sessionId },
+      body: { date, taskId, questionId, sessionId, sessionActive },
       token: config.deviceKey,
     });
   } catch {
@@ -357,7 +357,8 @@ async function buildPayload(config) {
     first,
     localHash,
     outboxEntries: outbox.filter((e) => sentKeys.has(e.key)),
-    replanEvents: outbox.filter((e) => e.type === 'replan'),
+    // PR #5 offline outboxes are accepted as end notifications, never as fire requests.
+    sessionEnds: outbox.filter((e) => e.type === 'session_end' || e.type === 'replan'),
     pushedDates: dirtyDates,
     payload: {
       since: config.lastPulledAtMs ?? null,
@@ -561,19 +562,21 @@ let syncAgain = false;
 /** Planning failure stays separate from study-data synchronization. */
 async function deliverStudyEnds(config, events) {
   const pending = await idb.all(STORES.outbox);
-  if (pending.some((entry) => entry.type !== 'replan')) return;
+  if (pending.some((entry) => entry.type !== 'session_end' && entry.type !== 'replan')) return;
   const liveKeys = new Set(pending.map((entry) => entry.key));
   for (const entry of events.filter((entry) => liveKeys.has(entry.key))) {
     try {
       const response = await request(config, '/api/sync/study-end', {
         method: 'POST', body: entry.event, token: config.deviceKey,
       });
-      await idb.put(STORES.meta, { key: 'lastReplan', value: { ...response.replan, sessionId: entry.event.sessionId } });
-      if (!response.replan?.retryable) await idb.del(STORES.outbox, entry.key);
+      if (response.ok && response.studyEnd === 'success') {
+        await idb.del(STORES.outbox, entry.key);
+        await idb.put(STORES.meta, { key: 'lastSessionEnd', value: { sessionId: entry.event.sessionId, state: 'acknowledged' } });
+      }
     } catch {
       // Keep exactly the same event for the next online/startup/schedule refresh.
-      await idb.put(STORES.meta, { key: 'lastReplan', value: {
-        eventId: entry.event.eventId, sessionId: entry.event.sessionId,
+      await idb.put(STORES.meta, { key: 'lastSessionEnd', value: {
+        sessionId: entry.event.sessionId,
         state: 'failed', error: 'backend_unavailable', retryable: true,
       } });
     }
@@ -581,18 +584,16 @@ async function deliverStudyEnds(config, events) {
 }
 
 async function refreshReplanStatus(config) {
-  const stored = await idb.get(STORES.meta, 'lastReplan');
-  if (!stored?.value?.sessionId || stored.value.state !== 'pending') return;
-  const replan = await request(config, `/api/sync/replan?sessionId=${encodeURIComponent(stored.value.sessionId)}`, {
+  const replan = await request(config, `/api/sync/replan?date=${api.todayKey()}`, {
     token: config.deviceKey, timeoutMs: 8000,
   });
-  await idb.put(STORES.meta, { key: 'lastReplan', value: { ...replan, sessionId: stored.value.sessionId } });
+  await idb.put(STORES.meta, { key: 'lastReplan', value: replan });
 }
 
-export async function getReplanStatus(sessionId) {
+export async function getReplanStatus(date = api.todayKey()) {
   const config = await getCloudConfig();
   if (!isActive(config)) return null;
-  return request(config, `/api/sync/replan?sessionId=${encodeURIComponent(sessionId)}`, { token: config.deviceKey });
+  return request(config, `/api/sync/replan?date=${encodeURIComponent(date)}`, { token: config.deviceKey });
 }
 
 /**
@@ -631,8 +632,8 @@ export async function syncNow({ force = false } = {}) {
         lastError: null,
       });
       if (!applied.purged && !built.remainingRecords) {
+        await deliverStudyEnds(config, built.sessionEnds).catch(() => {});
         await refreshReplanStatus(config).catch(() => {});
-        await deliverStudyEnds(config, built.replanEvents).catch(() => {});
       }
       if (built.remainingRecords) syncAgain = true;
       if (typeof window !== 'undefined') window.dispatchEvent(new Event('study-todo-synced'));

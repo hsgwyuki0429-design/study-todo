@@ -16,6 +16,23 @@ main = "server/adapters/cloudflare.js"
 compatibility_date = "2026-07-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Cron uses UTC; 18:00 UTC is 03:00 JST on the following date.
+[triggers]
+crons = ["0 18 * * *"]
+
+# Checked against Wrangler's config-schema.json (Observability).
+[observability]
+enabled = true
+redact_query_string = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+# Native fetch spans include url.full / url.path, including the secret Fire URL.
+enabled = false
+
 [vars]
 STUDY_TODO_SITE_ORIGIN = "https://hsgwyuki0429-design.github.io/study-todo"
 STUDY_TODO_ALLOWED_ORIGINS = "https://hsgwyuki0429-design.github.io"

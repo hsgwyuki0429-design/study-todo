@@ -67,15 +67,27 @@ async function end() {
   });
   await until(() => page.evaluate(async () => !(await (await import('./src/api.js')).getSessionState()).active));
 }
+async function waitForEnd() {
+  await until(async () => await page.evaluate(async () => {
+    const { idb, STORES } = await import('./src/idb.js');
+    return (await idb.get(STORES.meta, 'lastSessionEnd'))?.value?.state === 'acknowledged' && !(await (await import('./src/api.js')).listOutbox()).some(e => e.type === 'session_end');
+  }));
+}
+async function daily() { return server.app.replans.daily(Date.now()); }
+async function defer() {
+  await until(async () => Object.values((await server.storage.get('studytodo:devices'))?.devices ?? {}).some(d => d.activeSession));
+  assert.equal((await daily()).state, 'deferred');
+  assert.equal(calls.length, 0);
+}
 async function waitForDispatch() {
   await until(async () => calls.length > 0 && await page.evaluate(async () => {
     const api = await import('./src/api.js');
-    return !(await api.listOutbox()).some((e) => e.type === 'replan');
+    return !(await api.listOutbox()).some((e) => e.type === 'session_end');
   }));
   await server.flushJobs();
 }
 
-test('PWA double-tap end saves session, fires once, and schedule refresh loads real MCP changes', options, async () => {
+test('PWA double-tap end saves without fire; daily fires once, and schedule refresh loads real MCP changes', options, async () => {
   const questionId = await addRecords();
   provider = async () => {
     const date = await page.evaluate(async () => (await import('./src/api.js')).todayKey());
@@ -87,10 +99,13 @@ test('PWA double-tap end saves session, fires once, and schedule refresh loads r
     return Response.json({ type: 'routine_fire', claude_code_session_id: 'session_E2E', claude_code_session_url: 'https://claude.ai/code/session_E2E' });
   };
   const sessionId = await start();
-  await end(); await waitForDispatch();
+  await end(); await waitForEnd();
+  assert.equal(calls.length, 0);
+  await daily(); await waitForDispatch();
   assert.equal(calls.length, 1);
   assert.deepEqual(recordsAtFire, [1]);
-  assert.ok(calls[0].text.includes(`eventId=study_end_${sessionId}`));
+  assert.ok(calls[0].text.includes('trigger=daily_3am eventId=daily_replan_'));
+  assert.ok(!calls[0].text.includes(sessionId));
   await page.getByRole('tab', { name: /スケジュール/ }).click();
   await until(() => page.evaluate(async () => (await (await import('./src/api.js')).getTodayTasks()).some((t) => t.title === 'Routine review E2E')));
   await page.reload();
@@ -103,19 +118,20 @@ test('PWA offline end persists event and replays after reload/online', options, 
   const sessionId = await start();
   await context.setOffline(true);
   await end();
-  const event = await page.evaluate(async () => (await (await import('./src/api.js')).listOutbox()).find((e) => e.type === 'replan'));
-  assert.equal(event.event.eventId, `study_end_${sessionId}`);
+  const event = await page.evaluate(async () => (await (await import('./src/api.js')).listOutbox()).find((e) => e.type === 'session_end'));
+  assert.equal(event.event.sessionId, sessionId);
+  assert.equal(event.event.eventId, undefined);
   assert.equal(calls.length, 0);
   await context.setOffline(false);
   await page.reload();
-  await waitForDispatch();
-  assert.equal(calls.length, 1);
-  assert.deepEqual(recordsAtFire, [1]);
+  await waitForEnd();
+  assert.equal(calls.length, 0);
+  assert.equal((await call(server.app, '/api/sync/pull', { token: device.deviceKey })).body.records.length, 1);
 });
 
 test('PWA first-sync overflow: all 405 records arrive before fire', options, async () => {
   await addRecords(405);
-  await start(); await end(); await waitForDispatch();
+  await start(); await defer(); await end(); await waitForDispatch();
   assert.equal(calls.length, 1);
   assert.deepEqual(recordsAtFire, [405]);
 });
@@ -123,9 +139,9 @@ test('PWA first-sync overflow: all 405 records arrive before fire', options, asy
 test('PWA provider failure preserves end and records, and replay does not fire again', options, async () => {
   provider = async () => new Response('temporary', { status: 503 });
   await addRecords();
-  const sessionId = await start();
+  await start(); await defer();
   await end(); await waitForDispatch();
-  const status = await page.evaluate(async (id) => (await import('./src/cloud-sync.js')).getReplanStatus(id), sessionId);
+  const status = await page.evaluate(async () => (await import('./src/cloud-sync.js')).getReplanStatus());
   assert.equal(status.state, 'failed');
   assert.equal(status.error, 'provider_failure');
   await page.reload();
@@ -137,11 +153,11 @@ test('PWA provider failure preserves end and records, and replay does not fire a
 test('PWA UI and backend receipt do not await provider completion', options, async () => {
   let release;
   provider = () => new Promise((resolve) => { release = resolve; });
-  await addRecords(); await start(); await end();
+  await addRecords(); await start(); await defer(); await end();
   try {
     await until(() => page.evaluate(async () => {
       const { idb, STORES } = await import('./src/idb.js');
-      return (await idb.get(STORES.meta, 'lastReplan'))?.value?.state === 'pending';
+      return (await idb.get(STORES.meta, 'lastSessionEnd'))?.value?.state === 'acknowledged';
     }));
     assert.equal(await page.getByRole('button', { name: '学習を開始', exact: true }).count(), 1);
     assert.equal(calls.length, 1);
@@ -159,13 +175,13 @@ test('legacy session upgrade and cross-tab atomic end produce one event', option
     if (sessions[0].sessionId !== sessions[1].sessionId) throw new Error('unstable legacy session');
     const results = await Promise.all(sessions.map((s) => api.finishStudySession(s.sessionId)));
     if (results.filter((r) => r.ended).length !== 1) throw new Error('duplicate end');
-    const events = (await api.listOutbox()).filter((e) => e.type === 'replan');
+    const events = (await api.listOutbox()).filter((e) => e.type === 'session_end');
     if (events.length !== 1) throw new Error('duplicate event');
   });
 });
 
 test('evaluation write finishes before end, and an already-running sync cannot fire from stale data', options, async () => {
-  await start();
+  await start(); await defer();
   let releasePush;
   let intercepted = false;
   const gate = new Promise((resolve) => { releasePush = resolve; });
@@ -221,4 +237,58 @@ test('outbox acknowledgment preserves a newer queued edit', options, async () =>
     await idb.acknowledgeOutbox([next]);
     if (await idb.get(STORES.outbox, old.key)) throw new Error('acknowledged edit remains');
   });
+});
+
+test('three separate PWA sessions, startup, sync and schedule navigation do not fire Claude', options, async () => {
+  for (let i = 0; i < 3; i++) {
+    await start(); await addRecords(); await end(); await waitForEnd();
+    await page.evaluate(async () => (await import('./src/cloud-sync.js')).syncNow());
+    assert.equal(calls.length, 0);
+  }
+  await page.getByRole('tab', { name: /スケジュール/ }).click();
+  await page.reload();
+  await page.evaluate(async () => (await import('./src/cloud-sync.js')).syncNow());
+  assert.equal(calls.length, 0);
+  assert.equal((await call(server.app, '/api/sync/pull', { token: device.deviceKey })).body.records.length, 3);
+});
+
+test('PR #5 offline replan outbox upgrades to an end receipt without automatic fire', options, async () => {
+  await page.evaluate(async () => {
+    const { idb, STORES } = await import('./src/idb.js');
+    const api = await import('./src/api.js');
+    const sessionId = 'legacy-ended-session';
+    await idb.put(STORES.outbox, { key: `replan:study_end_${sessionId}`, type: 'replan', id: sessionId,
+      event: { sessionId, eventId: `study_end_${sessionId}`, date: api.todayKey(), endedAt: new Date().toISOString() } });
+    await (await import('./src/cloud-sync.js')).syncNow();
+  });
+  await waitForEnd();
+  assert.equal(calls.length, 0);
+  assert.equal(await page.evaluate(async () => (await (await import('./src/api.js')).listOutbox()).filter(e => e.type === 'replan').length), 0);
+});
+
+test('offline end retains deferred daily until records and end notification reach server', options, async () => {
+  await start(); await defer();
+  await context.setOffline(true);
+  await addRecords(); await end();
+  assert.equal(calls.length, 0);
+  await context.setOffline(false);
+  await page.reload(); await waitForDispatch(); await waitForEnd();
+  assert.equal(calls.length, 1);
+  assert.deepEqual(recordsAtFire, [1]);
+});
+
+test('paused session heartbeat remains active without a running question timer', options, async () => {
+  const id = await start();
+  await page.evaluate(async () => {
+    const { state } = await import('./src/state.js');
+    state.session.currentStartedAt = null;
+    state.session.sessionStartedAt = null;
+    await (await import('./src/api.js')).setSessionState(state.session);
+    (await import('./src/home.js')).heartbeatActivity();
+  });
+  await defer();
+  const index = await server.storage.get('studytodo:devices');
+  assert.equal(index.devices[device.deviceId].activeSession.sessionId, id);
+  await end(); await waitForDispatch();
+  assert.equal(calls.length, 1);
 });

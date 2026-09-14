@@ -21,6 +21,8 @@ const MIGRATION_FLAG = "__migratedFromKv";
 /** Durable Object の storage を、study-todo のドライバの形にする。 */
 export function createDurableObjectDriver(storage) {
   const wrap = (target) => ({
+    getAlarm: () => target.getAlarm(),
+    setAlarm: (at) => target.setAlarm(at),
     async get(key) {
       const value = await target.get(key);
       return value === undefined ? null : value;

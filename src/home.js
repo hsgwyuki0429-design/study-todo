@@ -26,7 +26,7 @@ function announceActivity(questionId) {
     ? state.tasks.find((t) => (t.questionIds ?? []).includes(questionId) && !t.completed)
     : null;
   const date = api.todayKey();
-  reportActivity(date, task?.id ?? null, questionId ?? null, state.session.sessionId).catch(() => {});
+  reportActivity(date, task?.id ?? null, questionId ?? null, state.session.sessionId, state.session.active).catch(() => {});
 }
 
 /**
@@ -35,13 +35,13 @@ function announceActivity(questionId) {
  */
 export function heartbeatActivity() {
   const s = state.session;
-  if (!s.currentStartedAt || !s.currentQuestionId) return;
-  announceActivity(s.currentQuestionId);
+  if (!s.active) return;
+  announceActivity(s.currentStartedAt ? s.currentQuestionId : null);
 }
 
 /** 学習をやめた・止めたときに、実行中の知らせを取り下げる。 */
 function clearActivity() {
-  reportActivity(api.todayKey(), null, null, state.session.sessionId).catch(() => {});
+  reportActivity(api.todayKey(), null, null, state.session.sessionId, state.session.active).catch(() => {});
 }
 
 /* ================================================================== */
@@ -178,6 +178,7 @@ async function startSession() {
     s.currentPlanTaskId = first.task?.id ?? null;
   }
   await persist();
+  heartbeatActivity();
   render();
 }
 
@@ -263,7 +264,7 @@ async function openChallenge(task) {
   startQuestion(task.questionIds[0]);
   s.currentPlanTaskId = task.id;
   s.currentPlanItemId = itemsOf(task)[0]?.itemId ?? null;
-  reportActivity(api.todayKey(), task.id, task.questionIds[0], s.sessionId).catch(() => {});
+  reportActivity(api.todayKey(), task.id, task.questionIds[0], s.sessionId, s.active).catch(() => {});
   await persist();
   render();
 }

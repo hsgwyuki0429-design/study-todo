@@ -28,17 +28,21 @@ export async function fireClaudeRoutine(event, { env, fetchImpl = fetch, timeout
         'content-type': 'application/json',
       },
       body: JSON.stringify({ text: `${env.CLAUDE_ROUTINE_TEST_MODE ? `mode=${env.CLAUDE_ROUTINE_TEST_MODE} ` : ''}`
-        + `trigger=study_end eventId=${event.eventId} date=${event.date} sessionId=${event.sessionId}` }),
+        + `trigger=${event.trigger} eventId=${event.eventId} date=${event.date}`
+        + (event.sessionId ? ` sessionId=${event.sessionId}` : '') }),
     });
     if (!response.ok) {
       const error = ({ 400: 'invalid_request', 401: 'authentication', 403: 'permission',
         404: 'routine_not_found', 429: 'rate_limit', 500: 'provider_failure', 503: 'provider_failure' })[response.status]
-        ?? 'provider_http_error';
+        ?? (response.status >= 500 ? 'provider_failure' : 'provider_http_error');
       // Even temporary errors do not authorize another POST for this event.
       return { state: 'failed', error, httpStatus: response.status, retryable: false,
         temporary: response.status === 429 || response.status >= 500 };
     }
-    const body = await response.json();
+    let body;
+    try { body = await response.json(); } catch {
+      return { state: 'failed', error: controller.signal.aborted ? 'timeout' : 'invalid_provider_response', retryable: false, outcomeUnknown: true };
+    }
     const id = body?.claude_code_session_id;
     if (body?.type !== 'routine_fire' || typeof id !== 'string' || !/^session_[A-Za-z0-9_-]{1,150}$/.test(id)
       || body.claude_code_session_url !== `https://claude.ai/code/${id}`) {
