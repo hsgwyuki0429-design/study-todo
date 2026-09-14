@@ -181,7 +181,7 @@ OAuth 2.1 + PKCE（S256）に対応しているので、Bearer を直接設定�
 | `getAppInfo` | 章・単元の一覧、評価の5段階、今日の日付、同期の状況 |
 | `listQuestions` | 問題マスタの一覧（章・単元・番号の範囲で絞る） |
 | `searchQuestions` | キーワードで問題を探す |
-| `getQuestion` | 1問の詳細と、その問題の学習履歴 |
+| `getQuestion` | 1問の詳細と、その問題の学習履歴・ほかの問題とのつながり |
 | `getStudyHistory` | 1問ごとの学習記録（日時・評価・所要時間） |
 | `getRecentMistakes` | 最近の △計算ミス と ✕方針ミス（種類ごとの件数つき） |
 | `getStudyStats` | 学習時間・評価別・章別の統計、ミス率の高い章 |
@@ -195,6 +195,7 @@ OAuth 2.1 + PKCE（S256）に対応しているので、Bearer を直接設定�
 | `getGoalProgress` | 目標ごとの達成数・残量・未配置分・残り時間 |
 | `getStudyAvailability` | 1日に使える学習時間（曜日別・日付ごと・今日の残り） |
 | `getQuestionEstimates` | 問題ごとの所要時間の見積もりと、その根拠 |
+| `getQuestionRelations` | 問題どうしの関連（前提・同系統・演習）。向き・種類・出どころで絞れる |
 | `getPlanningContext` | **計画を組むときの入口**。期間ぶんの状態をまとめて返す |
 | `validatePlanChanges` | 配分案を保存せずに確かめる |
 | `getGoals` | 長期の目標 |
@@ -212,6 +213,8 @@ OAuth 2.1 + PKCE（S256）に対応しているので、Bearer を直接設定�
 | `updateTasksForDate` | 【古い形】指定した日の予定を置き換える |
 | `updateStudyAvailability` | 学習可能時間を変える |
 | `saveQuestionEstimates` | 教材をもとにした**仮の**見積もりを保存する（実績にはならない） |
+| `saveQuestionRelations` | 問題どうしの関連をまとめて登録する（同じ from/to/type は上書き） |
+| `deleteQuestionRelations` | 登録した関連を消す（AIの推測が違っていたときに直す） |
 | `addGoal` | 長期の目標を足す |
 | `updateGoal` | 長期の目標を書き換える |
 
@@ -445,6 +448,53 @@ AIからは、まとめて消す操作は一切できません（1件ずつの�
 含まれていない使い方をしている場合は、設定で `timerIncludesReview: false` にすると
 1問あたりの補助時間（`reviewOverheadSeconds`）を足します。予備時間（1日につき1回）とは別物で、
 二重には加算しません。以前の記録は計測範囲が分からないため、そのまま実績として扱います。
+
+### 問題どうしの関連
+
+「この基本例題が、あの応用例題の土台になっている」というつながりを、
+問題マスタとは別に覚えておけます（`saveQuestionRelations` / `getQuestionRelations`）。
+`wrong_approach`（✕方針が違った）の問題が出たときに、**その土台の例題を先に復習へ入れる**
+といった判断に使います。
+
+覚え方の決まりは3つです。
+
+1. **向きは1つだけ覚えます。** 逆向き（発展先）は読むときに作ります。
+   両方を保存すると、片方だけ直したときに食い違うためです。
+2. `extends`（発展）は `prerequisite` の裏返しなので、保存するときに
+   `fromQuestionId` と `toQuestionId` を入れ替えて `prerequisite` に直します
+   （直したことは `normalized` で返します。黙っては変えません）。
+3. `same_theme`（同系統）は向きが無いので、ID順にそろえて1件だけ保存します。
+
+| type | 意味 |
+|---|---|
+| `prerequisite` | `from` が `to` の前提（土台） |
+| `extends` | `from` は `to` の発展（保存時は `prerequisite` に直る） |
+| `same_theme` | 直接の前提関係は無いが、同じ解法テーマを共有する |
+| `exercise_of` | `to`（EXERCISES など）は `from`（例題）の演習 |
+
+ほかの項目は `strength`（1〜3、3が強い。既定2）、`source`（`book` / `ai`）、
+`note`（根拠。200字まで）です。`createdAt` / `updatedAt` はサーバーが付けます。
+
+**`source` は見積もりと同じ考え方です。** `book` は教材の指針・関連問題欄などに
+明記されているもの、`ai` はAIが章・単元の構成と問題内容から推測したものです。
+推測を `book` と偽ってはいけません。あとから
+`getQuestionRelations` の `source: "ai"` で推測だけを一覧して見直せます。
+違っていた関連は `deleteQuestionRelations` で消せます（学習記録・予定には影響しません）。
+
+読むときは次の名前で返ります（`getQuestion` の `relations`、
+`getQuestionRelations` の `byQuestion`）。
+
+| 名前 | 意味 |
+|---|---|
+| `prerequisites` | この問題の土台になっている問題 |
+| `extendsTo` | この問題を土台にしている発展問題（裏返して作った向き） |
+| `sameTheme` | 同じ解法テーマの問題 |
+| `exercises` | この例題に対応する演習 |
+| `exerciseOf` | この問題が演習にあたる例題（裏返して作った向き） |
+
+1回に登録・削除できるのは100件まで、`getQuestionRelations` に渡せる問題IDは200件までです。
+問題マスタに無いIDが1件でも混ざっていると、`unknown_question` を返して**1件も保存しません**。
+関連は端末（PWA）では使わないため、同期では配っていません。
 
 ### 入りきらないとき
 

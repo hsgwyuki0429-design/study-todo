@@ -24,6 +24,7 @@ import { CHANGE_LIMITS } from "./service/task-changes.js";
 import { GOAL_COMPLETION_TYPES, GOAL_STATUSES } from "../src/goals.js";
 import { WEEKDAY_KEYS } from "../src/availability.js";
 import { EVALUATION_VALUES } from "../src/records-model.js";
+import { RELATION_SOURCES, RELATION_TYPES, STORED_RELATION_TYPES } from "./service/question-relations.js";
 
 const TIMEZONE_PROPERTY = {
   type: "integer",
@@ -297,7 +298,7 @@ export function createTools() {
     defineTool({
       name: "getQuestion",
       title: "問題の詳細と履歴",
-      description: "問題IDを指定して、その問題の情報（冊・章・単元・種類・番号・タイトル・難易度・ページ）と、これまでの学習履歴（日付・評価・所要時間）・平均所要時間・直近の評価を返す。「この問題は前どうだったか」を調べるときに使う。",
+      description: "問題IDを指定して、その問題の情報（冊・章・単元・種類・番号・タイトル・難易度・ページ）と、これまでの学習履歴（日付・評価・所要時間）・平均所要時間・直近の評価を返す。「この問題は前どうだったか」を調べるときに使う。ほかの問題とのつながり（relations: prerequisites 土台 / extendsTo 発展先 / sameTheme 同系統 / exercises 対応する演習 / exerciseOf 演習元の例題）も返る。",
       scope: "read",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
@@ -1058,6 +1059,120 @@ export function createTools() {
     }),
 
     defineTool({
+      name: "getQuestionRelations",
+      title: "問題どうしの関連を取る",
+      description: [
+        "問題IDをまとめて渡すと、その問題に結び付いた「ほかの問題とのつながり」を返す。",
+        "type は prerequisite（from が to の土台）/ same_theme（同じ解法テーマ）/ exercise_of（to は from の演習）。",
+        "覚えてあるのは片方向だけで、逆向き（発展先＝extendsTo、演習元＝exerciseOf）は返すときに裏返して作る。",
+        "source が book なら教材に書いてあるつながり、ai ならAIの推測なので、source で絞って見直せる。",
+        "「方針が違った問題の土台を先に復習する」なら、その問題IDを渡して byQuestion の prerequisites を見る。",
+      ].join(""),
+      scope: "read",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          questionIds: {
+            type: "array",
+            items: { type: "string", maxLength: 120 },
+            minItems: 1,
+            maxItems: SERVICE_LIMITS.relationQuestionIds,
+            description: "関連を知りたい問題ID（listQuestions が返す question.id）。",
+          },
+          direction: {
+            type: "string",
+            enum: ["from", "to", "both"],
+            description: "from なら渡した問題が関連元のものだけ、to なら関連先のものだけ、both は両方（既定）。same_theme は向きが無いので、どれを指定しても両側で拾う。",
+          },
+          type: { type: "string", enum: [...STORED_RELATION_TYPES], description: "関連の種類をひとつだけで絞る。複数まとめたいときは types。" },
+          types: {
+            type: "array",
+            items: { type: "string", enum: [...STORED_RELATION_TYPES] },
+            maxItems: STORED_RELATION_TYPES.length,
+            description: "関連の種類を複数まとめて絞る。",
+          },
+          source: { type: "string", enum: [...RELATION_SOURCES], description: "book なら教材に明記されたもの、ai ならAIが推測したものだけに絞る。推測を見直すときに使う。" },
+          limit: { type: "integer", minimum: 1, maximum: SERVICE_LIMITS.relationsLimitMax, description: `返す件数（既定 ${SERVICE_LIMITS.relationsLimitDefault}、最大 ${SERVICE_LIMITS.relationsLimitMax}）。` },
+          offset: { type: "integer", minimum: 0, description: "続きを読むときの開始位置。前回の nextOffset を渡す。" },
+        },
+        required: ["questionIds"],
+      },
+      run: (args, { service }) => service.getQuestionRelations(args),
+    }),
+
+    defineTool({
+      name: "saveQuestionRelations",
+      title: "問題どうしの関連を保存",
+      description: [
+        "「この基本例題が、あの応用例題の土台になっている」というつながりを、まとめて登録する。章ごとにまとめて入れる使い方を想定している。",
+        "これは学習の実績ではない。source で出どころを必ず分けること（book＝教材の指針・関連問題欄などに書いてある / ai＝章や単元の構成と問題内容からの推測）。",
+        "type は prerequisite（from が to の土台）/ extends（from は to の発展。prerequisite の裏返しとして覚え直す）/ same_theme（同じ解法テーマ）/ exercise_of（to は from の演習）。",
+        "同じ fromQuestionId / toQuestionId / type のものは上書きされる。推測の根拠は note に短く書いておくこと。",
+      ].join(""),
+      scope: "write",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          relations: {
+            type: "array",
+            minItems: 1,
+            maxItems: SERVICE_LIMITS.relationsPerSave,
+            description: "登録する関連の一覧。",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["fromQuestionId", "toQuestionId", "type", "source"],
+              properties: {
+                fromQuestionId: { type: "string", maxLength: 120, description: "関連元の問題ID。prerequisite なら土台のほう。" },
+                toQuestionId: { type: "string", maxLength: 120, description: "関連先の問題ID。prerequisite なら発展のほう。" },
+                type: { type: "string", enum: [...RELATION_TYPES], description: "関連の種類。" },
+                strength: { type: "integer", minimum: 1, maximum: 3, description: "つながりの強さ（1〜3、3が強い。既定は2）。3 は「土台をやらずに解くのは難しい」くらいのとき。" },
+                source: { type: "string", enum: [...RELATION_SOURCES], description: "book＝教材に明記されている / ai＝AIの推測。推測を book と偽らないこと。" },
+                note: { type: "string", maxLength: 200, description: "そう考えた根拠（例:「因数分解の基本手順が共通」）。" },
+              },
+            },
+          },
+        },
+        required: ["relations"],
+      },
+      run: (args, { service, actor }) => service.saveQuestionRelations(args, actor),
+    }),
+
+    defineTool({
+      name: "deleteQuestionRelations",
+      title: "問題どうしの関連を削除",
+      description: [
+        "登録した関連を消す。AIの推測（source: ai）が違っていたときに直すためのもの。",
+        "fromQuestionId / toQuestionId / type で指定する（extends は prerequisite の裏返しとして探す）。",
+        "学習の記録や予定には影響しない。",
+      ].join(""),
+      scope: "write",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          relations: {
+            type: "array",
+            minItems: 1,
+            maxItems: SERVICE_LIMITS.relationsPerSave,
+            description: "消す関連の一覧。",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["fromQuestionId", "toQuestionId", "type"],
+              properties: {
+                fromQuestionId: { type: "string", maxLength: 120 },
+                toQuestionId: { type: "string", maxLength: 120 },
+                type: { type: "string", enum: [...RELATION_TYPES] },
+              },
+            },
+          },
+        },
+        required: ["relations"],
+      },
+      run: (args, { service, actor }) => service.deleteQuestionRelations(args, actor),
+    }),
+
+    defineTool({
       name: "getPlanningContext",
       title: "計画に必要な情報をまとめて取得",
       description: [
@@ -1146,6 +1261,11 @@ export const SERVER_INSTRUCTIONS = `study-todo は、青チャート（数学の
 - 評価は5段階です。perfect(◯完璧) / better_solution(解もっと良い解法) /
   weak_writing(記記述が甘い) / calc_error(△計算ミス) / wrong_approach(✕方針が違った)。
   「弱点」を聞かれたら getRecentMistakes と getStudyStats の weakChapters を見てください。
+- 問題どうしのつながりは getQuestionRelations（または getQuestion の relations）で分かります。
+  wrong_approach（✕方針が違った）の問題が出たら、その prerequisites（土台の例題）を
+  先に復習へ入れるか検討してください。source が ai のものはAIの推測なので、
+  それを根拠に予定を大きく変えるときは、利用者にひとこと断ってください。
+  推測したつながりは saveQuestionRelations に source: "ai" で登録します（book と偽らないこと）。
 - 予定を変えるときは、必ず先に getTodayTasks / getTasksInRange で、いまの予定・
   各タスクの task.id・その日の revision・locked（変更できないタスク）を取得してください。
   そのうえで applyTaskChanges に「変えたいタスクだけ」を渡します。全体を組み直す必要はありません。

@@ -52,8 +52,10 @@ test("予定を変えるだけの接続では、実績を1件も変えられな�
 test("消せるのは本人が申告した実績だけで、まとめて初期化するツールは無い", () => {
   // 本人が「あれは無し」と言った1件ずつの削除だけを公開する。
   // 全部を消す・初期化するような操作は、AIからは一切できない（設定画面からだけ）。
+  // deleteQuestionRelations は実績ではなく、AIが推測で入れた問題どうしの関連を
+  // 直すためのもの（学習記録・予定には触らない）。
   const destructive = toolNames.filter((name) => /delete|remove|clear|reset|wipe|purge/i.test(name));
-  assert.deepEqual(destructive.sort(), ["deleteChallengeResults", "deleteStudyRecords"]);
+  assert.deepEqual(destructive.sort(), ["deleteChallengeResults", "deleteQuestionRelations", "deleteStudyRecords"]);
 });
 
 test("タイマー（この端末の状態）を操作するツールは存在しない", () => {
