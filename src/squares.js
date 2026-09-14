@@ -110,7 +110,7 @@ export function helpPanel() {
  * マスを押したときに出す、その1回の取り組みの中身。
  * スケジュールの詳細でも、例題ごとの履歴でも同じものを使う。
  */
-export function attemptDetailCard(record, { planTitle = null, onDelete = null } = {}) {
+export function attemptDetailCard(record, { planTitle = null, onDelete = null, onUndo = null } = {}) {
   const question = q(record.questionId);
   const ev = evalOf(record.evaluation) ?? UNEVALUATED;
   const card = el('div', 'attempt-detail');
@@ -124,6 +124,14 @@ export function attemptDetailCard(record, { planTitle = null, onDelete = null } 
   card.append(el('div', null, `所要時間: ${hasDuration(record) ? fmtMS(record.durationSeconds)
     : (record.durationGroup ? `未登録（まとまりで ${fmtMS(record.durationGroup.totalSeconds)}）` : '未登録')}`));
   card.append(el('div', null, record.challengeId ? 'チャレンジの中で解いた' : '通常の学習'));
+  if (Number.isFinite(record.solveSeconds) && Number.isFinite(record.reviewSeconds)) {
+    card.append(el('div', null, `解答: ${fmtMS(record.solveSeconds)} ／ 採点・暗記: ${fmtMS(record.reviewSeconds)}`));
+  }
+  if (onUndo) {
+    const undo = el('button', 'btn', '未着手に戻す');
+    undo.onclick = () => onUndo(record);
+    card.append(undo);
+  }
   // どうやって入った記録か。あとから足した分・訂正した分が分かるようにする。
   card.append(el('div', null, `記録: ${RECORD_SOURCE_LABELS[record.source ?? 'timer']}`
     + (record.enteredBy ? `（${record.enteredBy}）` : '')));

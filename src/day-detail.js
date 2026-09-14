@@ -20,6 +20,7 @@ import { state, q, qLabel, render, loadTasks, refreshToday } from './state.js';
 import { el, fmtDate, fmtMS, fmtTime, row, emptyState } from './ui.js';
 import { attemptDetailCard, attemptSquare, plannedSquare, squareRow } from './squares.js';
 import { syncInBackground } from './cloud-sync.js';
+import { undoRecord } from './record-actions.js';
 
 // どのマスを開いているか（押すたびに開閉する）。
 let openAttemptId = null;
@@ -193,7 +194,7 @@ export async function renderDayDetail(screen, dateKey) {
       const square = attemptSquare(record, { label: qLabel(record.questionId) });
       node.prepend(square);
       list.append(node);
-      if (opened) list.append(attemptDetailCard(record, { onDelete: (target) => deleteAttempt(target, rerender) }));
+      if (opened) list.append(attemptDetailCard(record, { onDelete: (target) => deleteAttempt(target, rerender), onUndo: undoRecord }));
     }
   }
 

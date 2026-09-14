@@ -43,6 +43,25 @@ const readDuration = (value) => {
   return Math.round(number);
 };
 
+// Optional measured breakdown. Old records stay unclassified; never invent a split.
+export function normalizedTiming(raw) {
+  const duration = readDuration(raw.durationSeconds);
+  const solve = readDuration(raw.solveSeconds), review = readDuration(raw.reviewSeconds);
+  const unclassified = readDuration(raw.unclassifiedSeconds) ?? 0;
+  const result = {};
+  if (duration !== null && solve !== null && review !== null && solve + review + unclassified === duration) {
+    Object.assign(result, { solveSeconds: solve, reviewSeconds: review }, unclassified ? { unclassifiedSeconds: unclassified } : {});
+  }
+  if (isObject(raw.studySecondsByDate)) {
+    const entries = Object.entries(raw.studySecondsByDate);
+    if (entries.length && entries.length <= 730 && entries.every(([date, seconds]) => isDateKey(date) && readDuration(seconds) !== null)
+      && entries.reduce((sum, [, seconds]) => sum + readDuration(seconds), 0) === duration) {
+      result.studySecondsByDate = Object.fromEntries(entries.map(([date, seconds]) => [date, readDuration(seconds)]));
+    }
+  }
+  return result;
+}
+
 /**
  * 学習記録を、保存してよい形へ整える。
  * 古い記録（date も source も無いもの）は、timestamp から日付を出し、
@@ -80,6 +99,7 @@ export function normalizeStudyRecord(raw, { receivedAt = Date.now(), timezoneOff
     evaluation,
     // 所要時間が分からない記録は null。0秒として平均や見積もりに混ぜない。
     durationSeconds: readDuration(raw.durationSeconds),
+    ...normalizedTiming(raw),
     // 「4問で合計40分」のような、まとまりでの申告時間。
     // 1問ずつの時間はでっち上げず、まとまりの合計として持つ。
     ...(isObject(raw.durationGroup) && raw.durationGroup.id
@@ -204,6 +224,7 @@ export function describeRecord(record) {
     evaluation: record.evaluation ?? null,
     evaluationKnown: Boolean(record.evaluation),
     durationSeconds: hasDuration(record) ? record.durationSeconds : null,
+    ...normalizedTiming(record),
     durationKnown: hasDuration(record),
     ...(record.durationGroup ? { durationGroup: record.durationGroup } : {}),
     source: record.source ?? 'timer',

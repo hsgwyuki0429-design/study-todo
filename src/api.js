@@ -10,6 +10,7 @@ import { itemsOf, splitPlanItems, withItems } from './plan-items.js';
 import { normalizeGoal, goalAttempts as goalAttemptsOf, questionSatisfied as questionSatisfiedFor } from './goals.js';
 import { normalizeAvailability, availabilityForDate } from './availability.js';
 import { estimateForQuestion } from './estimates.js';
+import { checkpoint } from './study-timing.js';
 import {
   RECORD_SOURCE_LABELS, describeRecord, hasDuration, hasExactTime,
   isCountedRecord, mergeStudyRecord, normalizeStudyRecord, recordDateOf, sumDurations,
@@ -238,7 +239,7 @@ export async function listRecords({ includeVoided = false } = {}) {
  * 「1回の取り組み＝1件の記録」なので、同じ問題を何度解いても上書きせずに増やす。
  * planItemId は「どの予定に対する取り組みだったか」。予定に無い問題を解いたときは入らない。
  */
-export async function addStudyRecord({ questionId, evaluation, durationSeconds, challengeId, planTaskId, planItemId }) {
+function makeStudyRecord({ questionId, evaluation, durationSeconds, challengeId, planTaskId, planItemId, solveSeconds, reviewSeconds, unclassifiedSeconds, studySecondsByDate }) {
   const now = new Date().toISOString();
   const record = {
     id: uid('rec'),
@@ -249,6 +250,8 @@ export async function addStudyRecord({ questionId, evaluation, durationSeconds, 
     datePrecision: 'datetime',
     evaluation,
     durationSeconds: Math.max(0, Math.round(durationSeconds)),
+    ...(Number.isFinite(solveSeconds) && Number.isFinite(reviewSeconds)
+      ? { solveSeconds, reviewSeconds, ...(unclassifiedSeconds ? { unclassifiedSeconds } : {}), studySecondsByDate } : {}),
     // アプリのタイマーで測った記録。あとから本人の申告で足した記録とは区別する。
     source: 'timer',
     enteredAt: now,
@@ -257,9 +260,19 @@ export async function addStudyRecord({ questionId, evaluation, durationSeconds, 
     ...(planTaskId ? { planTaskId } : {}),
     ...(planItemId ? { planItemId } : {}),
   };
+  return record;
+}
+
+export async function addStudyRecord(input) {
+  const record = makeStudyRecord(input);
   await idb.put(STORES.records, record);
   await enqueueOutbox('record', record.id);
   return record;
+}
+
+export async function completeStudyAttempt(input, session, nextSession) {
+  const record = makeStudyRecord(input);
+  return idb.commitAttempt(record, session, nextSession);
 }
 
 export async function getStudyHistory({ limit = 100, from, to, evaluation, chapter } = {}) {
@@ -319,7 +332,9 @@ export async function getTodayStats(date = todayKey()) {
   const today = records.filter((r) => recordDateOf(r) === date);
   const totals = sumDurations(today);
   return {
-    seconds: totals.seconds,
+    date,
+    seconds: sumDurations(records.filter(r => !r.studySecondsByDate && recordDateOf(r) === date)).seconds
+      + records.reduce((sum, r) => sum + (r.studySecondsByDate?.[date] ?? 0), 0),
     // 時間が未登録の取り組みの数。合計に足さずに、件数だけ知らせる。
     unknownDurationCount: totals.unknownCount,
     count: today.length,
@@ -579,6 +594,24 @@ export async function deleteStudyRecord(recordId) {
   await idb.del(STORES.records, recordId);
   await enqueueOutbox('record_deleted', recordId);
   return { ok: true, record };
+}
+
+/** Undo a mistaken result and reopen only its associated plan; other attempts remain. */
+export async function undoStudyRecord(recordId) {
+  return idb.undoAttempt(recordId, (record, records, tasks, planMeta) => {
+    const changed = [];
+    for (const task of tasks) {
+      const matches = record.planItemId ? itemsOf(task).some(i => i.itemId === record.planItemId)
+        : task.date === recordDateOf(record) && task.questionIds?.includes(record.questionId);
+      if (matches && task.kind !== 'challenge' && task.completed
+        && splitPlanItems(task, records.filter(isCountedRecord), { date: task.date }).pending.length) {
+        changed.push({ ...task, completed: false });
+        planMeta[task.date] = { ...(planMeta[task.date] ?? { revision: 0 }),
+          updatedAt: new Date().toISOString(), dirty: true, updatedBy: 'app' };
+      }
+    }
+    return { tasks: changed, planMeta };
+  });
 }
 
 export async function saveChallengeResult(result) {
@@ -941,6 +974,9 @@ export const EMPTY_SESSION = {
   currentPlanTaskId: null,
   currentChallengeId: null,
   questionElapsed: {},
+  questionTiming: {},
+  idleSecondsByDate: {},
+  resumeMode: null,
   currentStartedAt: null,
 
   // 学習セッション全体のタイマー（問題を切り替えても止まらない）
@@ -989,13 +1025,16 @@ export async function getSessionState() {
 }
 
 /** No evaluations/times are invented: existing records have already been saved. */
-export async function finishStudySession(sessionId) {
+export async function finishStudySession(sessionId, snapshot = null) {
   const endedAt = new Date().toISOString();
   return idb.updateSession((stored) => {
     if (!stored?.active || stored.sessionId !== sessionId) return { ended: false };
+    const session = checkpoint(structuredClone(snapshot?.sessionId === sessionId ? snapshot : stored), Date.parse(endedAt));
+    const resumeMode = session.mode;
     return {
       ended: true,
-      session: { ...EMPTY_SESSION, questionElapsed: {} },
+      session: { ...session, active: false, sessionId: null, mode: 'idle', resumeMode,
+        currentStartedAt: null, sessionStartedAt: null },
       event: { key: `session_end:${sessionId}`, type: 'session_end', id: sessionId, queuedAt: Date.now(),
         event: { sessionId, date: dateKeyOf(endedAt), endedAt } },
     };

@@ -2,6 +2,8 @@
 // 学習中に画面遷移は行わず、下半分の中身だけが切り替わる。
 
 import * as api from './api.js';
+import { checkpoint, questionTiming, timingRecord, pendingSecondsForDay, forgetQuestion } from './study-timing.js';
+import { undoRecord } from './record-actions.js';
 import { EVALUATIONS, EVAL_MAP } from './api.js';
 import { itemsOf, splitPlanItems } from './plan-items.js';
 import { state, q, qLabel, render, refreshToday } from './state.js';
@@ -70,26 +72,33 @@ function challengeElapsed() {
 }
 
 function commitCurrent() {
-  const s = state.session;
-  if (s.currentQuestionId && s.currentStartedAt) {
-    s.questionElapsed[s.currentQuestionId] =
-      (s.questionElapsed[s.currentQuestionId] || 0) + since(s.currentStartedAt);
-  }
-  s.currentStartedAt = null;
+  checkpoint(state.session);
+  state.session.currentStartedAt = null;
 }
 
 function commitSession() {
+  checkpoint(state.session);
+  state.session.sessionStartedAt = null;
+}
+
+export function dailyElapsed() {
+  const date = api.todayKey();
+  return (state.today.date === date ? state.today.seconds : 0) + pendingSecondsForDay(state.session, date);
+}
+
+function currentTimerSeconds() {
   const s = state.session;
-  if (s.sessionStartedAt) {
-    s.sessionElapsed = (s.sessionElapsed || 0) + since(s.sessionStartedAt);
-    s.sessionStartedAt = null;
-  }
+  if (!s.currentQuestionId) return 0;
+  if (s.mode !== 'record_input') return elapsedOf(s.currentQuestionId);
+  return questionTiming(s, s.currentQuestionId).reviewSeconds + (s.currentStartedAt ? since(s.currentStartedAt) : 0);
 }
 
 function startQuestion(questionId) {
   const s = state.session;
   commitCurrent();
   s.currentQuestionId = questionId;
+  const timing = questionTiming(s, questionId);
+  if (!s.mode.startsWith('challenge')) s.mode = timing.phase === 'review' ? 'record_input' : 'task_list';
   s.currentStartedAt = new Date().toISOString();
   if (!s.sessionStartedAt) s.sessionStartedAt = new Date().toISOString();
   announceActivity(questionId);
@@ -163,20 +172,30 @@ const currentChallengeTask = () =>
 /* 状態遷移                                                            */
 /* ================================================================== */
 
-async function startSession() {
+async function startSession(selected = null) {
   const s = state.session;
   if (s.active || endingSession) return;
   s.sessionId = crypto.randomUUID();
   s.active = true;
-  s.mode = 'task_list';
+  s.mode = s.resumeMode ?? 'task_list';
+  s.resumeMode = null;
   s.sessionElapsed = 0;
   s.sessionStartedAt = new Date().toISOString();
-  const first = flattenTasks().find((i) => i.type === 'question');
-  if (first) {
-    startQuestion(first.questionId);
-    s.currentPlanItemId = first.item?.itemId ?? null;
-    s.currentPlanTaskId = first.task?.id ?? null;
+  if (selected?.questionId) {
+    startQuestion(selected.questionId);
+    s.currentPlanItemId = selected.item?.itemId ?? null;
+    s.currentPlanTaskId = selected.task?.id ?? null;
+  } else if (s.currentQuestionId) {
+    startQuestion(s.currentQuestionId);
+  } else {
+    const first = flattenTasks().find((i) => i.type === 'question');
+    if (first) {
+      startQuestion(first.questionId);
+      s.currentPlanItemId = first.item?.itemId ?? null;
+      s.currentPlanTaskId = first.task?.id ?? null;
+    }
   }
+  state.idleTab = 'todo';
   await persist();
   heartbeatActivity();
   render();
@@ -192,7 +211,7 @@ async function endSession() {
     await recording;
     commitCurrent();
     commitSession();
-    await api.finishStudySession(state.session.sessionId);
+    await api.finishStudySession(state.session.sessionId, state.session);
     clearActivity();
     state.session = await api.getSessionState();
     render();
@@ -202,6 +221,7 @@ async function endSession() {
 }
 
 async function togglePause() {
+  if (recording || endingSession) return;
   const s = state.session;
   if (isPaused()) {
     s.sessionStartedAt = new Date().toISOString();
@@ -216,18 +236,35 @@ async function togglePause() {
 }
 
 /** タスクリスト上で問題をタップしたとき。どの予定項目に取り組むかも覚えておく。 */
-async function tapTaskQuestion(questionId, item = null, task = null) {
+async function beginReview() {
+  if (recording || endingSession || !state.session.currentQuestionId) return;
   const s = state.session;
-  if (s.currentQuestionId === questionId && s.currentStartedAt) {
-    s.mode = 'record_input';   // 計測中の行を再タップ → 記録入力
-  } else {
-    startQuestion(questionId);
-    s.currentPlanItemId = item?.itemId ?? null;
-    s.currentPlanTaskId = task?.id ?? null;
-    s.mode = 'task_list';
-  }
-  await persist();
-  render();
+  const paused = isPaused();
+  commitCurrent();
+  questionTiming(s, s.currentQuestionId).phase = 'review';
+  s.mode = 'record_input';
+  if (!paused) s.currentStartedAt = new Date().toISOString();
+  await persist(); render();
+}
+
+async function cancelCurrentAttempt() {
+  if (recording || endingSession || !state.session.currentQuestionId) return;
+  if (!confirm('この取り組みの計測時間を取り消して、未着手に戻しますか？')) return;
+  commitCurrent();
+  forgetQuestion(state.session, state.session.currentQuestionId);
+  state.session.mode = 'task_list';
+  clearActivity();
+  await persist(); render();
+}
+
+async function tapTaskQuestion(questionId, item = null, task = null) {
+  if (recording || endingSession) return;
+  const s = state.session;
+  if (s.currentQuestionId === questionId) return beginReview();
+  startQuestion(questionId);
+  s.currentPlanItemId = item?.itemId ?? null;
+  s.currentPlanTaskId = task?.id ?? null;
+  await persist(); render();
 }
 
 /** チャレンジ中に問題をタップしたとき。評価は聞かず、計測対象を切り替えるだけ。 */
@@ -271,6 +308,9 @@ async function openChallenge(task) {
 
 function clearChallenge() {
   const s = state.session;
+  for (const qid of s.reviewQueue ?? []) {
+    if (s.evaluations?.[qid]) forgetQuestion(s, qid);
+  }
   s.currentChallengeId = null;
   s.challengeStartedAt = null;
   s.challengeTimeLimitSeconds = null;
@@ -315,22 +355,29 @@ async function saveEvaluation(evaluation) {
   const questionId = s.currentQuestionId;
   if (!questionId) return;
   commitCurrent();
-  await api.addStudyRecord({
-    questionId,
-    evaluation,
-    durationSeconds: s.questionElapsed[questionId] || 0,
-    // どの予定に対する取り組みだったかを残す。予定外に解いたときは入らない。
-    planTaskId: s.currentPlanTaskId ?? null,
-    planItemId: s.currentPlanItemId ?? null,
-  });
-
-  // 記録したら計測を止め、次の問題は自分でタップして選ぶ
-  s.currentQuestionId = null;
-  s.currentPlanItemId = null;
-  s.currentPlanTaskId = null;
-  delete s.questionElapsed[questionId];
-  s.mode = 'task_list';
+  const next = structuredClone(s);
+  forgetQuestion(next, questionId);
+  next.mode = 'task_list';
+  const result = await api.completeStudyAttempt({
+    questionId, evaluation, ...timingRecord(s, questionId),
+    planTaskId: s.currentPlanTaskId ?? null, planItemId: s.currentPlanItemId ?? null,
+  }, s, next);
+  if (!result.saved) {
+    state.session = await api.getSessionState();
+    await refreshToday(); render(); return;
+  }
+  state.session = next;
   await refreshAfterRecord();
+  // The next pending example starts only after the evaluation is durable.
+  if (!endingSession && state.session.active) {
+    const first = flattenTasks().find(item => item.type === 'question');
+    if (first) {
+      startQuestion(first.questionId);
+      state.session.currentPlanItemId = first.item?.itemId ?? null;
+      state.session.currentPlanTaskId = first.task?.id ?? null;
+      await persist(); render();
+    }
+  }
 }
 
 async function recordChallengeEvaluation(evaluation) {
@@ -411,10 +458,10 @@ function timerPanel() {
 
   if (s.mode === 'idle') {
     label.textContent = '今日の学習時間';
-    value.textContent = fmtMS(state.today.seconds);
+    value.textContent = fmtMS(dailyElapsed());
     value.dataset.timer = 'today';
     const b = el('button', 'btn btn-primary', '学習を開始');
-    b.onclick = startSession;
+    b.onclick = () => startSession();
     actions.append(b);
     panel.append(label, value, actions);
     return panel;
@@ -422,8 +469,8 @@ function timerPanel() {
 
   // 全体の学習時間（左上に小さく）
   const total = el('div', 'timer-total');
-  total.append(el('span', 'timer-total-k', '学習時間'));
-  const totalValue = el('span', 'timer-total-v', fmtMS(sessionElapsed()));
+  total.append(el('span', 'timer-total-k', '今日の学習時間'));
+  const totalValue = el('span', 'timer-total-v', fmtMS(dailyElapsed()));
   totalValue.dataset.timer = 'session';
   total.append(totalValue);
   panel.append(total);
@@ -461,15 +508,23 @@ function timerPanel() {
   const name = s.currentQuestionId ? qLabel(s.currentQuestionId) : null;
   label.textContent = name
     ? s.currentStartedAt
-      ? `${name} を解いています`
+      ? `${name} ${s.mode === 'record_input' ? '採点・暗記中' : 'を解いています'}`
       : `${name}（一時停止中）`
     : '問題をタップして開始';
-  value.textContent = fmtMS(s.currentQuestionId ? elapsedOf(s.currentQuestionId) : 0);
+  value.textContent = fmtMS(currentTimerSeconds());
 
   const pause = el('button', 'btn', isPaused() ? '再開' : '一時停止');
   pause.onclick = togglePause;
   const stop = el('button', 'btn btn-danger', '終了');
   stop.onclick = endSession;
+  if (s.currentQuestionId) {
+    if (s.mode !== 'record_input') {
+      const review = el('button', 'btn btn-primary', '解答終了・採点を始める');
+      review.onclick = beginReview; actions.append(review);
+    }
+    const cancel = el('button', 'link-btn', 'この取り組みを取り消す');
+    cancel.onclick = cancelCurrentAttempt; actions.append(cancel);
+  }
   actions.append(pause, stop);
   panel.append(label, value, actions);
   return panel;
@@ -482,14 +537,15 @@ export function tickHome() {
     const n = document.querySelector(`[data-timer="${name}"]`);
     if (n) n.textContent = text;
   };
-  set('today', fmtMS(state.today.seconds));
-  set('session', fmtMS(sessionElapsed()));
+  if (state.today.date !== api.todayKey()) { void refreshToday(); }
+  set('today', fmtMS(dailyElapsed()));
+  set('session', fmtMS(dailyElapsed()));
   if (s.mode === 'challenge') {
     const limit = s.challengeTimeLimitSeconds ?? 0;
     const e = challengeElapsed();
     set('challenge', fmtMS(s.challengeCountUp ? e : Math.max(0, limit - e)));
   } else if (s.currentQuestionId) {
-    set('main', fmtMS(elapsedOf(s.currentQuestionId)));
+    set('main', fmtMS(currentTimerSeconds()));
   }
   document.querySelectorAll('[data-elapsed-for]').forEach((node) => {
     node.textContent = fmtMS(elapsedOf(node.dataset.elapsedFor));
@@ -542,6 +598,10 @@ const challengeSub = (task) =>
 function idlePanel(panel) {
   const open = state.tasks.filter((t) => !t.completed);
   const todoCount = open.reduce((n, t) => n + (t.kind === 'challenge' ? 1 : t.questionIds.length), 0);
+  if (state.session.currentQuestionId) {
+    const timing = questionTiming(state.session, state.session.currentQuestionId);
+    panel.append(el('div', 'note', `${qLabel(state.session.currentQuestionId)}：${timing.phase === 'review' ? '採点・暗記' : '解答'}の途中。学習を開始すると続きから再開します。`));
+  }
   panel.append(
     segmented(
       [['todo', `やること ${todoCount}`], ['done', `やったこと ${state.today.records.length}`]],
@@ -558,27 +618,46 @@ function idlePanel(panel) {
     if (!open.length) list.append(emptyState('今日のタスクはありません'));
     for (const task of open) {
       const first = q(task.questionIds[0]);
-      list.append(
-        row({
-          title: task.kind === 'challenge' ? task.title ?? 'チャレンジ' : groupLabel(task.questionIds),
-          sub: task.kind === 'challenge' ? challengeSub(task) : first ? `${first.chapter} ・ ${first.section}` : null,
-          right: pinButton(task),
-        })
-      );
+      const item = splitPlanItems(task, todayRecords(), { date: api.todayKey() }).pending[0];
+      const node = row({
+        title: task.kind === 'challenge' ? task.title ?? 'チャレンジ' : groupLabel(task.questionIds),
+        sub: task.kind === 'challenge' ? challengeSub(task) : first ? first.chapter + ' ・ ' + first.section : null,
+        right: pinButton(task),
+      });
+      const main = node.querySelector('.row-main');
+      const start = el('button', 'row-main');
+      start.style.textAlign = 'left';
+      start.append(...main.childNodes);
+      start.onclick = () => task.kind === 'challenge' ? openChallenge(task)
+        : item && startSession({ questionId: item.questionId, item, task });
+      main.replaceWith(start);
+      list.append(node);
     }
   } else {
     if (!state.today.records.length) list.append(emptyState('まだ記録がありません'));
-    for (const r of state.today.records) {
-      const ev = EVAL_MAP[r.evaluation];
-      const node = row({ title: qLabel(r.questionId), right: el('span', 'row-time', fmtMS(r.durationSeconds)) });
-      node.prepend(el('span', `eval-mark tone-${ev.tone}`, ev.symbol));
-      list.append(node);
-    }
+    appendDoneRecords(list);
   }
   panel.append(list);
 }
 
+function appendDoneRecords(list) {
+  for (const r of state.today.records) {
+    const ev = EVAL_MAP[r.evaluation];
+    const undo = el('button', 'link-btn', '未着手に戻す');
+    undo.setAttribute('aria-label', qLabel(r.questionId) + 'を未着手に戻す');
+    undo.onclick = () => undoRecord(r);
+    const node = row({ title: qLabel(r.questionId), right: [el('span', 'row-time', fmtMS(r.durationSeconds)), undo] });
+    if (ev) node.prepend(el('span', 'eval-mark tone-' + ev.tone, ev.symbol));
+    list.append(node);
+  }
+}
+
 function taskListPanel(panel) {
+  panel.append(segmented([['todo', 'やること'], ['done', 'やったこと ' + state.today.records.length]],
+    state.idleTab, value => { state.idleTab = value; render(); }));
+  if (state.idleTab === 'done') {
+    const list = el('div', 'list'); appendDoneRecords(list); panel.append(list); return;
+  }
   panel.append(el('div', 'panel-head', '今日やること（優先順）'));
   const list = el('div', 'list');
   const items = flattenTasks();
@@ -685,13 +764,17 @@ export function renderHome(screen) {
       c.append(el('div', 'k', k), el('div', 'v', v));
       return c;
     };
-    cards.append(card('累計時間', fmtShort(state.today.seconds)), card('解いた問題数', String(state.today.count)));
+    cards.append(card('累計時間', fmtShort(dailyElapsed())), card('解いた問題数', String(state.today.count)));
     screen.append(cards);
   }
 
   const panel = el('div', 'panel');
   if (s.mode === 'idle') idlePanel(panel);
-  else if (s.mode === 'record_input') evalPanel(panel, `${qLabel(s.currentQuestionId)} はどうだった？`, '所要時間は自動で記録されます');
+  else if (s.mode === 'record_input') {
+    const timing = questionTiming(s, s.currentQuestionId);
+    panel.append(el('div', 'note', '解答 ' + fmtMS(timing.solveSeconds) + ' ／ ここからは採点・暗記時間として計測します'));
+    evalPanel(panel, qLabel(s.currentQuestionId) + ' の採点・暗記が終わったら結果を記入', '結果を保存すると、次の例題を開始します');
+  }
   else if (s.mode === 'challenge') challengePanel(panel);
   else if (s.mode === 'challenge_review')
     evalPanel(panel, `${qLabel(s.reviewQueue[s.reviewIndex])} はどうだった？`, '所要時間は自動で記録されます');
