@@ -1,79 +1,157 @@
 import { fail } from '../core/validate.js';
 import { runTransaction, supportsTransactions } from '../storage/driver.js';
-import { isDateKey } from '../../src/datetime.js';
+import { dateKeyOf, isDateKey } from '../../src/datetime.js';
+import { STORAGE_KEYS, DEFAULT_SETTINGS } from '../auth/tokens.js';
 import { SYNC_KEYS } from './sync-service.js';
 import { fireClaudeRoutine, routineConfigurationError } from './claude-routine.js';
 
-// No TTL/capped history: removing these tombstones would permit old requests to fire again.
+// Keep old study_end keys as closed-session tombstones. Never fire them again.
 export const replanEventKey = SYNC_KEYS.replanEvent;
+export const dailyEventKey = (date) => `studytodo:replan:daily:${date}`;
+export const DEFERRED_KEY = 'studytodo:replan:deferred';
+
+export function dailyEvent(scheduledTime) {
+  if (typeof scheduledTime !== 'number' || !Number.isFinite(scheduledTime)) fail('scheduledTimeが不正です。', 'scheduledTime');
+  const date = dateKeyOf(scheduledTime, 540);
+  if (!isDateKey(date)) fail('scheduledTimeが不正です。', 'scheduledTime');
+  return { trigger: 'daily_3am', eventId: `daily_replan_${date}`, date };
+}
 
 export function readStudyEnd(body) {
   if (!body || typeof body.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(body.sessionId)
-    || body.eventId !== `study_end_${body.sessionId}` || !isDateKey(body.date)
+    || (body.eventId !== undefined && body.eventId !== `study_end_${body.sessionId}`) || !isDateKey(body.date)
     || typeof body.endedAt !== 'string' || !Number.isFinite(Date.parse(body.endedAt))) {
-    fail('study_end のイベント情報が正しくありません。', 'event');
+    fail('session終了の情報が正しくありません。', 'event');
   }
-  return { trigger: 'study_end', eventId: body.eventId, sessionId: body.sessionId,
-    date: body.date, endedAt: new Date(body.endedAt).toISOString() };
+  return { sessionId: body.sessionId, date: body.date, endedAt: new Date(body.endedAt).toISOString() };
 }
 
-// Deliberately exclude provider session details and all free-form provider content.
+// Exclude secret URL, provider ID/URL, auth headers and free-form provider content.
 export function publicReplan(event) {
-  return Object.fromEntries(['eventId', 'state', 'error', 'retryable', 'temporary', 'outcomeUnknown']
+  return Object.fromEntries(['eventId', 'trigger', 'date', 'state', 'error', 'retryable', 'temporary', 'outcomeUnknown']
     .filter((key) => event[key] !== undefined).map((key) => [key, event[key]]));
 }
 
+async function arm(tx, at) {
+  if (!tx.setAlarm) return; // Node/test drivers need not implement platform alarms.
+  const current = await tx.getAlarm();
+  if (current === null || current > at) await tx.setAlarm(at);
+}
+
+// Session leases live on existing devices; legacy task activity remains a fallback.
+async function activeUntil(tx, at) {
+  const devices = await tx.get(SYNC_KEYS.devices);
+  const deadlines = Object.values(devices?.devices ?? {})
+    .filter((device) => device.keyHash).map((device) => Date.parse(device.activeSession?.expiresAt ?? ''));
+  for (const key of await tx.list(SYNC_KEYS.taskPlanPrefix)) {
+    const active = (await tx.get(key))?.active;
+    if (active?.sessionId && await tx.get(replanEventKey(active.sessionId))) continue;
+    deadlines.push(Date.parse(active?.expiresAt ?? ''));
+  }
+  const live = deadlines.filter((expiry) => Number.isFinite(expiry) && expiry > at);
+  return live.length ? Math.min(...live) : null;
+}
+
 export function createReplanEvents({ storage, env, now = () => Date.now(),
-  waitUntil = (promise) => { void promise.catch(() => {}); }, fetchImpl = fetch }) {
+  waitUntil = (promise) => { void promise.catch(() => {}); }, fetchImpl = fetch, onReplan = () => {} }) {
+  const report = (event) => { try { onReplan(publicReplan(event)); } catch { /* telemetry must not affect delivery */ } };
+  async function process(event, { deferredOnly = false } = {}) {
+    if (!supportsTransactions(storage)) return { ...event, state: 'failed', error: 'storage_not_atomic', retryable: false };
+    const key = dailyEventKey(event.date);
+    const result = await runTransaction(storage, async (tx) => {
+      const previous = await tx.get(key);
+      if (deferredOnly && previous?.state !== 'deferred') return null;
+      if (previous?.attemptedAt) return { event: previous, dispatch: false };
+      const at = now();
+      const settings = (await tx.get(STORAGE_KEYS.settings)) ?? DEFAULT_SETTINGS;
+      const error = settings.enabled && settings.permissions?.read && settings.permissions?.write
+        ? routineConfigurationError(env) : 'ai_disabled';
+      const until = error ? null : await activeUntil(tx, at);
+      const entry = { ...event, revision: (previous?.revision ?? 0) + 1,
+        ...(['dry_run', 'write_test'].includes(env.CLAUDE_ROUTINE_TEST_MODE) ? { testMode: env.CLAUDE_ROUTINE_TEST_MODE } : {}),
+        receivedAt: previous?.receivedAt ?? new Date(at).toISOString(), updatedAt: new Date(at).toISOString(),
+        state: error ? 'failed' : until ? 'deferred' : 'pending', retryable: false,
+        ...(error ? { error } : until ? {} : { attemptedAt: new Date(at).toISOString(), outcomeUnknown: true }) };
+      const deferred = (await tx.get(DEFERRED_KEY)) ?? {};
+      if (until) {
+        deferred[event.date] = true;
+        // Lease expiry is checked even if the browser crashes and no end arrives.
+        await arm(tx, until + 1000);
+      } else { delete deferred[event.date]; }
+      await tx.put(DEFERRED_KEY, deferred);
+      await tx.put(key, entry);
+      return { event: entry, dispatch: !error && !until };
+    });
+    if (!result) return null;
+    if (result.dispatch) {
+      // Claim commits BEFORE I/O; never POST inside a retried transaction.
+      const job = (async () => {
+        const outcome = await fireClaudeRoutine(event, { env, fetchImpl });
+        await runTransaction(storage, async (tx) => {
+          const current = await tx.get(key);
+          await tx.put(key, { ...current, ...outcome, outcomeUnknown: outcome.outcomeUnknown ?? false,
+            revision: current.revision + 1, updatedAt: new Date(now()).toISOString() });
+        });
+        report({ ...event, ...outcome });
+      })().catch(() => { /* Claim survives; no secret-bearing exception logging/re-fire. */ });
+      waitUntil(job);
+    }
+    report(result.event);
+    return publicReplan(result.event);
+  }
+
+  async function resumeDeferred() {
+    const dates = Object.keys((await storage.get(DEFERRED_KEY)) ?? {}).sort();
+    const results = [];
+    for (const date of dates) {
+      const result = await process({ trigger: 'daily_3am', eventId: `daily_replan_${date}`, date }, { deferredOnly: true });
+      if (result) results.push(result);
+    }
+    return results;
+  }
+
   return {
-    async end(event, deviceId, enabled) {
-      if (!supportsTransactions(storage)) return { eventId: event.eventId, state: 'failed',
-        error: 'storage_not_atomic', retryable: true };
-      const key = replanEventKey(event.sessionId);
-      const result = await runTransaction(storage, async (tx) => {
+    daily: (scheduledTime) => process(dailyEvent(scheduledTime)),
+    resumeDeferred,
+    async end(event, deviceId) {
+      await runTransaction(storage, async (tx) => {
+        const key = replanEventKey(event.sessionId);
         const previous = await tx.get(key);
         if (previous && (previous.deviceId !== deviceId || previous.date !== event.date || previous.endedAt !== event.endedAt)) {
           fail('同じsessionIdの終了情報が一致しません。', 'event');
         }
-        if (previous?.attemptedAt) return { event: previous, dispatch: false };
-        const error = enabled ? routineConfigurationError(env) : 'ai_disabled';
-        const entry = { ...event, deviceId, revision: (previous?.revision ?? 0) + 1,
-          ...(['dry_run', 'write_test'].includes(env.CLAUDE_ROUTINE_TEST_MODE) ? { testMode: env.CLAUDE_ROUTINE_TEST_MODE } : {}),
-          receivedAt: previous?.receivedAt ?? new Date(now()).toISOString(),
-          state: error ? 'failed' : 'pending', retryable: Boolean(error),
-          ...(error ? { error } : { attemptedAt: new Date(now()).toISOString(), outcomeUnknown: true }) };
-        // Clear only this session's activity; a newer session/other device remains protected.
-        // A study session can cross JST midnight, so clear its activity on all days.
+        // Preserve old attemptedAt tombstones; this is a receipt, not a replan.
+        if (!previous) await tx.put(key, { ...event, deviceId, state: 'ended', receivedAt: new Date(now()).toISOString() });
+        const devices = await tx.get(SYNC_KEYS.devices);
+        if (devices?.devices?.[deviceId]?.activeSession?.sessionId === event.sessionId) {
+          delete devices.devices[deviceId].activeSession;
+          devices.revision = (devices.revision ?? 0) + 1;
+          await tx.put(SYNC_KEYS.devices, devices);
+        }
         for (const planKey of await tx.list(SYNC_KEYS.taskPlanPrefix)) {
           const plan = await tx.get(planKey);
           if (plan?.active?.deviceId === deviceId
             && (plan.active.sessionId === event.sessionId
               || (!plan.active.sessionId && Date.parse(plan.active.startedAt) <= Date.parse(event.endedAt)))) {
             delete plan.active;
-            await tx.put(planKey, plan); // activity never advances the plan revision
+            await tx.put(planKey, plan); // no plan revision change
           }
         }
-        await tx.put(key, entry);
-        return { event: entry, dispatch: !error };
+        if (Object.keys((await tx.get(DEFERRED_KEY)) ?? {}).length) await arm(tx, now() + 1000);
       });
-      if (result.dispatch) {
-        // Claim commits BEFORE network I/O, outside the transaction callback (which can retry).
-        const job = (async () => {
-          const outcome = await fireClaudeRoutine(event, { env, fetchImpl });
-          await runTransaction(storage, async (tx) => {
-            const current = await tx.get(key);
-            await tx.put(key, { ...current, ...outcome, outcomeUnknown: outcome.outcomeUnknown ?? false,
-              revision: current.revision + 1, updatedAt: new Date(now()).toISOString() });
-          });
-        })().catch(() => { /* Durable claim remains; never log secrets or re-fire. */ });
-        waitUntil(job);
+      try {
+        // Only existing deferred dates; study_end never creates a daily event.
+        const resumed = await resumeDeferred();
+        return resumed.at(-1) ?? { state: 'not_requested', retryable: false };
+      } catch {
+        // End receipt committed. Alarm owns deferred work; PWA can acknowledge.
+        return { state: 'failed', error: 'planning_storage', retryable: false };
       }
-      return publicReplan(result.event);
     },
-    async status(sessionId, deviceId) {
-      if (!/^[A-Za-z0-9_-]{1,80}$/.test(sessionId)) return null;
-      const entry = await storage.get(replanEventKey(sessionId));
-      return entry?.deviceId === deviceId ? publicReplan(entry) : null;
+    async status(date) {
+      if (!isDateKey(date)) return null;
+      const entry = await storage.get(dailyEventKey(date));
+      return entry ? publicReplan(entry) : null;
     },
   };
 }

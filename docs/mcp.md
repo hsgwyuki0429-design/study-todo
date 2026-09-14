@@ -1,7 +1,7 @@
 # クラウド同期と MCP 連携の手引き
 
-学習終了からClaude Routineを起動する設定・重複排除・初回実書き込みテストは
-[study_end Routine連携](./study-end-routine.md) を参照してください。
+毎日03:00 JSTにClaude Routineを起動する設定・学習中の延期・重複排除・疎通確認は
+[日次Routine連携](./study-end-routine.md) を参照してください。
 
 study-todo の学習データを Cloudflare に預けて、Claude などの MCP 対応AIから
 「今日の予定」を読み書きできるようにするための手順です。

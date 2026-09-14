@@ -132,9 +132,12 @@ async function boot() {
   setInterval(tickHome, 250);
   // 学習中であることを、ときどきクラウドへ送り直す（AIに動かされないため）。
   // 送れなくても学習は止まらない。
-  setInterval(heartbeatActivity, 5 * 60 * 1000);
+  setInterval(heartbeatActivity, 60 * 1000);
+  heartbeatActivity();
+  window.addEventListener('online', heartbeatActivity);
+  window.addEventListener('pageshow', heartbeatActivity);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) tickHome();
+    if (!document.hidden) { tickHome(); heartbeatActivity(); }
   });
 
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

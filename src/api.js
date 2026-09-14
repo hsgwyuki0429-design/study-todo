@@ -993,12 +993,11 @@ export async function finishStudySession(sessionId) {
   const endedAt = new Date().toISOString();
   return idb.updateSession((stored) => {
     if (!stored?.active || stored.sessionId !== sessionId) return { ended: false };
-    const eventId = `study_end_${sessionId}`;
     return {
       ended: true,
       session: { ...EMPTY_SESSION, questionElapsed: {} },
-      event: { key: `replan:${eventId}`, type: 'replan', id: eventId, queuedAt: Date.now(),
-        event: { eventId, sessionId, date: dateKeyOf(endedAt), endedAt } },
+      event: { key: `session_end:${sessionId}`, type: 'session_end', id: sessionId, queuedAt: Date.now(),
+        event: { sessionId, date: dateKeyOf(endedAt), endedAt } },
     };
   });
 }

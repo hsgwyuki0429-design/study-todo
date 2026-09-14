@@ -19,6 +19,8 @@ import { createStudyTodoMcpApp } from "../app.js";
 import { createKvDriver } from "../storage/kv-driver.js";
 import { createDurableObjectDriver, migrateFromKv } from "../storage/do-driver.js";
 
+const DAILY_ROUTE = '/__internal/daily-replan';
+
 /** 1人ぶんのデータを預かる唯一のオブジェクト。 */
 export class StudyTodoStore {
   constructor(state, env) {
@@ -31,22 +33,50 @@ export class StudyTodoStore {
     });
   }
 
-  async fetch(request) {
+  getApp() {
     if (!this.app) {
       this.app = createStudyTodoMcpApp({
         storage: createDurableObjectDriver(this.state.storage),
         env: this.env,
         waitUntil: (promise) => this.state.waitUntil(promise),
+        onReplan: (summary) => console.info('daily_replan', summary),
       });
     }
-    return this.app.fetch(request);
+    return this.app;
+  }
+
+  async fetch(request) {
+    const app = this.getApp();
+    if (new URL(request.url).pathname === DAILY_ROUTE && request.method === 'POST') {
+      const { scheduledTime } = await request.json();
+      return Response.json(await app.replans.daily(scheduledTime));
+    }
+    return app.fetch(request);
+  }
+
+  async alarm() {
+    await this.getApp().replans.resumeDeferred();
   }
 }
 
 let fallbackApp;
 
 export default {
+  async scheduled(event, env, ctx) {
+    if (event.cron !== '0 18 * * *') return;
+    if (!env.STUDY_TODO_STORE) throw new Error('daily_replan_requires_durable_object');
+    const id = env.STUDY_TODO_STORE.idFromName('study-todo');
+    ctx.waitUntil((async () => {
+      const response = await env.STUDY_TODO_STORE.get(id).fetch(new Request(`https://internal${DAILY_ROUTE}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ scheduledTime: event.scheduledTime }),
+      }));
+      if (!response.ok) throw new Error('daily_replan_delivery_failed');
+    })());
+  },
   async fetch(request, env) {
+    // No external header/token can enter the internal scheduling path.
+    if (new URL(request.url).pathname.startsWith('/__internal/')) return new Response(null, { status: 404 });
     if (env.STUDY_TODO_STORE) {
       // 1人ぶんなので、名前を固定して常に同じオブジェクトへ届ける。
       const id = env.STUDY_TODO_STORE.idFromName("study-todo");

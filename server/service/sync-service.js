@@ -612,12 +612,23 @@ export function createSyncService({ storage, now = () => Date.now() }) {
    * 期限つきで預かり、期限を過ぎたら実行中ではなくなる。
    * 圏外の端末は知らせられないので、この情報は「サーバーが知っている範囲」でしかない。
    */
-  async function reportActivity({ date, taskId, questionId = null, deviceId = null, ttlSeconds = null, sessionId = null }) {
+  async function reportActivity({ date, taskId, questionId = null, deviceId = null, ttlSeconds = null, sessionId = null, sessionActive = false }) {
     const ttl = Math.max(60, Math.min(Number(ttlSeconds) || SYNC_LIMITS.activityTtlSeconds, SYNC_LIMITS.activityMaxTtlSeconds));
     const at = new Date(now()).toISOString();
     const expiresAt = new Date(now() + ttl * 1000).toISOString();
     const outcome = await mutatePlan(date, async (stored, tx) => {
       if (sessionId && await tx.get(SYNC_KEYS.replanEvent(sessionId))) return { ok: true };
+      // Reuse the registered device and existing activity API for the whole session,
+      // including pauses, evaluation entry and studying without a scheduled task.
+      if (sessionId && sessionActive) {
+        const devices = await tx.get(SYNC_KEYS.devices);
+        const device = devices?.devices?.[deviceId];
+        if (device?.keyHash) {
+          device.activeSession = { sessionId, date, expiresAt, updatedAt: at };
+          devices.revision = (devices.revision ?? 0) + 1;
+          await tx.put(SYNC_KEYS.devices, devices);
+        }
+      }
       const base = stored ?? { ...emptyPlan(date), updatedAt: at, updatedBy: "app" };
       const plan = structuredClone(base);
       if (taskId === null) {
