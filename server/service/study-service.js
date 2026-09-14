@@ -55,6 +55,14 @@ import {
   truncatedChallengeIds,
 } from "./planning.js";
 import { buildOutline, compareQuestions, questionHaystack } from "../../src/question-order.js";
+import {
+  RELATION_SOURCES,
+  RELATION_TYPES,
+  RELATION_TYPE_LABELS,
+  STORED_RELATION_TYPES,
+  normalizeRelationInput,
+  relationsForQuestion,
+} from "./question-relations.js";
 
 export const DATA_VERSION = "1.5.0";
 
@@ -68,6 +76,12 @@ export const SERVICE_LIMITS = Object.freeze({
   goals: 100,
   // 1回の操作で扱える学習記録の数。
   recordsPerOperation: 50,
+  // 1回に登録・削除できる問題どうしの関連の数。
+  relationsPerSave: 100,
+  // getQuestionRelations で一度に渡せる問題IDの数と、返す関連の数。
+  relationQuestionIds: 200,
+  relationsLimitDefault: 200,
+  relationsLimitMax: 500,
 });
 
 const EVALUATION_LABELS = Object.freeze({
@@ -96,6 +110,29 @@ export function createStudyService({ sync, now = () => Date.now() }) {
   async function questionMap() {
     const document = await sync.readQuestions();
     return new Map((document.questions ?? []).map((question) => [question.id, question]));
+  }
+
+  /** 保存してある関連を配列で読む（鍵は from|type|to なので、値だけ取り出せばよい）。 */
+  async function relationList() {
+    return Object.values(await sync.readRelationEntries());
+  }
+
+  /** 関連に相手の表示名を添える。IDだけだと、どの問題か分からないため。 */
+  function decorateRelation(relation, questions) {
+    return {
+      ...relation,
+      fromLabel: questions.get(relation.fromQuestionId)?.label ?? null,
+      toLabel: questions.get(relation.toQuestionId)?.label ?? null,
+      ...(relation.questionId !== undefined
+        ? { label: questions.get(relation.questionId)?.label ?? null }
+        : {}),
+    };
+  }
+
+  function decorateRelationBuckets(buckets, questions) {
+    return Object.fromEntries(
+      Object.entries(buckets).map(([name, list]) => [name, list.map((entry) => decorateRelation(entry, questions))]),
+    );
   }
 
   function decorate(record, questions) {
@@ -911,6 +948,10 @@ export function createStudyService({ sync, now = () => Date.now() }) {
     async getQuestion(args = {}) {
       const id = readString(args.id, "id", { required: true, max: 120 });
       const questions = await questionMap();
+      const relations = decorateRelationBuckets(
+        relationsForQuestion(await relationList(), id),
+        questions,
+      );
       const question = questions.get(id) ?? null;
       const records = (await sync.readAllRecords()).filter((record) => record.questionId === id);
       if (!question && !records.length) {
@@ -930,6 +971,12 @@ export function createStudyService({ sync, now = () => Date.now() }) {
           ? Math.round(records.reduce((sum, record) => sum + record.durationSeconds, 0) / records.length)
           : null,
         history: records.slice(0, 50).map((record) => decorate(record, questions)),
+        // 問題どうしのつながり。prerequisites はこの問題の土台、extendsTo はこの問題の発展先。
+        // 覚えてあるのは片方向だけで、逆向きはここで作っている。
+        relations,
+        relationsNote: "prerequisites はこの問題の土台、extendsTo は発展先、sameTheme は同じ解法テーマ、"
+          + "exercises はこの例題に対応する演習、exerciseOf はこの問題が演習にあたる例題です。"
+          + "source が ai のものはAIの推測なので、そのつもりで扱ってください。",
       };
     },
 
@@ -1362,6 +1409,154 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         ok: true,
         saved: Object.keys(entries).length,
         note: "仮の見積もりとして保存しました。学習の実績にはなりません。利用者が自分で指定した時間は上書きしません。",
+      };
+    },
+
+    /**
+     * 問題どうしの関連をまとめて登録する（同じ from / to / type は上書き）。
+     * extends は prerequisite に、same_theme はID順に直してから覚える。
+     */
+    async saveQuestionRelations(args = {}, actor = {}) {
+      const list = readArray(args.relations, "relations", { min: 1, max: SERVICE_LIMITS.relationsPerSave });
+      const questions = await questionMap();
+      const prepared = [];
+      const unknown = new Set();
+      list.forEach((raw, index) => {
+        const field = `relations[${index}]`;
+        rejectUnknownKeys(raw ?? {}, ["fromQuestionId", "toQuestionId", "type", "strength", "source", "note"], field);
+        const fromQuestionId = readString(raw.fromQuestionId, `${field}.fromQuestionId`, { required: true, max: 120 });
+        const toQuestionId = readString(raw.toQuestionId, `${field}.toQuestionId`, { required: true, max: 120 });
+        if (fromQuestionId === toQuestionId) {
+          fail(`${field} の fromQuestionId と toQuestionId が同じです。別々の問題を指定してください。`, field);
+        }
+        if (!questions.has(fromQuestionId)) unknown.add(fromQuestionId);
+        if (!questions.has(toQuestionId)) unknown.add(toQuestionId);
+        prepared.push(normalizeRelationInput({
+          fromQuestionId,
+          toQuestionId,
+          type: readEnum(raw.type, `${field}.type`, [...RELATION_TYPES], { required: true }),
+          strength: readInteger(raw.strength, `${field}.strength`, { min: 1, max: 3, fallback: 2 }),
+          source: readEnum(raw.source, `${field}.source`, [...RELATION_SOURCES], { required: true }),
+          note: readString(raw.note, `${field}.note`, { max: 200 }),
+        }));
+      });
+      if (unknown.size) {
+        return {
+          ok: false,
+          error: "unknown_question",
+          unknownQuestionIds: [...unknown].slice(0, 20),
+          message: "問題マスタに無い問題IDが含まれています。関連は登録していません。",
+          nextAction: "listQuestions / searchQuestions で正しい question.id を確かめてください。",
+        };
+      }
+      const entries = {};
+      const normalizedNotes = [];
+      prepared.forEach(({ key, entry, normalized }) => {
+        entries[key] = { ...entry, updatedBy: `${entry.source}:${actor?.clientName ?? "AI"}` };
+        if (normalized) normalizedNotes.push({ id: entry.id, normalized });
+      });
+      const before = await sync.readRelationEntries();
+      const keys = Object.keys(entries);
+      const updated = keys.filter((key) => before[key] !== undefined).length;
+      const { dropped } = await sync.writeRelationEntries(entries);
+      await sync.appendLog({
+        clientName: actor?.clientName ?? actor?.tokenLabel ?? "AI",
+        tool: "saveQuestionRelations",
+        summary: `問題どうしの関連${keys.length}件を登録（うち上書き${updated}件）`,
+      });
+      return {
+        ok: true,
+        saved: keys.length,
+        created: keys.length - updated,
+        updated,
+        ...(dropped ? { dropped } : {}),
+        // 入れ替えたものがあれば、そのまま返して黙って変えない。
+        ...(normalizedNotes.length ? { normalized: normalizedNotes } : {}),
+        relations: prepared.map(({ entry }) => decorateRelation(entry, questions)),
+        note: "同じ fromQuestionId / toQuestionId / type の関連は上書きしました。"
+          + "extends は prerequisite（from が土台）に直して覚えています。"
+          + "source が ai のものは推測なので、あとから getQuestionRelations の source で見直せます。",
+      };
+    },
+
+    /** 問題IDを渡して、その問題に結び付いた関連を返す。向き・種類・出どころで絞れる。 */
+    async getQuestionRelations(args = {}) {
+      rejectUnknownKeys(args, ["questionIds", "direction", "type", "types", "source", "limit", "offset"], "arguments");
+      const ids = readArray(args.questionIds, "questionIds", { min: 1, max: SERVICE_LIMITS.relationQuestionIds })
+        .map((id, index) => readString(id, `questionIds[${index}]`, { required: true, max: 120 }));
+      const direction = readEnum(args.direction, "direction", ["from", "to", "both"], { fallback: "both" });
+      const single = readEnum(args.type, "type", [...STORED_RELATION_TYPES]);
+      const types = readArray(args.types ?? [], "types", { max: STORED_RELATION_TYPES.length })
+        .map((value, index) => readEnum(value, `types[${index}]`, [...STORED_RELATION_TYPES], { required: true }));
+      const typeFilter = new Set([...(single ? [single] : []), ...types]);
+      const source = readEnum(args.source, "source", [...RELATION_SOURCES]);
+      const limit = readInteger(args.limit, "limit", {
+        min: 1, max: SERVICE_LIMITS.relationsLimitMax, fallback: SERVICE_LIMITS.relationsLimitDefault,
+      });
+      const offset = readInteger(args.offset, "offset", { min: 0, fallback: 0 });
+
+      const questions = await questionMap();
+      const wanted = new Set(ids);
+      const all = (await relationList()).filter((relation) => {
+        if (typeFilter.size && !typeFilter.has(relation.type)) return false;
+        if (source && relation.source !== source) return false;
+        const matchesFrom = wanted.has(relation.fromQuestionId);
+        const matchesTo = wanted.has(relation.toQuestionId);
+        // same_theme は向きが無いので、direction を指定しても両側で拾う。
+        if (relation.type === "same_theme") return matchesFrom || matchesTo;
+        if (direction === "from") return matchesFrom;
+        if (direction === "to") return matchesTo;
+        return matchesFrom || matchesTo;
+      });
+      all.sort((a, b) => (a.fromQuestionId === b.fromQuestionId
+        ? a.toQuestionId.localeCompare(b.toQuestionId)
+        : a.fromQuestionId.localeCompare(b.fromQuestionId)));
+      const page = all.slice(offset, offset + limit);
+      return {
+        total: all.length,
+        count: page.length,
+        nextOffset: offset + page.length < all.length ? offset + page.length : null,
+        relations: page.map((relation) => decorateRelation(relation, questions)),
+        // 問題ごとに分けたもの。どの問題の土台がどれか、そのまま読める。
+        byQuestion: Object.fromEntries(ids.map((id) => [
+          id,
+          decorateRelationBuckets(relationsForQuestion(all, id), questions),
+        ])),
+        typeLabels: RELATION_TYPE_LABELS,
+        note: "保存してあるのは片方向だけです（extends は prerequisite の裏返し）。"
+          + "byQuestion の extendsTo / exerciseOf は、読むときに裏返して作った向きです。",
+      };
+    },
+
+    /** 関連を消す（AIの推測が違っていたときに、人が直せるようにするため）。 */
+    async deleteQuestionRelations(args = {}, actor = {}) {
+      const list = readArray(args.relations, "relations", { min: 1, max: SERVICE_LIMITS.relationsPerSave });
+      const keys = list.map((raw, index) => {
+        const field = `relations[${index}]`;
+        rejectUnknownKeys(raw ?? {}, ["fromQuestionId", "toQuestionId", "type"], field);
+        const { key } = normalizeRelationInput({
+          fromQuestionId: readString(raw.fromQuestionId, `${field}.fromQuestionId`, { required: true, max: 120 }),
+          toQuestionId: readString(raw.toQuestionId, `${field}.toQuestionId`, { required: true, max: 120 }),
+          type: readEnum(raw.type, `${field}.type`, [...RELATION_TYPES], { required: true }),
+          strength: 2,
+          source: "ai",
+          note: null,
+        });
+        return key;
+      });
+      const { deleted } = await sync.deleteRelationEntries(keys);
+      await sync.appendLog({
+        clientName: actor?.clientName ?? actor?.tokenLabel ?? "AI",
+        tool: "deleteQuestionRelations",
+        summary: `問題どうしの関連${deleted}件を削除`,
+      });
+      return {
+        ok: true,
+        deleted,
+        requested: keys.length,
+        note: deleted < keys.length
+          ? "指定のうち、保存されていなかった関連は数えていません。extends は prerequisite の裏返しとして探します。"
+          : "関連を削除しました。学習記録には影響しません。",
       };
     },
 

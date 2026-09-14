@@ -32,6 +32,7 @@ import {
   protectionOf,
 } from "./task-changes.js";
 import { dateKeyOf, isDateKey, monthKeyOf, todayKeyOf } from "../../src/datetime.js";
+import { mergeRelationEntries } from "./question-relations.js";
 import {
   hashQuestions,
   mergeAvailability,
@@ -81,6 +82,8 @@ export const SYNC_KEYS = Object.freeze({
   availability: "studytodo:availability",
   // 問題別の見積もり指定（本人の指定とAIの仮見積もり）。実績から計算する分は保存しない。
   estimates: "studytodo:estimates",
+  // 問題どうしの関連（前提・同系統・演習）。片方向だけ覚え、逆向きは読むときに作る。
+  relations: "studytodo:relations",
 });
 
 export const SYNC_LIMITS = Object.freeze({
@@ -102,6 +105,9 @@ export const SYNC_LIMITS = Object.freeze({
   deletionEntries: 5000,
   deletionsPerPush: 200,
   recordOpEntries: 100,
+  // 問題どうしの関連。1回に送れる件数と、持っておく件数の上限。
+  relationsPerSave: 100,
+  relations: 20000,
   // 繰り越しの記録。追加専用で、1回に送れる数と持っておく数の上限。
   movesPerPush: 200,
   moves: 2000,
@@ -149,6 +155,7 @@ const DEFAULT_MOVES = { moves: {} };
 const DEFAULT_RECORD_OPS = { entries: [] };
 const DEFAULT_AVAILABILITY_DOC = { weekly: {}, overrides: {}, todayRemaining: null, reserveMinutes: 0, updatedAt: null };
 const DEFAULT_ESTIMATES = { byQuestion: {} };
+const DEFAULT_RELATIONS = { byKey: {} };
 
 export function createSyncService({ storage, now = () => Date.now() }) {
   async function readDoc(key, defaults) {
@@ -767,6 +774,50 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     return document.byQuestion;
   }
 
+  /**
+   * 問題どうしの関連。
+   * 覚えるのは片方向だけで、逆向き（発展先など）は読んだあとに作る。
+   * 同じ from / to / type は上書きになる（鍵がその3つでできているため）。
+   */
+  async function readRelationEntries() {
+    const document = await readDoc(SYNC_KEYS.relations, DEFAULT_RELATIONS);
+    return document.byKey ?? {};
+  }
+
+  async function writeRelationEntries(entries = {}) {
+    const at = new Date(now()).toISOString();
+    let overflow = 0;
+    const { document } = await updateDocument(storage, SYNC_KEYS.relations, (draft) => {
+      const merged = mergeRelationEntries(draft.byKey ?? {}, entries, { at });
+      const keys = Object.keys(merged);
+      if (keys.length > SYNC_LIMITS.relations) {
+        // 古いものから落とす。際限なく増やさないための保険で、ふつうは効かない。
+        const sorted = keys.sort((a, b) => Date.parse(merged[b].updatedAt ?? 0) - Date.parse(merged[a].updatedAt ?? 0));
+        overflow = keys.length - SYNC_LIMITS.relations;
+        for (const key of sorted.slice(SYNC_LIMITS.relations)) delete merged[key];
+      }
+      draft.byKey = merged;
+      draft.updatedAt = at;
+    }, { defaults: structuredClone(DEFAULT_RELATIONS) });
+    return { byKey: document.byKey, dropped: overflow };
+  }
+
+  async function deleteRelationEntries(keys = []) {
+    let deleted = 0;
+    await updateDocument(storage, SYNC_KEYS.relations, (draft) => {
+      const byKey = draft.byKey ?? {};
+      for (const key of keys) {
+        if (byKey[key] !== undefined) {
+          delete byKey[key];
+          deleted += 1;
+        }
+      }
+      draft.byKey = byKey;
+      draft.updatedAt = new Date(now()).toISOString();
+    }, { defaults: structuredClone(DEFAULT_RELATIONS) });
+    return { deleted };
+  }
+
   /* ------------------------------------------------------------------ */
   /* 学習記録の追加・訂正・取り消し                                       */
   /* ------------------------------------------------------------------ */
@@ -1154,6 +1205,9 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     writeAvailability,
     readEstimateEntries,
     writeEstimateEntries,
+    readRelationEntries,
+    writeRelationEntries,
+    deleteRelationEntries,
     readPlacements,
     setTaskPinned,
     reportActivity,
