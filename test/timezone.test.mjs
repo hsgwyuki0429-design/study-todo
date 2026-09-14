@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { dateKeyOf, isDateKey, shiftDateKey, startOfDayMs, todayKeyOf } from "../src/datetime.js";
+import { dateKeyOf, isDateKey, shiftDateKey, startOfDayMs, studyDateKeyOf, studyTodayKeyOf, todayKeyOf } from "../src/datetime.js";
 import { QUESTIONS, call, callTool, createTestApp, enableAiLink, joinDevice, record } from "./helpers.mjs";
 
 test("日本時間 00:30 は、その日の日付になる", () => {
@@ -20,6 +20,14 @@ test("日本時間 08:00 も同じ日付になる", () => {
 test("日付の境目（JST 23:59 と 00:00）", () => {
   assert.equal(dateKeyOf("2026-09-12T14:59:59Z"), "2026-09-12");
   assert.equal(dateKeyOf("2026-09-12T15:00:00Z"), "2026-09-13");
+});
+
+test("学習日は03:00 JSTを境に切り替わる", () => {
+  assert.equal(studyDateKeyOf("2026-09-14T14:59:59Z"), "2026-09-14"); // 23:59 JST
+  assert.equal(studyDateKeyOf("2026-09-14T15:00:00Z"), "2026-09-14"); // 00:00 JST
+  assert.equal(studyDateKeyOf("2026-09-14T17:59:59Z"), "2026-09-14"); // 02:59:59 JST
+  assert.equal(studyDateKeyOf("2026-09-14T18:00:00Z"), "2026-09-15"); // 03:00 JST
+  assert.equal(studyTodayKeyOf(540, Date.parse("2026-09-14T17:59:59Z")), "2026-09-14");
 });
 
 test("時間帯を変えればその土地の日付になる", () => {
@@ -42,8 +50,8 @@ test("todayKeyOf は日本時間で今日を返す", () => {
   assert.equal(todayKeyOf(540, Date.parse("2026-09-11T16:00:00Z")), "2026-09-12");
 });
 
-test("サーバーも日本時間で『今日』を判断する", async () => {
-  // UTC では 2026-09-11 だが、日本時間ではもう 2026-09-12。
+test("サーバーの今日・To Do・実績も03:00までは前の学習日になる", async () => {
+  // JST 2026-09-12 01:00だが、Study To Doではまだ2026-09-11。
   const { app } = createTestApp({ now: () => Date.parse("2026-09-11T16:00:00Z") });
   const token = await enableAiLink(app);
   const device = await joinDevice(app);
@@ -53,22 +61,22 @@ test("サーバーも日本時間で『今日』を判断する", async () => {
     body: {
       questions: { questions: QUESTIONS },
       records: [record("rec1", { timestamp: "2026-09-11T15:30:00Z" })],
-      taskPlans: [{ date: "2026-09-12", tasks: [{ id: "t1", questionIds: ["数学I+A-例題-90"], kind: "new" }], updatedAt: "2026-09-11T16:00:00Z", revision: 0 }],
+      taskPlans: [{ date: "2026-09-11", tasks: [{ id: "t1", questionIds: ["数学I+A-例題-90"], kind: "new" }], updatedAt: "2026-09-11T16:00:00Z", revision: 0 }],
     },
   });
 
   const info = await callTool(app, token, "getAppInfo");
-  assert.equal(info.today, "2026-09-12");
+  assert.equal(info.today, "2026-09-11");
 
   const today = await callTool(app, token, "getTodayTasks");
-  assert.equal(today.date, "2026-09-12");
+  assert.equal(today.date, "2026-09-11");
   assert.equal(today.tasks.length, 1);
 
   const history = await callTool(app, token, "getStudyHistory", { days: 1 });
   assert.equal(history.records.length, 1);
-  assert.equal(history.records[0].date, "2026-09-12");
+  assert.equal(history.records[0].date, "2026-09-11");
 
   const stats = await callTool(app, token, "getStudyStats", { recentDays: 2 });
-  assert.equal(stats.recentDays.at(-1).date, "2026-09-12");
+  assert.equal(stats.recentDays.at(-1).date, "2026-09-11");
   assert.equal(stats.recentDays.at(-1).count, 1);
 });

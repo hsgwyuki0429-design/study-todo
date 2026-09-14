@@ -316,15 +316,15 @@ test("端末から消したものも、クラウドから消えて戻らない",
   assert.equal((await callTool(app, token, "getStudyStats")).totalRecords, 0);
 });
 
-test("日本時間の日付の境目でも、正しい日に入る", async () => {
-  // 日本時間 2026-09-13 の 0:30（UTC では 2026-09-12 の 15:30）。
+test("03:00前でも、申告した学習日へ正しく入る", async () => {
+  // 日本時間 2026-09-13 の0:30は、まだ2026-09-12の学習日。
   const { app, token } = await setup({ now: () => Date.parse("2026-09-12T15:30:00Z") });
   const result = await add(app, token, {
     operationId: "op-midnight",
     records: [{ questionId: Q[0], date: "2026-09-12", time: "23:50", evaluation: "perfect" }],
   });
   assert.equal(result.ok, true);
-  assert.equal(result.today, "2026-09-13", "サーバーの今日は日本時間で判断する");
+  assert.equal(result.today, "2026-09-12", "サーバーの学習日は03:00に切り替わる");
   assert.equal(result.added[0].date, "2026-09-12");
   const range = await callTool(app, token, "getTasksInRange", { from: "2026-09-12", to: "2026-09-13" });
   const byDate = Object.fromEntries(range.days.map((day) => [day.date, day.attemptCount]));

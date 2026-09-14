@@ -1,13 +1,14 @@
 // Timer state is a draft, never a study record until the user submits an evaluation.
-import { dateKeyOf } from './datetime.js';
+import { studyDateKeyOf } from './datetime.js';
 
 export function addInterval(days, from, to) {
   let cursor = Date.parse(from);
   if (!Number.isFinite(cursor) || to <= cursor) return;
   while (cursor < to) {
-    const midnight = (Math.floor((cursor + 540 * 60000) / 86400000) + 1) * 86400000 - 540 * 60000;
-    const end = Math.min(to, midnight);
-    const day = dateKeyOf(cursor, 540);
+    // 03:00 JST is 18:00 UTC. Allocate an interval across that boundary.
+    const boundary = (Math.floor((cursor + 360 * 60000) / 86400000) + 1) * 86400000 - 360 * 60000;
+    const end = Math.min(to, boundary);
+    const day = studyDateKeyOf(cursor);
     days[day] = (days[day] ?? 0) + (end - cursor) / 1000;
     cursor = end;
   }
@@ -20,7 +21,7 @@ export function questionTiming(session, questionId, now = Date.now()) {
     session.questionTiming[questionId] = {
       solveSeconds: 0, reviewSeconds: 0, unclassifiedSeconds: legacy,
       phase: session.currentQuestionId === questionId && session.mode === 'record_input' ? 'review' : 'solve',
-      byDate: legacy ? { [dateKeyOf(now)]: legacy } : {},
+      byDate: legacy ? { [studyDateKeyOf(now)]: legacy } : {},
     };
   }
   return session.questionTiming[questionId];

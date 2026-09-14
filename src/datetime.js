@@ -8,6 +8,8 @@
 
 /** 日本標準時のずれ（分）。 */
 export const DEFAULT_TIMEZONE_OFFSET_MINUTES = 540;
+/** A study day in Japan ends at 03:00, when the daily planner runs. */
+export const STUDY_DAY_BOUNDARY_HOUR = 3;
 
 const DAY_MS = 86400000;
 
@@ -30,6 +32,23 @@ export function dateKeyOf(value, offsetMinutes = DEFAULT_TIMEZONE_OFFSET_MINUTES
   if (!Number.isFinite(ms)) return null;
   const shifted = new Date(ms + offset * 60000);
   return `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}`;
+}
+
+/**
+ * Date key for study records and daily totals. In JST, 00:00–02:59 belongs to
+ * the previous label: 2026-09-15 02:59 is study day 2026-09-14.
+ */
+export function studyDateKeyOf(value, offsetMinutes = DEFAULT_TIMEZONE_OFFSET_MINUTES,
+  boundaryHour = STUDY_DAY_BOUNDARY_HOUR) {
+  const ms = value instanceof Date ? value.getTime()
+    : typeof value === 'number' ? value
+      : Date.parse(String(value));
+  if (!Number.isFinite(ms)) return null;
+  return dateKeyOf(ms - boundaryHour * 3600000, offsetMinutes);
+}
+
+export function studyTodayKeyOf(offsetMinutes = DEFAULT_TIMEZONE_OFFSET_MINUTES, nowMs = Date.now()) {
+  return studyDateKeyOf(nowMs, offsetMinutes);
 }
 
 /** その時間帯での「今日」。 */

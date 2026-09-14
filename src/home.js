@@ -6,7 +6,7 @@ import { checkpoint, questionTiming, timingRecord, pendingSecondsForDay, forgetQ
 import { undoRecord } from './record-actions.js';
 import { EVALUATIONS, EVAL_MAP } from './api.js';
 import { itemsOf, splitPlanItems } from './plan-items.js';
-import { state, q, qLabel, render, refreshToday } from './state.js';
+import { state, q, qLabel, render, loadTasks, refreshToday } from './state.js';
 import { $, el, fmtMS, fmtShort, row, segmented, emptyState } from './ui.js';
 import { pushPin, reportActivity, syncInBackground } from './cloud-sync.js';
 
@@ -27,7 +27,7 @@ function announceActivity(questionId) {
   const task = questionId
     ? state.tasks.find((t) => (t.questionIds ?? []).includes(questionId) && !t.completed)
     : null;
-  const date = api.todayKey();
+  const date = api.studyDayKey();
   reportActivity(date, task?.id ?? null, questionId ?? null, state.session.sessionId, state.session.active).catch(() => {});
 }
 
@@ -43,7 +43,7 @@ export function heartbeatActivity() {
 
 /** 学習をやめた・止めたときに、実行中の知らせを取り下げる。 */
 function clearActivity() {
-  reportActivity(api.todayKey(), null, null, state.session.sessionId, state.session.active).catch(() => {});
+  reportActivity(api.studyDayKey(), null, null, state.session.sessionId, state.session.active).catch(() => {});
 }
 
 /* ================================================================== */
@@ -82,7 +82,7 @@ function commitSession() {
 }
 
 export function dailyElapsed() {
-  const date = api.todayKey();
+  const date = api.studyDayKey();
   return (state.today.date === date ? state.today.seconds : 0) + pendingSecondsForDay(state.session, date);
 }
 
@@ -150,7 +150,7 @@ function flattenTasks() {
       if (!task.completed) items.push({ type: 'challenge', task });
       continue;
     }
-    const split = splitPlanItems(task, records, { date: api.todayKey() });
+    const split = splitPlanItems(task, records, { date: api.studyDayKey() });
     for (const item of split.pending) {
       items.push({ type: 'question', task, questionId: item.questionId, item });
     }
@@ -214,6 +214,7 @@ async function endSession() {
     await api.finishStudySession(state.session.sessionId, state.session);
     clearActivity();
     state.session = await api.getSessionState();
+    await Promise.all([refreshToday(), loadTasks()]);
     render();
     // Session is durable and UI has ended before any network/provider work.
     syncInBackground();
@@ -301,7 +302,7 @@ async function openChallenge(task) {
   startQuestion(task.questionIds[0]);
   s.currentPlanTaskId = task.id;
   s.currentPlanItemId = itemsOf(task)[0]?.itemId ?? null;
-  reportActivity(api.todayKey(), task.id, task.questionIds[0], s.sessionId, s.active).catch(() => {});
+  reportActivity(api.studyDayKey(), task.id, task.questionIds[0], s.sessionId, s.active).catch(() => {});
   await persist();
   render();
 }
@@ -435,7 +436,7 @@ async function markCompletedTasks() {
   let changed = false;
   for (const task of state.tasks) {
     if (task.kind === 'challenge' || task.completed) continue;
-    const split = splitPlanItems(task, records, { date: api.todayKey() });
+    const split = splitPlanItems(task, records, { date: api.studyDayKey() });
     if (!split.pending.length && split.items.length) {
       await api.saveTask({ ...task, completed: true });
       changed = true;
@@ -537,7 +538,7 @@ export function tickHome() {
     const n = document.querySelector(`[data-timer="${name}"]`);
     if (n) n.textContent = text;
   };
-  if (state.today.date !== api.todayKey()) { void refreshToday(); }
+  refreshStudyDayIfNeeded();
   set('today', fmtMS(dailyElapsed()));
   set('session', fmtMS(dailyElapsed()));
   if (s.mode === 'challenge') {
@@ -550,6 +551,18 @@ export function tickHome() {
   document.querySelectorAll('[data-elapsed-for]').forEach((node) => {
     node.textContent = fmtMS(elapsedOf(node.dataset.elapsedFor));
   });
+}
+
+let refreshingStudyDay = null;
+function refreshStudyDayIfNeeded() {
+  if (state.today.date === api.studyDayKey() || refreshingStudyDay) return;
+  // 03:00をまたいで解答中の予定は、採点・終了まで参照できるように保つ。
+  // 待機中なら新しい学習日のTo Doも同時に読み直す。
+  const operations = [refreshToday()];
+  if (!state.session.active) operations.push(loadTasks());
+  refreshingStudyDay = Promise.all(operations)
+    .then(() => render())
+    .finally(() => { refreshingStudyDay = null; });
 }
 
 /* ================================================================== */
@@ -618,7 +631,7 @@ function idlePanel(panel) {
     if (!open.length) list.append(emptyState('今日のタスクはありません'));
     for (const task of open) {
       const first = q(task.questionIds[0]);
-      const item = splitPlanItems(task, todayRecords(), { date: api.todayKey() }).pending[0];
+      const item = splitPlanItems(task, todayRecords(), { date: api.studyDayKey() }).pending[0];
       const node = row({
         title: task.kind === 'challenge' ? task.title ?? 'チャレンジ' : groupLabel(task.questionIds),
         sub: task.kind === 'challenge' ? challengeSub(task) : first ? first.chapter + ' ・ ' + first.section : null,
@@ -677,7 +690,7 @@ function taskListPanel(panel) {
     const qid = item.questionId;
     const qq = q(qid);
     const active = state.session.currentQuestionId === qid && !!state.session.currentStartedAt;
-    const carried = item.item?.originalDate && item.item.originalDate !== api.todayKey();
+    const carried = item.item?.originalDate && item.item.originalDate !== api.studyDayKey();
     list.append(
       row({
         title: qLabel(qid),

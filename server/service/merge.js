@@ -14,6 +14,7 @@ import { hashQuestions } from "../../src/hash.js";
 import { itemsOf, normalizeMove } from "../../src/plan-items.js";
 import { normalizeGoal } from "../../src/goals.js";
 import {
+  durationEntriesByStudyDate,
   isCountedRecord,
   mergeStudyRecord,
   normalizeStudyRecord,
@@ -421,7 +422,10 @@ export function computeStats(records, questions = [], { timezoneOffsetMinutes } 
     const day = recordDateOf(record, timezoneOffsetMinutes);
     byDate[day] ??= { count: 0, seconds: 0 };
     byDate[day].count += 1;
-    byDate[day].seconds += seconds;
+    for (const [spentDay, spentSeconds] of durationEntriesByStudyDate(record, timezoneOffsetMinutes)) {
+      byDate[spentDay] ??= { count: 0, seconds: 0 };
+      byDate[spentDay].seconds += spentSeconds;
+    }
   }
   return {
     totalRecords: counted.length,

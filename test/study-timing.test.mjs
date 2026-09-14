@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { checkpoint, questionTiming, timingRecord, pendingSecondsForDay, forgetQuestion } from '../src/study-timing.js';
-import { normalizeStudyRecord, describeRecord } from '../src/records-model.js';
+import { normalizeStudyRecord, describeRecord, durationEntriesByStudyDate, durationOnStudyDate } from '../src/records-model.js';
 
 const start = Date.parse('2026-09-14T03:00:00Z');
 const draft = () => ({ active: true, mode: 'task_list', currentQuestionId: 'q1', questionElapsed: {},
@@ -21,7 +21,7 @@ test('solve and review clocks pause independently of wall time; cumulative draft
   assert.equal(pendingSecondsForDay(s, '2026-09-14', start + 3630000), 0);
 });
 
-test('JST midnight allocates actual seconds to each day, including a resumed review next day', () => {
+test('JST midnight stays in the previous study day', () => {
   const s = draft();
   const midnight = Date.parse('2026-09-14T15:00:00Z');
   s.sessionStartedAt = s.currentStartedAt = new Date(midnight - 20000).toISOString();
@@ -30,8 +30,19 @@ test('JST midnight allocates actual seconds to each day, including a resumed rev
   checkpoint(s, midnight + 30000);
   const r = timingRecord(s, 'q1');
   assert.equal(r.solveSeconds, 30); assert.equal(r.reviewSeconds, 20);
-  assert.deepEqual(r.studySecondsByDate, { '2026-09-14': 20, '2026-09-15': 30 });
-  assert.equal(pendingSecondsForDay(s, '2026-09-15', midnight + 30000), 30);
+  assert.deepEqual(r.studySecondsByDate, { '2026-09-14': 50 });
+  assert.equal(pendingSecondsForDay(s, '2026-09-14', midnight + 30000), 50);
+});
+
+test('03:00 JST splits measured seconds between study days exactly', () => {
+  const s = draft();
+  const boundary = Date.parse('2026-09-14T18:00:00Z');
+  s.sessionStartedAt = s.currentStartedAt = new Date(boundary - 20000).toISOString();
+  checkpoint(s, boundary + 30000);
+  assert.deepEqual(timingRecord(s, 'q1').studySecondsByDate,
+    { '2026-09-14': 20, '2026-09-15': 30 });
+  assert.equal(pendingSecondsForDay(s, '2026-09-14', boundary + 30000), 20);
+  assert.equal(pendingSecondsForDay(s, '2026-09-15', boundary + 30000), 30);
 });
 
 test('legacy timing preserves unknown breakdown; old records acquire no invented solve/review times', () => {
@@ -51,4 +62,13 @@ test('normalization and MCP descriptions preserve consistent measured fields; st
   assert.deepEqual(record.studySecondsByDate, raw.studySecondsByDate);
   const corrected = normalizeStudyRecord({ ...raw, durationSeconds: 120 });
   assert.equal(corrected.solveSeconds, undefined); assert.equal(corrected.studySecondsByDate, undefined);
+});
+
+test('daily capacity uses the measured 03:00 split and keeps legacy records on their stored day', () => {
+  const split = normalizeStudyRecord({ id: 'split', questionId: 'q1', date: '2026-09-15', durationSeconds: 50,
+    solveSeconds: 50, reviewSeconds: 0, studySecondsByDate: { '2026-09-14': 20, '2026-09-15': 30 } });
+  assert.deepEqual(durationEntriesByStudyDate(split), [['2026-09-14', 20], ['2026-09-15', 30]]);
+  assert.equal(durationOnStudyDate(split, '2026-09-14'), 20);
+  const legacy = normalizeStudyRecord({ id: 'legacy', questionId: 'q1', date: '2026-09-14', durationSeconds: 40 });
+  assert.deepEqual(durationEntriesByStudyDate(legacy), [['2026-09-14', 40]]);
 });

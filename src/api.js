@@ -4,7 +4,7 @@
 // 将来サーバー同期に差し替える場合も、この関数シグネチャを保てばよい。
 
 import { idb, STORES } from './idb.js';
-import { dateKeyOf, todayKeyOf } from './datetime.js';
+import { studyDateKeyOf } from './datetime.js';
 import { buildOutline, compareQuestions, normalizeQuestion, questionHaystack } from './question-order.js';
 import { itemsOf, splitPlanItems, withItems } from './plan-items.js';
 import { normalizeGoal, goalAttempts as goalAttemptsOf, questionSatisfied as questionSatisfiedFor } from './goals.js';
@@ -12,7 +12,7 @@ import { normalizeAvailability, availabilityForDate } from './availability.js';
 import { estimateForQuestion } from './estimates.js';
 import { checkpoint } from './study-timing.js';
 import {
-  RECORD_SOURCE_LABELS, describeRecord, hasDuration, hasExactTime,
+  RECORD_SOURCE_LABELS, describeRecord, durationEntriesByStudyDate, durationOnStudyDate, hasDuration, hasExactTime,
   isCountedRecord, mergeStudyRecord, normalizeStudyRecord, recordDateOf, sumDurations,
 } from './records-model.js';
 
@@ -52,7 +52,7 @@ export {
 export { WEEKDAY_KEYS, WEEKDAY_LABELS, availabilityForDate } from './availability.js';
 export { CONFIDENCE_LABELS } from './estimates.js';
 export {
-  RECORD_SOURCE_LABELS, describeRecord, hasDuration, hasExactTime, isCountedRecord,
+  RECORD_SOURCE_LABELS, describeRecord, durationEntriesByStudyDate, durationOnStudyDate, hasDuration, hasExactTime, isCountedRecord,
   mergeStudyRecord, recordDateOf, sumDurations,
 } from './records-model.js';
 
@@ -60,16 +60,20 @@ export const uid = (prefix = 'id') =>
   `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
 /**
- * 「今日」の日付キー。日本時間（UTC+9）で判断する。
- * ISO文字列の先頭10文字（UTC日付）を使うと、深夜〜朝に前日扱いになってしまうため、
- * 日付の判定はすべて src/datetime.js を通す。
+ * Study To Doでいう「今日」。03:00 JSTまでは前日の学習日として扱う。
+ * To Do・実績・累計時間・現在日の表示は、すべてこの境界を共有する。
  */
 export function todayKey(d = new Date()) {
-  return dateKeyOf(d);
+  return studyDateKeyOf(d);
+}
+
+/** 意味を明示した別名。既存の todayKey 利用箇所とも同じ学習日を返す。 */
+export function studyDayKey(d = new Date()) {
+  return todayKey(d);
 }
 
 /** 学習記録の時刻から、その記録が属する日（日本時間）を求める。 */
-export const dayOf = (timestamp) => dateKeyOf(timestamp);
+export const dayOf = (timestamp) => studyDateKeyOf(timestamp);
 
 /* ------------------------------------------------------------------ */
 /* 問題マスタ                                                          */
@@ -327,14 +331,13 @@ export async function getStudyStats() {
   };
 }
 
-export async function getTodayStats(date = todayKey()) {
+export async function getTodayStats(date = studyDayKey()) {
   const records = await listRecords();
   const today = records.filter((r) => recordDateOf(r) === date);
   const totals = sumDurations(today);
   return {
     date,
-    seconds: sumDurations(records.filter(r => !r.studySecondsByDate && recordDateOf(r) === date)).seconds
-      + records.reduce((sum, r) => sum + (r.studySecondsByDate?.[date] ?? 0), 0),
+    seconds: records.reduce((sum, record) => sum + durationOnStudyDate(record, date), 0),
     // 時間が未登録の取り組みの数。合計に足さずに、件数だけ知らせる。
     unknownDurationCount: totals.unknownCount,
     count: today.length,
@@ -346,7 +349,7 @@ export async function getTodayStats(date = todayKey()) {
 /* タスク                                                              */
 /* ------------------------------------------------------------------ */
 
-export async function getTodayTasks(date = todayKey()) {
+export async function getTodayTasks(date = studyDayKey()) {
   const tasks = await idb.byIndex(STORES.tasks, 'date', date);
   return tasks.sort((a, b) => a.order - b.order);
 }
@@ -367,7 +370,7 @@ export async function setPlanMeta(date, patch) {
   return next;
 }
 
-export async function updateTodayTasks(tasks, date = todayKey(), { markDirty = true, updatedBy = 'app' } = {}) {
+export async function updateTodayTasks(tasks, date = studyDayKey(), { markDirty = true, updatedBy = 'app' } = {}) {
   const now = new Date().toISOString();
   const normalized = tasks.map((t, i) => withItems({
     // IDは渡されたものを必ず残す。作り直すと、クラウド側の同じタスクと結び付かなくなる。
@@ -841,8 +844,8 @@ export async function setManualEstimate(questionId, seconds) {
 /** その日に使える時間（画面に「予定○分／使える○分」を出すために使う）。 */
 export async function availabilityForDay(dateKey) {
   const [availability, records] = await Promise.all([getAvailability(), listRecords()]);
-  const spentSeconds = sumDurations(records.filter((r) => recordDateOf(r) === dateKey)).seconds;
-  return availabilityForDate(availability, dateKey, { spentSeconds, isToday: dateKey === todayKey() });
+  const spentSeconds = records.reduce((sum, record) => sum + durationOnStudyDate(record, dateKey), 0);
+  return availabilityForDate(availability, dateKey, { spentSeconds, isToday: dateKey === studyDayKey() });
 }
 
 /**
@@ -893,12 +896,12 @@ export async function createDayPlanner() {
   }
   const spentByDate = new Map();
   for (const record of records) {
-    if (!hasDuration(record)) continue;
-    const day = recordDateOf(record);
-    spentByDate.set(day, (spentByDate.get(day) ?? 0) + record.durationSeconds);
+    for (const [day, seconds] of durationEntriesByStudyDate(record)) {
+      spentByDate.set(day, (spentByDate.get(day) ?? 0) + seconds);
+    }
   }
   const truncated = new Set(challenges.filter((c) => c.succeeded === false).map((c) => c.id));
-  const today = todayKey();
+  const today = studyDayKey();
   const cache = new Map();
 
   const estimate = (questionId, { inChallenge = false } = {}) => {
@@ -1036,7 +1039,7 @@ export async function finishStudySession(sessionId, snapshot = null) {
       session: { ...session, active: false, sessionId: null, mode: 'idle', resumeMode,
         currentStartedAt: null, sessionStartedAt: null },
       event: { key: `session_end:${sessionId}`, type: 'session_end', id: sessionId, queuedAt: Date.now(),
-        event: { sessionId, date: dateKeyOf(endedAt), endedAt } },
+        event: { sessionId, date: studyDateKeyOf(endedAt), endedAt } },
     };
   });
 }

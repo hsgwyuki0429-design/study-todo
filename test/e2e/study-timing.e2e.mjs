@@ -203,3 +203,37 @@ test('example row starts study directly and tapping it again begins review', opt
   const bounds = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
   assert.ok(bounds.scroll <= bounds.width, 'mobile UI must not overflow horizontally');
 });
+
+test('daily total keeps post-midnight study in the prior label and resets at 03:00 JST', options, async () => {
+  // Setup is 12:00:01 JST on Sep 14. Move close to Sep 15 03:00 without changing timers manually.
+  await page.clock.fastForward(14 * 3600000 + 59 * 60000 + 49 * 1000);
+  const beforeBoundary = await page.evaluate(async () => {
+    const api = await import('./src/api.js');
+    return { day: api.todayKey(), todoCount: (await api.getTodayTasks()).length };
+  });
+  assert.deepEqual(beforeBoundary, { day: '2026-09-14', todoCount: 2 });
+  await start();
+  await page.clock.fastForward(20000); // 10 seconds before and 10 seconds after 03:00.
+  const values = await page.evaluate(async () => {
+    const api = await import('./src/api.js');
+    const home = await import('./src/home.js');
+    const session = await api.getSessionState();
+    return {
+      day: api.studyDayKey(),
+      todoCount: (await api.getTodayTasks()).length,
+      current: home.dailyElapsed(),
+      prior: (await api.getTodayStats('2026-09-14')).seconds,
+      next: (await api.getTodayStats('2026-09-15')).seconds,
+      draft: session.questionTiming[session.currentQuestionId].byDate,
+    };
+  });
+  assert.equal(values.day, '2026-09-15');
+  assert.equal(values.todoCount, 0);
+  assert.equal(values.current, 10);
+  assert.deepEqual(values.draft, {}); // running time is included from the live timestamp until checkpoint.
+  assert.equal(values.prior, 0); assert.equal(values.next, 0);
+  await page.getByRole('button', { name: '一時停止', exact: true }).click();
+  const checkpointed = await session();
+  assert.deepEqual(checkpointed.questionTiming[ids[0]].byDate, { '2026-09-14': 10, '2026-09-15': 10 });
+  assert.equal(await total(), 10);
+});

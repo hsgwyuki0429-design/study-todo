@@ -74,8 +74,9 @@ test("統計はイベントから数え直す", () => {
   assert.equal(stats.totalSeconds, 180);
   assert.equal(stats.uniqueQuestions, 1);
   assert.equal(stats.byChapter["数列"].count, 2);
-  // どちらも日本時間では 2026-09-12 の学習。
-  assert.equal(stats.byDate["2026-09-12"].count, 2);
+  // 00:30 JSTは前の学習日、11:00 JSTは当日の学習になる。
+  assert.equal(stats.byDate["2026-09-11"].count, 1);
+  assert.equal(stats.byDate["2026-09-12"].count, 1);
 });
 
 test("タスクのIDは作り直さず、古いデータには pinned を補う", () => {
