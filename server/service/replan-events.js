@@ -1,6 +1,6 @@
 import { fail } from '../core/validate.js';
 import { runTransaction, supportsTransactions } from '../storage/driver.js';
-import { dateKeyOf, isDateKey } from '../../src/datetime.js';
+import { isDateKey, studyDateKeyOf } from '../../src/datetime.js';
 import { STORAGE_KEYS, DEFAULT_SETTINGS } from '../auth/tokens.js';
 import { SYNC_KEYS } from './sync-service.js';
 import { fireClaudeRoutine, routineConfigurationError } from './claude-routine.js';
@@ -12,7 +12,9 @@ export const DEFERRED_KEY = 'studytodo:replan:deferred';
 
 export function dailyEvent(scheduledTime) {
   if (typeof scheduledTime !== 'number' || !Number.isFinite(scheduledTime)) fail('scheduledTimeが不正です。', 'scheduledTime');
-  const date = dateKeyOf(scheduledTime, 540);
+  // 学習日（03:00 JST区切り）で数える。アプリ側が同じ区切りで今日を決めているため、
+  // 暦の日付で数えると、0:00〜3:00 に動かしたときだけ1日ずれて見つからなくなる。
+  const date = studyDateKeyOf(scheduledTime, 540);
   if (!isDateKey(date)) fail('scheduledTimeが不正です。', 'scheduledTime');
   return { trigger: 'daily_3am', eventId: `daily_replan_${date}`, date };
 }
