@@ -34,6 +34,8 @@ export const DEFAULT_CLOUD = Object.freeze({
 
 /** 一度に送る学習記録の数。サーバー側の上限に合わせる。 */
 const PUSH_CHUNK = 400;
+/** 開いたままの別端末も、変更をこの時間以内に取り込む。非表示中は通信しない。 */
+export const DEVICE_SYNC_INTERVAL_MS = 15000;
 
 export function normalizeCloudConfig(raw = {}) {
   const stored = raw && typeof raw === 'object' ? raw : {};
@@ -670,7 +672,16 @@ export function syncInBackground() {
 export function startCloudSync() {
   syncInBackground();
   if (typeof window !== 'undefined') {
+    window.addEventListener('study-todo-local-change', () => syncInBackground());
     window.addEventListener('online', () => syncInBackground());
+    window.addEventListener('focus', () => syncInBackground());
+    window.addEventListener('pageshow', () => syncInBackground());
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) syncInBackground();
+    });
+    window.setInterval(() => {
+      if (!document.hidden) syncInBackground();
+    }, DEVICE_SYNC_INTERVAL_MS);
   }
 }
 

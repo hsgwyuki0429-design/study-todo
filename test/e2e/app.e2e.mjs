@@ -292,3 +292,50 @@ test("片方の端末で「すべて削除」すると、もう片方からも�
   await first.context.close();
   await second.context.close();
 });
+
+test("タスク完了と完了解除が、操作側の即時送信と別端末の自動受信で同期される", options, async () => {
+  const first = await openDevice();
+  const second = await openDevice();
+  await link(first.page);
+  await link(second.page);
+
+  const taskId = "task-auto-sync-e2e";
+  await first.page.evaluate(async (id) => {
+    const api = await import("./src/api.js");
+    const [question] = await api.listQuestions();
+    await api.saveTask({ id, date: api.todayKey(), kind: "new", order: 0,
+      questionIds: [question.id], completed: false });
+  }, taskId);
+
+  // 受信側では同期ボタンやsyncNowを呼ばない。定期同期または画面復帰時の自動同期で届く。
+  await second.page.waitForFunction(async (id) => {
+    const api = await import("./src/api.js");
+    return (await api.getTodayTasks()).some((task) => task.id === id && task.completed === false);
+  }, taskId, { timeout: 20000 });
+
+  await first.page.evaluate(async (id) => {
+    const api = await import("./src/api.js");
+    const task = (await api.getTodayTasks()).find((entry) => entry.id === id);
+    await api.saveTask({ ...task, completed: true });
+  }, taskId);
+  await second.page.bringToFront();
+  await second.page.waitForFunction(async (id) => {
+    const api = await import("./src/api.js");
+    return (await api.getTodayTasks()).some((task) => task.id === id && task.completed === true);
+  }, taskId, { timeout: 20000 });
+
+  await first.page.bringToFront();
+  await first.page.evaluate(async (id) => {
+    const api = await import("./src/api.js");
+    const task = (await api.getTodayTasks()).find((entry) => entry.id === id);
+    await api.saveTask({ ...task, completed: false });
+  }, taskId);
+  await second.page.bringToFront();
+  await second.page.waitForFunction(async (id) => {
+    const api = await import("./src/api.js");
+    return (await api.getTodayTasks()).some((task) => task.id === id && task.completed === false);
+  }, taskId, { timeout: 20000 });
+
+  await first.context.close();
+  await second.context.close();
+});

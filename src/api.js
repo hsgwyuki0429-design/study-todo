@@ -59,6 +59,11 @@ export {
 export const uid = (prefix = 'id') =>
   `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
+/** 保存完了後、クラウド同期層へ通知する。APIと同期層の循環importは作らない。 */
+function notifySyncableChange() {
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('study-todo-local-change'));
+}
+
 /**
  * Study To Doでいう「今日」。03:00 JSTまでは前日の学習日として扱う。
  * To Do・実績・累計時間・現在日の表示は、すべてこの境界を共有する。
@@ -89,6 +94,7 @@ export async function importQuestions(questions, { replace = false, masterVersio
   if (replace) await idb.clear(STORES.questions);
   await idb.putAll(STORES.questions, normalized);
   if (masterVersion !== null) await setQuestionMasterVersion(masterVersion);
+  notifySyncableChange();
   return normalized.length;
 }
 
@@ -271,12 +277,15 @@ export async function addStudyRecord(input) {
   const record = makeStudyRecord(input);
   await idb.put(STORES.records, record);
   await enqueueOutbox('record', record.id);
+  notifySyncableChange();
   return record;
 }
 
 export async function completeStudyAttempt(input, session, nextSession) {
   const record = makeStudyRecord(input);
-  return idb.commitAttempt(record, session, nextSession);
+  const result = await idb.commitAttempt(record, session, nextSession);
+  if (result.saved) notifySyncableChange();
+  return result;
 }
 
 export async function getStudyHistory({ limit = 100, from, to, evaluation, chapter } = {}) {
@@ -399,6 +408,7 @@ export async function updateTodayTasks(tasks, date = studyDayKey(), { markDirty 
   if (markDirty) {
     // この端末で変えた予定は、次の同期でクラウドへ送る。
     await setPlanMeta(date, { updatedAt: new Date().toISOString(), dirty: true, updatedBy });
+    notifySyncableChange();
   }
   return normalized;
 }
@@ -440,6 +450,7 @@ export async function setTaskPinned(taskId, pinned) {
   const next = { ...task, pinned: pinned === true, updatedAt: new Date().toISOString() };
   await idb.put(STORES.tasks, next);
   await setPlanMeta(task.date, { updatedAt: next.updatedAt, dirty: true, updatedBy: 'app' });
+  notifySyncableChange();
   return next;
 }
 
@@ -447,6 +458,7 @@ export async function saveTask(task) {
   await idb.put(STORES.tasks, task);
   // 完了の付け外しもその日の予定の変更なので、次の同期で送る。
   await setPlanMeta(task.date, { updatedAt: new Date().toISOString(), dirty: true, updatedBy: 'app' });
+  notifySyncableChange();
   return task;
 }
 
@@ -510,6 +522,7 @@ export async function listMoves({ from = null, to = null } = {}) {
 export async function addMove(move) {
   await idb.put(STORES.moves, move);
   await enqueueOutbox('move', move.id);
+  notifySyncableChange();
   return move;
 }
 
@@ -596,12 +609,13 @@ export async function deleteStudyRecord(recordId) {
   if (!record) return { ok: false, error: 'not_found' };
   await idb.del(STORES.records, recordId);
   await enqueueOutbox('record_deleted', recordId);
+  notifySyncableChange();
   return { ok: true, record };
 }
 
 /** Undo a mistaken result and reopen only its associated plan; other attempts remain. */
 export async function undoStudyRecord(recordId) {
-  return idb.undoAttempt(recordId, (record, records, tasks, planMeta) => {
+  const result = await idb.undoAttempt(recordId, (record, records, tasks, planMeta) => {
     const changed = [];
     for (const task of tasks) {
       const matches = record.planItemId ? itemsOf(task).some(i => i.itemId === record.planItemId)
@@ -615,12 +629,15 @@ export async function undoStudyRecord(recordId) {
     }
     return { tasks: changed, planMeta };
   });
+  if (result.ok) notifySyncableChange();
+  return result;
 }
 
 export async function saveChallengeResult(result) {
   const saved = { id: result.id || uid('chl'), timestamp: new Date().toISOString(), ...result };
   await idb.put(STORES.challenges, saved);
   await enqueueOutbox('challenge', saved.id);
+  notifySyncableChange();
   return saved;
 }
 
@@ -653,6 +670,7 @@ export async function deleteChallengeResult(challengeId) {
 
   const records = (await idb.all(STORES.records)).filter((record) => record.challengeId === challengeId);
   for (const record of records) await deleteStudyRecord(record.id);
+  notifySyncableChange();
   return { ok: true, result, deletedRecords: records.length };
 }
 
@@ -711,6 +729,7 @@ export async function addGoal({ title, deadline, scope, questionIds = [], comple
     revision: 1,
   });
   await idb.put(STORES.goals, goal);
+  notifySyncableChange();
   return goal;
 }
 
@@ -725,6 +744,7 @@ export async function updateGoal(id, patch) {
     revision: Number(goal.revision ?? 0) + 1,
   });
   await idb.put(STORES.goals, next);
+  notifySyncableChange();
   return next;
 }
 
@@ -736,6 +756,7 @@ export async function deleteGoal(id) {
   const goal = await idb.get(STORES.goals, id);
   if (!goal) return;
   await idb.put(STORES.goals, { ...goal, deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  notifySyncableChange();
 }
 
 /**
@@ -815,6 +836,7 @@ export async function saveAvailability(patch) {
   }
   if (patch.todayRemaining === null) next.todayRemaining = null;
   await idb.put(STORES.meta, { key: AVAILABILITY_KEY, value: next });
+  notifySyncableChange();
   return next;
 }
 
@@ -838,6 +860,7 @@ export async function setManualEstimate(questionId, seconds) {
     },
   };
   await idb.put(STORES.meta, { key: ESTIMATES_KEY, value: next });
+  notifySyncableChange();
   return next;
 }
 

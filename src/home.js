@@ -422,11 +422,11 @@ async function recordChallengeEvaluation(evaluation) {
 }
 
 async function refreshAfterRecord() {
-  // 学習記録を保存したあとにクラウドへ送る。失敗しても学習側は止めない。
-  syncInBackground();
   await refreshToday();
   await markCompletedTasks();
   await persist();
+  // 記録とタスク完了の両方が保存された状態を送る。失敗しても学習側は止めない。
+  syncInBackground();
   render();
 }
 
