@@ -93,7 +93,10 @@
 
 * { box-sizing: border-box; }
 
-html, body { height: 100%; margin: 0; }
+/* body自体はスクロールさせない。スクロールは常に .screen / .list など
+   中の要素だけに任せ、上下スワイプでページ全体が動く（ゴムのように
+   引っぱられる）のを防ぐ。 */
+html, body { height: 100%; margin: 0; overflow: hidden; overscroll-behavior: none; }
 
 body {
   background: var(--bg);
