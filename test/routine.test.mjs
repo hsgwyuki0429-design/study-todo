@@ -16,6 +16,18 @@ const ended = { sessionId: 'local-session-1', eventId: 'study_end_local-session-
 const scheduledTime = Date.parse('2026-09-14T18:00:00Z');
 const OPERATION = 'a1b2c3d4e5f60718';
 const event = dailyEvent(scheduledTime);
+// Cloudflare Workers が受け付けない要求の作り方を、Nodeのテストでも弾く。
+// workerd は redirect:'error' を TypeError で拒む（Node は受け付けるため気づけなかった）。
+// 本番だけで落ちる差を、mock を通る全テストで見張る。
+function assertWorkerdCompatible([url, init]) {
+  assert.ok(['follow', 'manual', undefined].includes(init.redirect),
+    `Cloudflare Workers rejects redirect: ${JSON.stringify(init.redirect)}`);
+  assert.equal(typeof url, 'string');
+  for (const [key, value] of Object.entries(init.headers ?? {})) {
+    assert.ok(!/[\r\n]/.test(String(value)), `header ${key} must not contain a line break`);
+  }
+}
+
 const providerResponse = () => Response.json({ type: 'routine_fire',
   claude_code_session_id: 'session_TEST_ONLY', claude_code_session_url: 'https://claude.ai/code/session_TEST_ONLY' });
 
@@ -129,6 +141,7 @@ test('timeout persists an uncertain claim and duplicate daily never retries HTTP
 async function fixture({ env = ENV, fetchImpl = async () => providerResponse(), storage = createMemoryDriver(), now = () => scheduledTime, onReplan } = {}) {
   const jobs = [], calls = [];
   const options = { storage, env, now, onReplan, waitUntil: (p) => jobs.push(p), routineFetch: async (...args) => {
+    assertWorkerdCompatible(args);
     calls.push(args); return fetchImpl(...args);
   } };
   const app = createStudyTodoMcpApp(options);
@@ -153,7 +166,8 @@ test('daily_3am: concurrent replay and app restart issue exactly one POST; metad
   assert.equal(request.headers.authorization, `Bearer ${ENV.CLAUDE_ROUTINE_API_TOKEN}`);
   assert.equal(request.headers['anthropic-beta'], 'experimental-cc-routine-2026-04-01');
   assert.equal(request.headers['anthropic-version'], '2023-06-01');
-  assert.equal(request.redirect, 'error');
+  // 'error' は Workers で送信できない。転送は 'manual' + 3xxを断る形で防ぐ。
+  assert.equal(request.redirect, 'manual');
   assert.deepEqual(JSON.parse(request.body), { text: `trigger=daily_3am eventId=${event.eventId} date=${event.date}` });
   const internal = await f.storage.get(dailyEventKey(event.date));
   assert.equal(internal.state, 'triggered');
@@ -263,6 +277,30 @@ test('an unexpected response body names the failed check, never the provider con
 test('the provider timeout leaves room for session creation', () => {
   // Fire API はセッションが作られてから返る。短く切ると、起動済みでも結果不明になる。
   assert.ok(PROVIDER_TIMEOUT_MS >= 20000, 'provider timeout must allow for session creation');
+});
+
+test('a redirect is refused instead of followed, and never re-sent to the new location', async () => {
+  let calls = 0;
+  for (const status of [301, 302, 303, 307, 308]) {
+    const result = await fireClaudeRoutine(event, { env: ENV, fetchImpl: async (url, init) => {
+      calls++;
+      assertWorkerdCompatible([url, init]);
+      return new Response(null, { status, headers: { location: 'https://example.com/fire' } });
+    } });
+    assert.equal(result.error, 'provider_redirect');
+    assert.equal(result.retryable, false);
+    assert.equal(result.outcomeUnknown, undefined);
+  }
+  assert.equal(calls, 5); // 転送先へは1回も送らない
+});
+
+test('a transport failure names the kind of exception only', async () => {
+  const result = await fireClaudeRoutine(event, { env: ENV,
+    fetchImpl: async () => { throw new TypeError(ENV.CLAUDE_ROUTINE_FIRE_URL); } });
+  assert.equal(result.error, 'provider_transport');
+  assert.equal(result.detail, 'TypeError');
+  assert.equal(result.outcomeUnknown, true);
+  assert.ok(!JSON.stringify(result).includes(ENV.CLAUDE_ROUTINE_FIRE_URL));
 });
 
 test('secret URL validation rejects other hosts and never follows redirects', async () => {

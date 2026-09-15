@@ -24,7 +24,9 @@ export async function fireClaudeRoutine(event, { env, fetchImpl = fetch, timeout
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetchImpl(env.CLAUDE_ROUTINE_FIRE_URL, {
-      method: 'POST', redirect: 'error', signal: controller.signal,
+      // Cloudflare Workers は redirect:'error' を受け付けない（TypeErrorになり送信できない）。
+      // 'manual' で転送を追わず、3xxはこちらで断る。Nodeとの違いで気づけなかった箇所。
+      method: 'POST', redirect: 'manual', signal: controller.signal,
       headers: {
         authorization: `Bearer ${env.CLAUDE_ROUTINE_API_TOKEN}`,
         'anthropic-version': '2023-06-01',
@@ -35,6 +37,10 @@ export async function fireClaudeRoutine(event, { env, fetchImpl = fetch, timeout
         + `trigger=${event.trigger} eventId=${event.eventId} date=${event.date}`
         + (event.sessionId ? ` sessionId=${event.sessionId}` : '') }),
     });
+    // 転送は追わない。別の宛先へ秘密を送らないため、ここで断る。
+    if (response.status >= 300 && response.status < 400) {
+      return { state: 'failed', error: 'provider_redirect', httpStatus: response.status, retryable: false };
+    }
     if (!response.ok) {
       const error = ({ 400: 'invalid_request', 401: 'authentication', 403: 'permission',
         404: 'routine_not_found', 429: 'rate_limit', 500: 'provider_failure', 503: 'provider_failure' })[response.status]
@@ -56,8 +62,10 @@ export async function fireClaudeRoutine(event, { env, fetchImpl = fetch, timeout
     if (detail) return { state: 'failed', error: 'invalid_provider_response', detail, retryable: false, outcomeUnknown: true };
     return { state: 'triggered', retryable: false, providerSessionId: id,
       providerSessionUrl: `https://claude.ai/code/${id}` };
-  } catch {
+  } catch (error) {
+    // detail は例外の種類の名前だけ（TypeError など）。本文・URL・トークンは残さない。
     return { state: 'failed', error: controller.signal.aborted ? 'timeout' : 'provider_transport',
+      ...(controller.signal.aborted ? {} : { detail: String(error?.name ?? 'Error').slice(0, 40) }),
       retryable: false, outcomeUnknown: true };
   } finally { clearTimeout(timer); }
 }

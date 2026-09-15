@@ -42,6 +42,7 @@ const PLANNER_ERRORS = {
   rate_limit: '回数の制限に達しました。しばらくしてからもう一度押してください',
   provider_failure: 'Claude側で問題が起きています。しばらくしてからもう一度押してください',
   provider_http_error: 'Claudeから正しい応答がありませんでした',
+  provider_redirect: 'Claudeの宛先が転送されました。Fire URLの設定を確認してください',
   // 下の3つは「届いたかどうか分からない」失敗。起動している可能性があるので、
   // 自動では送り直さず、Routineの履歴で確かめてもらう。見分けが付くよう文面を分ける。
   timeout: 'Claudeから時間内に応答がありませんでした。起動しているかもしれないので、'
