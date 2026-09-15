@@ -248,6 +248,21 @@ async function beginReview() {
   await persist(); render();
 }
 
+/**
+ * 誤って採点・暗記へ進んだときに、解答中へ戻す。
+ * beginReview の逆方向で、計測中だった時間はそのまま解答側の時間として残る。
+ */
+async function backToSolve() {
+  if (recording || endingSession || !state.session.currentQuestionId) return;
+  const s = state.session;
+  const paused = isPaused();
+  commitCurrent();
+  questionTiming(s, s.currentQuestionId).phase = 'solve';
+  s.mode = 'task_list';
+  if (!paused) s.currentStartedAt = new Date().toISOString();
+  await persist(); render();
+}
+
 async function tapTaskQuestion(questionId, item = null, task = null) {
   if (recording || endingSession) return;
   const s = state.session;
@@ -467,6 +482,13 @@ function timerPanel() {
   totalValue.dataset.timer = 'session';
   total.append(totalValue);
   head.append(total);
+  if (s.mode === 'record_input') {
+    // 間違って採点・暗記に進んでしまったときのために、解答中へ戻すボタンを置く。
+    const back = el('button', 'finish-btn', '戻る');
+    back.title = '解答中へ戻る';
+    back.onclick = backToSolve;
+    head.append(back);
+  }
   if (s.mode === 'task_list' || s.mode === 'record_input') {
     const finish = el('button', 'finish-btn', '終了');
     finish.title = '学習を終了する';

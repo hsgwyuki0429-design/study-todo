@@ -169,6 +169,19 @@ test('double evaluation tap and competing draft commits save one result; failed 
   assert.equal((await records()).length, 2);
 });
 
+test('accidentally starting review can be undone with the back button, resuming solve', options, async () => {
+  await start(); await page.clock.fastForward(20000); await review();
+  assert.equal((await session()).mode, 'record_input');
+  await page.clock.fastForward(15000);
+  await page.getByRole('button', { name: '戻る', exact: true }).click();
+  assert.equal((await session()).mode, 'task_list');
+  assert.equal((await session()).questionTiming[ids[0]].phase, 'solve');
+  await page.clock.fastForward(5000);
+  await page.getByRole('button', { name: '終了', exact: true }).click();
+  await until(async () => !(await session()).active);
+  assert.equal((await records()).length, 0);
+});
+
 test('review continues on the next JST day; completed time stays on the day it was measured', options, async () => {
   await start(); await page.clock.fastForward(60000); await review(); await page.clock.fastForward(30000);
   await page.getByRole('button', { name: '終了', exact: true }).click();
