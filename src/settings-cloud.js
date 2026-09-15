@@ -17,6 +17,11 @@ let firingPlanner = false;
 // 通信が切れて結果が分からなかった一押しの目印。
 // 押し直したときに同じ目印で聞き直せば、サーバーは二重に起動しない。
 let unsettledOperationId = null;
+// プランナーの結果は、共有の lastMessage ではなくボタンのすぐそばに出す。
+// カード上端のメッセージ行は、ボタンまでスクロールした画面からは見えず、
+// 「起動中…」が消えて元に戻っただけに見えてしまうため。
+// 次に押すまで残す（同期などの描き直しで消えないように）。
+let plannerResult = null;
 
 /**
  * サーバーが返す起動できなかった理由を、画面に出す日本語へ直す。
@@ -286,9 +291,13 @@ export async function renderCloudCard(list, rerender) {
         title: 'プランナー',
         sub: '現在の学習状況を読み取り、予定を今すぐ組み直します（毎日03:00の自動再計画と同じ処理）',
       }));
+      if (plannerResult) {
+        list.append(row({ title: plannerResult, classes: ['row-indent'] }));
+      }
       const fire = button(firingPlanner ? 'プランナーを起動中…' : 'プランナーを今すぐ実行', async () => {
         if (firingPlanner) return;
         firingPlanner = true;
+        plannerResult = null;
         fire.disabled = true;
         fire.textContent = 'プランナーを起動中…';
         const operationId = unsettledOperationId ?? cloud.newOperationId();
@@ -296,12 +305,12 @@ export async function renderCloudCard(list, rerender) {
         try {
           const result = await cloud.admin.firePlanner(config, operationId);
           unsettledOperationId = null;
-          lastMessage = plannerMessage(result.replan);
+          plannerResult = plannerMessage(result.replan);
         } catch (error) {
           // サーバーが答えを返したのなら、その一押しは終わっている。
           // 届いたかどうか分からないとき（切断・時間切れ）だけ目印を残す。
           if (error.status) unsettledOperationId = null;
-          lastMessage = `プランナーを起動できませんでした：${error.message}`;
+          plannerResult = `プランナーを起動できませんでした：${error.message}`;
         } finally {
           firingPlanner = false;
         }

@@ -293,6 +293,18 @@ test('paused session heartbeat remains active without a running question timer',
   assert.equal(calls.length, 1);
 });
 
+// 画面に出ているだけでなく、ボタンのそばで実際に見えているかを確かめる。
+// カード上端に出すと、ボタンまでスクロールした画面からは見えない。
+async function plannerMessageInView(text) {
+  return page.evaluate((expected) => {
+    const node = [...document.querySelectorAll('*')]
+      .find((n) => !n.children.length && n.textContent.trim() === expected);
+    if (!node) return { found: false };
+    const box = node.getBoundingClientRect();
+    return { found: true, inView: box.bottom > 0 && box.top < innerHeight };
+  }, text);
+}
+
 async function openSettingsWithOwnerKey() {
   await page.evaluate(async ({ origin, key }) => {
     const cloud = await import('./src/cloud-sync.js');
@@ -315,7 +327,11 @@ test('PWA settings button fires the planner once through the Worker and shows th
   const busy = page.getByRole('button', { name: 'プランナーを起動中…' });
   await busy.waitFor();
   assert.equal(await busy.isDisabled(), true);
-  await until(() => page.evaluate(() => document.body.innerText.includes('プランナーを起動しました。')));
+  await until(async () => (await plannerMessageInView('プランナーを起動しました。')).found);
+  assert.deepEqual(await plannerMessageInView('プランナーを起動しました。'), { found: true, inView: true });
+  // 同期などで描き直されても、結果は消えない。
+  await page.evaluate(async () => (await import('./src/cloud-sync.js')).syncNow({ force: true }));
+  await until(async () => (await plannerMessageInView('プランナーを起動しました。')).inView);
   await server.flushJobs();
   assert.equal(calls.length, 1);
   assert.ok(calls[0].text.startsWith('trigger=manual eventId=manual_replan_'));
@@ -335,11 +351,15 @@ test('PWA shows a human-readable reason when the planner cannot start', options,
   await call(server.app, '/api/admin/settings', { method: 'POST', token: OWNER_KEY, body: { permissions: { write: false } } });
   await openSettingsWithOwnerKey();
   await page.getByRole('button', { name: 'プランナーを今すぐ実行' }).click();
-  await page.getByText('プランナーを起動できませんでした：AI連携の「予定を変更する」権限を許可してください').waitFor();
+  const denied = 'プランナーを起動できませんでした：AI連携の「予定を変更する」権限を許可してください';
+  await until(async () => (await plannerMessageInView(denied)).found);
+  assert.deepEqual(await plannerMessageInView(denied), { found: true, inView: true });
   assert.equal(calls.length, 0);
   // 権限を戻すと、同じボタンから起動できる。
   await call(server.app, '/api/admin/settings', { method: 'POST', token: OWNER_KEY, body: { permissions: { write: true } } });
   await page.getByRole('button', { name: 'プランナーを今すぐ実行' }).click();
-  await page.getByText('プランナーを起動しました。').waitFor();
+  await until(async () => (await plannerMessageInView('プランナーを起動しました。')).found);
+  // 前の失敗の表示は残らない。
+  assert.equal((await plannerMessageInView(denied)).found, false);
   assert.equal(calls.length, 1);
 });
