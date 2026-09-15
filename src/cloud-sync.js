@@ -148,6 +148,13 @@ async function request(config, path, {
 /* 管理API（オーナーキーが要る。AIへは渡らない）                        */
 /* ------------------------------------------------------------------ */
 
+/** 押した1回を表す目印。英数字だけなので、そのままイベントIDに使える。 */
+export function newOperationId() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
 export const admin = {
   // 設定画面はこの返事を待たずに組み立てる。待つと、応じないサーバーのせいで
   // 画面ぜんぶが出てこず、どこも押せないように見えてしまう。
@@ -159,6 +166,19 @@ export const admin = {
   revokeToken: (config) => request(config, '/api/admin/token', { method: 'DELETE', token: config.ownerKey }),
   issueSyncCode: (config) => request(config, '/api/admin/sync-code', { method: 'POST', body: {}, token: config.ownerKey }),
   log: (config) => request(config, '/api/admin/log', { token: config.ownerKey }),
+  /**
+   * 03:00の自動再計画と同じプランナー（Claude Routine）を、その場で1回だけ起動する。
+   * operationId は同じ操作の目印で、通信が切れて押し直されても二重に起動させないためにある。
+   * Fire URLとAPIトークンはサーバーのSecretだけにあり、この端末は受け取らない。
+   */
+  firePlanner: (config, operationId = newOperationId()) =>
+    request(config, '/api/admin/replan/fire', {
+      method: 'POST',
+      body: { operationId },
+      token: config.ownerKey,
+      // Routineへの送信（上限10秒）と保存を待つぶん、ふだんより長く待つ。
+      timeoutMs: 30000,
+    }),
   releaseDevice: (config, deviceId) =>
     request(config, '/api/admin/devices', { method: 'DELETE', body: { deviceId }, token: config.ownerKey }),
   // クラウドに預けてある学習データをすべて消す。戻せないので合言葉つきで呼ぶ。

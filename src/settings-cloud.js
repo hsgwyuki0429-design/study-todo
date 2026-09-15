@@ -12,6 +12,42 @@ import { el, row } from './ui.js';
 // サーバーには残らないので、ここで控えてもらう。
 let issuedToken = null;
 let lastMessage = null;
+// プランナーの起動中は、描き直してもボタンを押せないままにする。
+let firingPlanner = false;
+// 通信が切れて結果が分からなかった一押しの目印。
+// 押し直したときに同じ目印で聞き直せば、サーバーは二重に起動しない。
+let unsettledOperationId = null;
+
+/**
+ * サーバーが返す起動できなかった理由を、画面に出す日本語へ直す。
+ * 技術的なコードはそのまま見せない。
+ */
+const PLANNER_ERRORS = {
+  ai_disabled: 'AI連携がオフになっています',
+  read_permission_required: 'AI連携の「学習状況を見る」権限を許可してください',
+  write_permission_required: 'AI連携の「予定を変更する」権限を許可してください',
+  study_in_progress: '現在学習中のため実行できません。学習終了後にもう一度押してください',
+  missing_secrets: 'サーバーにRoutineの設定がありません',
+  invalid_configuration: 'Routineの設定が正しくありません',
+  storage_not_atomic: 'サーバーの保存先が古い設定です（docs/mcp.md の「保存先の移行」）',
+  invalid_request: 'Routineが要求を受け付けませんでした',
+  authentication: 'RoutineのAPIトークンが使えません',
+  permission: 'RoutineのAPIトークンに権限がありません',
+  routine_not_found: 'Routineが見つかりません',
+  rate_limit: '回数の制限に達しました。しばらくしてからもう一度押してください',
+  provider_failure: 'Claude側で問題が起きています。しばらくしてからもう一度押してください',
+  provider_http_error: 'Claudeから正しい応答がありませんでした',
+  timeout: '起動できたか分かりませんでした。Routineの履歴を確認してください（自動では送り直しません）',
+  provider_transport: '起動できたか分かりませんでした。Routineの履歴を確認してください（自動では送り直しません）',
+  invalid_provider_response: '起動できたか分かりませんでした。Routineの履歴を確認してください（自動では送り直しません）',
+};
+
+function plannerMessage(replan) {
+  if (replan?.state === 'triggered') return 'プランナーを起動しました。';
+  // 送信の結果が保存前に途切れた場合。押し直しはせず、履歴で確かめてもらう。
+  if (replan?.state === 'pending') return 'プランナーへ起動を伝えましたが、結果を確認できませんでした。Routineの履歴を確認してください。';
+  return `プランナーを起動できませんでした：${PLANNER_ERRORS[replan?.error] ?? '原因が分かりませんでした'}`;
+}
 
 /** 同期で入ってきた内容を、画面が使っている状態へ読み込み直す。 */
 async function reloadFromLocal() {
@@ -242,6 +278,37 @@ export async function renderCloudCard(list, rerender) {
           + '埋めずに「未登録」で保存されます。取り消した記録も消えず、履歴に残ります。',
         classes: ['row-indent'],
       }));
+    }
+
+    // ----- プランナーの手動起動（03:00の自動再計画と同じ経路を1回だけ通す） -----
+    if (status.enabled) {
+      list.append(row({
+        title: 'プランナー',
+        sub: '現在の学習状況を読み取り、予定を今すぐ組み直します（毎日03:00の自動再計画と同じ処理）',
+      }));
+      const fire = button(firingPlanner ? 'プランナーを起動中…' : 'プランナーを今すぐ実行', async () => {
+        if (firingPlanner) return;
+        firingPlanner = true;
+        fire.disabled = true;
+        fire.textContent = 'プランナーを起動中…';
+        const operationId = unsettledOperationId ?? cloud.newOperationId();
+        unsettledOperationId = operationId;
+        try {
+          const result = await cloud.admin.firePlanner(config, operationId);
+          unsettledOperationId = null;
+          lastMessage = plannerMessage(result.replan);
+        } catch (error) {
+          // サーバーが答えを返したのなら、その一押しは終わっている。
+          // 届いたかどうか分からないとき（切断・時間切れ）だけ目印を残す。
+          if (error.status) unsettledOperationId = null;
+          lastMessage = `プランナーを起動できませんでした：${error.message}`;
+        } finally {
+          firingPlanner = false;
+        }
+        rerender();
+      }, 'btn btn-primary');
+      fire.disabled = firingPlanner;
+      list.append(actions(fire));
     }
 
     list.append(row({

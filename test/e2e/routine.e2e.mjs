@@ -292,3 +292,54 @@ test('paused session heartbeat remains active without a running question timer',
   await end(); await waitForDispatch();
   assert.equal(calls.length, 1);
 });
+
+async function openSettingsWithOwnerKey() {
+  await page.evaluate(async ({ origin, key }) => {
+    const cloud = await import('./src/cloud-sync.js');
+    await cloud.saveCloudConfig({ serverUrl: origin, ownerKey: key });
+  }, { origin: server.origin, key: OWNER_KEY });
+  await page.getByRole('tab', { name: /設定/ }).click();
+  await page.getByText('AI連携 / 同期', { exact: true }).click();
+  await page.getByRole('button', { name: 'プランナーを今すぐ実行' }).waitFor();
+}
+
+test('PWA settings button fires the planner once through the Worker and shows the result', options, async () => {
+  await openSettingsWithOwnerKey();
+  provider = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    return Response.json({ type: 'routine_fire', claude_code_session_id: 'session_E2E',
+      claude_code_session_url: 'https://claude.ai/code/session_E2E' });
+  };
+  await page.getByRole('button', { name: 'プランナーを今すぐ実行' }).click();
+  // 押した瞬間から表示が変わってdisabledになり、応答が返るまで押し直せない。
+  const busy = page.getByRole('button', { name: 'プランナーを起動中…' });
+  await busy.waitFor();
+  assert.equal(await busy.isDisabled(), true);
+  await until(() => page.evaluate(() => document.body.innerText.includes('プランナーを起動しました。')));
+  await server.flushJobs();
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].text.startsWith('trigger=manual eventId=manual_replan_'));
+  // 秘密（Fire URL / APIトークン / providerのsession）は画面へ渡らない。
+  const shown = await page.evaluate(() => document.body.innerText);
+  for (const secret of ['routine-E2E-ONLY', 'api.anthropic.com', 'trig_E2E_ONLY', 'session_E2E']) {
+    assert.ok(!shown.includes(secret), `settings screen must not show ${secret}`);
+  }
+  // 03:00のdailyは手動実行のあとも通常どおり動く。
+  assert.equal((await daily()).state, 'pending');
+  await server.flushJobs();
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1].text.startsWith('trigger=daily_3am eventId=daily_replan_'));
+});
+
+test('PWA shows a human-readable reason when the planner cannot start', options, async () => {
+  await call(server.app, '/api/admin/settings', { method: 'POST', token: OWNER_KEY, body: { permissions: { write: false } } });
+  await openSettingsWithOwnerKey();
+  await page.getByRole('button', { name: 'プランナーを今すぐ実行' }).click();
+  await page.getByText('プランナーを起動できませんでした：AI連携の「予定を変更する」権限を許可してください').waitFor();
+  assert.equal(calls.length, 0);
+  // 権限を戻すと、同じボタンから起動できる。
+  await call(server.app, '/api/admin/settings', { method: 'POST', token: OWNER_KEY, body: { permissions: { write: true } } });
+  await page.getByRole('button', { name: 'プランナーを今すぐ実行' }).click();
+  await page.getByText('プランナーを起動しました。').waitFor();
+  assert.equal(calls.length, 1);
+});
