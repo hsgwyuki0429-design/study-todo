@@ -113,7 +113,7 @@ DO alarmはlease期限を再確認し、heartbeatで延長されていれば次�
 | --- | --- |
 | deferred | active sessionの終了またはlease期限待ち。HTTP未送信 |
 | pending | attemptedAt保存済み。HTTP処理中、または結果保存前に停止 |
-| triggered | Routine Fire APIがsessionを返した。再計画完了を意味しない |
+| triggered | Routine Fire APIが200と`type: routine_fire`を返した。再計画完了を意味しない |
 | failed | 設定・権限・providerエラー |
 
 `attemptedAt`がある日付は、Cron20並列、Worker/DO再生成、alarm重複、終了通知再送でもPOSTを増やさない。
@@ -138,13 +138,18 @@ claim直後の停止・timeout・応答保存失敗では実行されたか不�
 | provider_failure | HTTP 5xx（500 / 503を含む） |
 | provider_redirect | 3xxが返った。転送は追わず、別の宛先へは送らない |
 | timeout / provider_transport | timeoutまたは通信障害。結果不明。`detail` に例外の種類名（`TypeError` など）だけを付ける |
-| invalid_provider_response | JSON不正または期待するsession情報なし。結果不明。`detail` に外れた検査項目（`json` / `type` / `session_id` / `session_url`）だけを付ける |
+| invalid_provider_response | JSONとして読めない、または`type`が`routine_fire`でない。結果不明。`detail` に外れた検査項目（`json` / `type`）だけを付ける |
 
 外部APIのtimeoutは25秒。Fire APIはsessionが作られてから返るため、
 短く切ると実際には起動しているのに結果不明となり、その回は送り直せない。
 429/5xxはtemporaryだが同一eventのHTTP再送はしない。
 HTTP未送信の設定失敗だけは、設定修正後に同じCronが再配信された場合にclaim可能。
 PWAの同期や終了から失敗したdailyを再試行することはない。次の日は新しいdaily eventになる。
+
+起動できた証拠は200と`type: routine_fire`までとする。`claude_code_session_id`は
+後から履歴を追うための参考情報で、Workerはこれを使わない。形が想定と違うだけで失敗にすると、
+起動済みなのに結果不明となり、その回は送り直せないまま失敗として残る（実際に起きた）。
+URLに置ける形のときだけDO内部に保持し、状態API・ログ・画面へは従来どおり出さない。
 
 provider障害では記録・予定・終了をrollbackしない。
 終了受理そのものの保存に失敗した場合のみHTTP503とし、PWAの通知を残して再送する。
