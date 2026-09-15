@@ -857,9 +857,19 @@ body { background: var(--bg-sub); font-family: -apple-system, BlinkMacSystemFont
 .btn-primary { min-height: 52px; font-weight: 600; background: #0072ed; border-color: #0072ed; }
 #screen-home { overflow: hidden; }
 #screen-home > .panel { margin: 0 var(--page-gutter) 18px; gap: 8px; }
-.segmented { border: 0; border-radius: var(--radius-control); background: var(--segment-bg); padding: 2px; }
-.segmented button { min-height: 34px; border: 0; border-radius: 8px; font-size: 14px; }
-.segmented button[aria-selected='true'] { background: var(--bg); box-shadow: var(--segment-shadow); font-weight: 600; }
+.segmented { position: relative; border: 0; border-radius: var(--radius-control); background: var(--segment-bg); padding: 2px; touch-action: pan-y; }
+.segmented button { position: relative; z-index: 1; min-height: 34px; border: 0; background: none; border-radius: 8px; font-size: 14px; }
+.segmented button[aria-selected='true'] { font-weight: 600; }
+/* 選ばれている側の背景（光）。指でつまむとその位置へそのままついてくる。 */
+.segmented-thumb {
+  position: absolute;
+  top: 0; left: 0;
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: var(--segment-shadow);
+  transition: transform .18s cubic-bezier(.2, .8, .3, 1);
+  pointer-events: none;
+}
 #screen-home .panel > .list, #screen-home .eval-list { border-radius: var(--radius-group); background: var(--bg); }
 .empty { padding: 26px 12px; font-size: 15px; }
 /* 学習中は見出しを小さくたたみ、そのぶん「今日やること」を1行でも多く見せる。 */

@@ -288,3 +288,34 @@ test('finished sub-items of a multi-question task drop out of the idle "やる�
   assert.ok(!titles.some((t) => t.includes(labelA)), `${labelA} should have moved to やったこと`);
   assert.ok(titles.some((t) => t.includes(labelB)), `${labelB} should remain in やること`);
 });
+
+test('やること／やったこと の切り替えバーは指の動きにつれて滑る', options, async () => {
+  const drag = (points) => page.evaluate((points) => {
+    const bar = document.querySelector('#screen-home .segmented');
+    const rect = bar.getBoundingClientRect();
+    const y = rect.top + rect.height / 2;
+    const fire = (type, x) => {
+      const touch = new Touch({ identifier: 1, target: bar, clientX: x, clientY: y });
+      bar.dispatchEvent(new TouchEvent(type, { touches: type === 'touchend' ? [] : [touch], changedTouches: [touch], bubbles: true, cancelable: true }));
+    };
+    points.forEach(([type, ratio]) => fire(type, rect.left + rect.width * ratio));
+  }, points);
+
+  const thumbX = () => page.locator('#screen-home .segmented-thumb').first().evaluate((el) => el.getBoundingClientRect().x);
+  const startX = await thumbX();
+
+  // 途中まで動かした時点で、指の位置に応じて中間の位置まで動いている（両端に固定されない）。
+  await drag([['touchstart', 0.25], ['touchmove', 0.55]]);
+  await page.waitForTimeout(50);
+  const midX = await thumbX();
+  assert.ok(midX > startX, 'thumb should have moved partway toward the finger');
+
+  // 大きく動かしてから離すと、その側のタブへ切り替わる。
+  await drag([['touchend', 0.9]]);
+  await page.waitForTimeout(300);
+  await page.getByRole('button', { name: /やったこと/, exact: false }).waitFor();
+  assert.equal(
+    await page.locator('#screen-home .segmented button[aria-selected="true"]').textContent(),
+    'やったこと 0',
+  );
+});

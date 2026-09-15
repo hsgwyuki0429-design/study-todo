@@ -44,14 +44,72 @@ export function row({ title, sub, right, onClick, classes = [] }) {
   return node;
 }
 
+/**
+ * やること／やったことの切り替えバー。選ばれている側の背景（丸い光）は
+ * 独立した要素（thumb）にして、指でつまんで動かしているあいだはその指に
+ * そのままついてくるようにする。離した位置で近いほうへ切り替わる。
+ */
 export function segmented(options, current, onSelect) {
   const bar = el('div', 'segmented');
-  for (const [value, label] of options) {
+  const thumb = el('div', 'segmented-thumb');
+  bar.append(thumb);
+  const buttons = options.map(([value, label]) => {
     const b = el('button', null, label);
     b.setAttribute('aria-selected', String(value === current));
     b.onclick = () => onSelect(value);
     bar.append(b);
-  }
+    return b;
+  });
+
+  const indexOf = (value) => options.findIndex(([v]) => v === value);
+  const placeThumb = (index, animate) => {
+    const btn = buttons[index];
+    if (!btn) return;
+    thumb.style.transition = animate ? '' : 'none';
+    thumb.style.width = `${btn.offsetWidth}px`;
+    thumb.style.height = `${btn.offsetHeight}px`;
+    thumb.style.transform = `translate(${btn.offsetLeft}px, ${btn.offsetTop}px)`;
+  };
+  // フォントや画面幅でボタンの実寸が決まるのはレイアウト確定後なので、
+  // 初期位置合わせは次のフレームで行う。
+  requestAnimationFrame(() => placeThumb(indexOf(current), false));
+
+  // このバー上で始まった指の動きは、外側（一覧全体のスワイプ）へ伝えない。
+  // 伝わると同じ操作で二重に切り替わってしまう。
+  let dragStartX = null, dragBaseLeft = 0, dragging = false;
+  bar.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    dragging = true;
+    dragStartX = e.touches[0].clientX;
+    dragBaseLeft = buttons[indexOf(current)]?.offsetLeft ?? 0;
+    thumb.style.transition = 'none';
+    e.stopPropagation();
+  }, { passive: true });
+  bar.addEventListener('touchmove', (e) => {
+    if (!dragging) return;
+    const dx = e.touches[0].clientX - dragStartX;
+    const max = bar.clientWidth - thumb.offsetWidth;
+    const left = Math.min(max, Math.max(0, dragBaseLeft + dx));
+    thumb.style.transform = `translate(${left}px, ${buttons[indexOf(current)]?.offsetTop ?? 0}px)`;
+    e.stopPropagation();
+  }, { passive: true });
+  bar.addEventListener('touchend', (e) => {
+    if (!dragging) return;
+    dragging = false;
+    const dx = e.changedTouches[0].clientX - dragStartX;
+    const from = indexOf(current);
+    const to = Math.min(buttons.length - 1, Math.max(0, from + (dx > 30 ? 1 : dx < -30 ? -1 : 0)));
+    if (to !== from) onSelect(options[to][0]);
+    else placeThumb(from, true);
+    e.stopPropagation();
+  }, { passive: true });
+  bar.addEventListener('touchcancel', (e) => {
+    if (!dragging) return;
+    dragging = false;
+    placeThumb(indexOf(current), true);
+    e.stopPropagation();
+  }, { passive: true });
+
   return bar;
 }
 
