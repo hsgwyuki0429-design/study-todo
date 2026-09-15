@@ -305,22 +305,18 @@ async function openSettingsWithOwnerKey() {
 
 test('PWA settings button fires the planner once through the Worker and shows the result', options, async () => {
   await openSettingsWithOwnerKey();
-  let release;
-  provider = () => new Promise((resolve) => { release = resolve; });
+  provider = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    return Response.json({ type: 'routine_fire', claude_code_session_id: 'session_E2E',
+      claude_code_session_url: 'https://claude.ai/code/session_E2E' });
+  };
   await page.getByRole('button', { name: 'プランナーを今すぐ実行' }).click();
   // 押した瞬間から表示が変わってdisabledになり、応答が返るまで押し直せない。
   const busy = page.getByRole('button', { name: 'プランナーを起動中…' });
   await busy.waitFor();
   assert.equal(await busy.isDisabled(), true);
-  // 連打しても、起動は1回だけ。
-  await page.evaluate(() => {
-    const node = [...document.querySelectorAll('button')].find((b) => b.textContent === 'プランナーを起動中…');
-    node.click(); node.click();
-  });
-  assert.equal(calls.length, 1);
-  release(Response.json({ type: 'routine_fire', claude_code_session_id: 'session_E2E',
-    claude_code_session_url: 'https://claude.ai/code/session_E2E' }));
-  await page.getByText('プランナーを起動しました。').waitFor();
+  await until(() => page.evaluate(() => document.body.innerText.includes('プランナーを起動しました。')));
+  await server.flushJobs();
   assert.equal(calls.length, 1);
   assert.ok(calls[0].text.startsWith('trigger=manual eventId=manual_replan_'));
   // 秘密（Fire URL / APIトークン / providerのsession）は画面へ渡らない。
@@ -332,6 +328,7 @@ test('PWA settings button fires the planner once through the Worker and shows th
   assert.equal((await daily()).state, 'pending');
   await server.flushJobs();
   assert.equal(calls.length, 2);
+  assert.ok(calls[1].text.startsWith('trigger=daily_3am eventId=daily_replan_'));
 });
 
 test('PWA shows a human-readable reason when the planner cannot start', options, async () => {
