@@ -662,7 +662,6 @@ function taskListPanel(panel) {
   if (state.idleTab === 'done') {
     const list = el('div', 'list'); appendDoneRecords(list); panel.append(list); return;
   }
-  panel.append(el('div', 'panel-head', '今日やること（優先順）'));
   const list = el('div', 'list');
   const items = flattenTasks();
   if (!items.length) list.append(emptyState('今日のタスクは終わりました'));
