@@ -875,7 +875,6 @@ body { background: var(--bg-sub); font-family: -apple-system, BlinkMacSystemFont
   min-height: 0;
   padding: calc(8px + env(safe-area-inset-top)) var(--page-gutter) 2px;
 }
-#screen-home:not([data-mode='idle']) .view-title { font-size: 20px; }
 #screen-home:not([data-mode='idle']) .timer-panel { padding-top: 4px; padding-bottom: 10px; }
 .timer-total-k { font-size: 12px; }
 .timer-total-v { font-size: 15px; }
