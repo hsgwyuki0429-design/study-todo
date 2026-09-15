@@ -136,7 +136,8 @@ claim直後の停止・timeout・応答保存失敗では実行されたか不�
 | invalid_request / authentication / permission / routine_not_found | HTTP 400 / 401 / 403 / 404 |
 | rate_limit | HTTP 429 |
 | provider_failure | HTTP 5xx（500 / 503を含む） |
-| timeout / provider_transport | timeoutまたは通信障害。結果不明 |
+| provider_redirect | 3xxが返った。転送は追わず、別の宛先へは送らない |
+| timeout / provider_transport | timeoutまたは通信障害。結果不明。`detail` に例外の種類名（`TypeError` など）だけを付ける |
 | invalid_provider_response | JSON不正または期待するsession情報なし。結果不明。`detail` に外れた検査項目（`json` / `type` / `session_id` / `session_url`）だけを付ける |
 
 外部APIのtimeoutは25秒。Fire APIはsessionが作られてから返るため、
@@ -158,6 +159,11 @@ running/applied/no_changeのcallbackや完了件数表示は追加していな�
 
 `wrangler.toml`のCron・Observability設定はWrangler 4.131.1のローカルschemaとdry-runで検証した。
 DO bindingとmigrationは従来どおり。新しいDO migrationは不要。
+
+**Workersランタイムの制約：**`fetch` の `redirect` は `follow` か `manual` だけで、
+`error` を渡すと送信前にTypeErrorになる（Nodeは受け付けるため、mockを使うテストでは分からない）。
+転送を追わない目的は `manual` と3xxの明示的な拒否（`provider_redirect`）で満たす。
+`test/routine.test.mjs` の `assertWorkerdCompatible` が、mockを通る全テストでこの差を見張る。
 
 Logsは有効、query stringはredactする。アプリログはallowlistで抽出した日次stateだけ。
 Token、Authorization、Fire URL、providerの自由記述本文・例外は記録しない。
