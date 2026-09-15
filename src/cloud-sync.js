@@ -176,8 +176,8 @@ export const admin = {
       method: 'POST',
       body: { operationId },
       token: config.ownerKey,
-      // Routineへの送信（上限10秒）と保存を待つぶん、ふだんより長く待つ。
-      timeoutMs: 30000,
+      // Routineへの送信（セッション作成まで待つので上限25秒）と保存のぶん、長めに待つ。
+      timeoutMs: 45000,
     }),
   releaseDevice: (config, deviceId) =>
     request(config, '/api/admin/devices', { method: 'DELETE', body: { deviceId }, token: config.ownerKey }),

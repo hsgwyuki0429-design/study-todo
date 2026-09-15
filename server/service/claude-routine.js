@@ -13,7 +13,11 @@ export function routineConfigurationError(env) {
   return null;
 }
 
-export async function fireClaudeRoutine(event, { env, fetchImpl = fetch, timeoutMs = 10000 } = {}) {
+// Fire API はセッションが作られてから返るため、応答まで数十秒かかることがある。
+// 短く切ると、実際には起動しているのに「結果不明」になり、設計上その回は送り直せない。
+export const PROVIDER_TIMEOUT_MS = 25000;
+
+export async function fireClaudeRoutine(event, { env, fetchImpl = fetch, timeoutMs = PROVIDER_TIMEOUT_MS } = {}) {
   const configurationError = routineConfigurationError(env);
   if (configurationError) return { state: 'failed', error: configurationError, retryable: true };
   const controller = new AbortController();
@@ -41,13 +45,15 @@ export async function fireClaudeRoutine(event, { env, fetchImpl = fetch, timeout
     }
     let body;
     try { body = await response.json(); } catch {
-      return { state: 'failed', error: controller.signal.aborted ? 'timeout' : 'invalid_provider_response', retryable: false, outcomeUnknown: true };
+      return { state: 'failed', error: controller.signal.aborted ? 'timeout' : 'invalid_provider_response',
+        ...(controller.signal.aborted ? {} : { detail: 'json' }), retryable: false, outcomeUnknown: true };
     }
+    // detail はこちらの検査項目の名前だけ（固定の語）。providerの本文は残さない。
     const id = body?.claude_code_session_id;
-    if (body?.type !== 'routine_fire' || typeof id !== 'string' || !/^session_[A-Za-z0-9_-]{1,150}$/.test(id)
-      || body.claude_code_session_url !== `https://claude.ai/code/${id}`) {
-      return { state: 'failed', error: 'invalid_provider_response', retryable: false, outcomeUnknown: true };
-    }
+    const detail = body?.type !== 'routine_fire' ? 'type'
+      : typeof id !== 'string' || !/^session_[A-Za-z0-9_-]{1,150}$/.test(id) ? 'session_id'
+        : body.claude_code_session_url !== `https://claude.ai/code/${id}` ? 'session_url' : null;
+    if (detail) return { state: 'failed', error: 'invalid_provider_response', detail, retryable: false, outcomeUnknown: true };
     return { state: 'triggered', retryable: false, providerSessionId: id,
       providerSessionUrl: `https://claude.ai/code/${id}` };
   } catch {
