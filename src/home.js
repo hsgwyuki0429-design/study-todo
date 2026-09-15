@@ -8,7 +8,7 @@ import { EVALUATIONS, EVAL_MAP } from './api.js';
 import { itemsOf, splitPlanItems } from './plan-items.js';
 import { state, q, qLabel, render, loadTasks, refreshToday } from './state.js';
 import { $, el, fmtMS, row, segmented, swipeable, emptyState } from './ui.js';
-import { pushPin, reportActivity, syncInBackground } from './cloud-sync.js';
+import { reportActivity, syncInBackground } from './cloud-sync.js';
 
 const persist = () => api.setSessionState(state.session);
 
@@ -605,28 +605,6 @@ function stateCells(questionId) {
   return [pill, time];
 }
 
-/**
- * 固定（ピン留め）の切り替えボタン。
- * 固定したタスクはAIから変更・削除・移動されない。外せるのはここからだけで、
- * AI側には固定を外す手段がない。
- */
-function pinButton(task) {
-  const pinned = task.pinned === true;
-  const node = el('button', `pin-btn${pinned ? ' pinned' : ''}`, pinned ? '固定中' : '固定');
-  node.title = pinned
-    ? 'AIが動かさないように固定しています。押すと解除します。'
-    : '押すと固定します。固定したタスクはAIが変更・削除・移動できません。';
-  node.onclick = async (event) => {
-    event.stopPropagation();
-    await api.setTaskPinned(task.id, !pinned);
-    // クラウドにも伝える（届かなくても、次の同期で送られる）。
-    pushPin(task.date, task.id, !pinned).catch(() => {});
-    state.tasks = await api.getTodayTasks();
-    render();
-  };
-  return node;
-}
-
 const challengeSub = (task) =>
   `${task.questionIds.length}問 / ${Math.round((task.timeLimitSeconds ?? 0) / 60)}分`;
 
@@ -662,7 +640,6 @@ function idlePanel(panel) {
       const node = row({
         title: task.kind === 'challenge' ? task.title ?? 'チャレンジ' : groupLabel(pendingIds),
         sub: task.kind === 'challenge' ? challengeSub(task) : first ? first.chapter + ' ・ ' + first.section : null,
-        right: pinButton(task),
       });
       const main = node.querySelector('.row-main');
       const start = el('button', 'row-main');

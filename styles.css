@@ -508,24 +508,6 @@ input[type='password'] { width: 100%; }
 .dialog-check input { width:18px; height:18px; }
 
 
-/* 固定（ピン留め）の切り替え。固定したタスクはAIが動かせない。 */
-.pin-btn {
-  border: 1px solid var(--line, #d2d2d7);
-  background: transparent;
-  color: inherit;
-  border-radius: 999px;
-  padding: 6px 12px;
-  min-height: 44px;
-  font-size: 13px;
-  opacity: .6;
-}
-.pin-btn.pinned {
-  opacity: 1;
-  border-color: currentColor;
-  font-weight: 600;
-}
-
-
 /* ================================================================== */
 /* 正方形のマス（スケジュール・日別の詳細・例題ごとの履歴で共通）      */
 /* ================================================================== */
@@ -921,8 +903,6 @@ body { background: var(--bg-sub); font-family: -apple-system, BlinkMacSystemFont
 .attempt-history .sq-tappable { --sq: 44px; }
 .sq-help { background: var(--bg); line-height: 1.6; }
 .sq-help-item { min-height: 28px; }
-.pin-btn { opacity: 1; color: var(--fg-sub); }
-.pin-btn.pinned { color: var(--accent); background: var(--accent-bg); }
 .choice, .cloud-input, select, input[type='text'], input[type='date'] { border-radius: 8px; }
 input, select, textarea { font-size: 16px; }
 .link-btn { min-width: 44px; overflow-wrap: anywhere; }
