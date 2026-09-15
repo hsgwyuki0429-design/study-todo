@@ -7,7 +7,7 @@ import { undoRecord } from './record-actions.js';
 import { EVALUATIONS, EVAL_MAP } from './api.js';
 import { itemsOf, splitPlanItems } from './plan-items.js';
 import { state, q, qLabel, render, loadTasks, refreshToday } from './state.js';
-import { $, el, fmtMS, fmtShort, row, segmented, emptyState } from './ui.js';
+import { $, el, fmtMS, fmtShort, row, segmented, swipeable, emptyState } from './ui.js';
 import { pushPin, reportActivity, syncInBackground } from './cloud-sync.js';
 
 const persist = () => api.setSessionState(state.session);
@@ -248,16 +248,6 @@ async function beginReview() {
   await persist(); render();
 }
 
-async function cancelCurrentAttempt() {
-  if (recording || endingSession || !state.session.currentQuestionId) return;
-  if (!confirm('この取り組みの計測時間を取り消して、未着手に戻しますか？')) return;
-  commitCurrent();
-  forgetQuestion(state.session, state.session.currentQuestionId);
-  state.session.mode = 'task_list';
-  clearActivity();
-  await persist(); render();
-}
-
 async function tapTaskQuestion(questionId, item = null, task = null) {
   if (recording || endingSession) return;
   const s = state.session;
@@ -468,13 +458,22 @@ function timerPanel() {
     return panel;
   }
 
-  // 全体の学習時間（左上に小さく）
+  // 全体の学習時間（左上に小さく）と、右上の丸い「終了」ボタンを1段にまとめる。
+  // 横に並べることでタイマーの数字をそのぶん上へ詰められる。
+  const head = el('div', 'timer-head');
   const total = el('div', 'timer-total');
   total.append(el('span', 'timer-total-k', '今日の学習時間'));
   const totalValue = el('span', 'timer-total-v', fmtMS(dailyElapsed()));
   totalValue.dataset.timer = 'session';
   total.append(totalValue);
-  panel.append(total);
+  head.append(total);
+  if (s.mode === 'task_list' || s.mode === 'record_input') {
+    const finish = el('button', 'finish-btn', '終了');
+    finish.title = '学習を終了する';
+    finish.onclick = endSession;
+    head.append(finish);
+  }
+  panel.append(head);
 
   if (s.mode === 'challenge') {
     const task = currentChallengeTask();
@@ -506,28 +505,24 @@ function timerPanel() {
   }
 
   // task_list / record_input
+  // ボタンは置かず、数字そのものを押して一時停止・再開する。
+  // 止まっているあいだは赤くして、ひと目で分かるようにする。
+  const paused = isPaused();
   const name = s.currentQuestionId ? qLabel(s.currentQuestionId) : null;
   label.textContent = name
-    ? s.currentStartedAt
-      ? `${name} ${s.mode === 'record_input' ? '採点・暗記中' : 'を解いています'}`
-      : `${name}（一時停止中）`
+    ? paused
+      ? `${name}（一時停止中）`
+      : `${name} ${s.mode === 'record_input' ? '採点・暗記中' : 'を解いています'}`
     : '問題をタップして開始';
   value.textContent = fmtMS(currentTimerSeconds());
 
-  const pause = el('button', 'btn', isPaused() ? '再開' : '一時停止');
-  pause.onclick = togglePause;
-  const stop = el('button', 'btn btn-danger', '終了');
-  stop.onclick = endSession;
-  if (s.currentQuestionId) {
-    if (s.mode !== 'record_input') {
-      const review = el('button', 'btn btn-primary', '解答終了・採点を始める');
-      review.onclick = beginReview; actions.append(review);
-    }
-    const cancel = el('button', 'link-btn', 'この取り組みを取り消す');
-    cancel.onclick = cancelCurrentAttempt; actions.append(cancel);
-  }
-  actions.append(pause, stop);
-  panel.append(label, value, actions);
+  const tap = el('button', `timer-tap${paused ? ' paused' : ''}`);
+  // 読み上げ・自動テストからは「一時停止」「再開」のボタンとして見えるようにする。
+  tap.setAttribute('aria-label', paused ? '再開' : '一時停止');
+  tap.onclick = togglePause;
+  tap.append(value, el('span', 'timer-hint', paused ? '▶ タップで再開' : '❚❚ タップで一時停止'));
+
+  panel.append(label, tap);
   return panel;
 }
 
@@ -615,16 +610,10 @@ function idlePanel(panel) {
     const timing = questionTiming(state.session, state.session.currentQuestionId);
     panel.append(el('div', 'note', `${qLabel(state.session.currentQuestionId)}：${timing.phase === 'review' ? '採点・暗記' : '解答'}の途中。学習を開始すると続きから再開します。`));
   }
-  panel.append(
-    segmented(
-      [['todo', `やること ${todoCount}`], ['done', `やったこと ${state.today.records.length}`]],
-      state.idleTab,
-      (v) => {
-        state.idleTab = v;
-        render();
-      }
-    )
-  );
+  const tabs = [['todo', `やること ${todoCount}`], ['done', `やったこと ${state.today.records.length}`]];
+  const selectTab = (v) => { state.idleTab = v; render(); };
+  panel.append(segmented(tabs, state.idleTab, selectTab));
+  swipeable(panel, tabs.map(([v]) => v), state.idleTab, selectTab);
 
   const list = el('div', 'list');
   if (state.idleTab === 'todo') {
@@ -666,8 +655,10 @@ function appendDoneRecords(list) {
 }
 
 function taskListPanel(panel) {
-  panel.append(segmented([['todo', 'やること'], ['done', 'やったこと ' + state.today.records.length]],
-    state.idleTab, value => { state.idleTab = value; render(); }));
+  const tabs = [['todo', 'やること'], ['done', 'やったこと ' + state.today.records.length]];
+  const selectTab = (value) => { state.idleTab = value; render(); };
+  panel.append(segmented(tabs, state.idleTab, selectTab));
+  swipeable(panel, tabs.map(([v]) => v), state.idleTab, selectTab);
   if (state.idleTab === 'done') {
     const list = el('div', 'list'); appendDoneRecords(list); panel.append(list); return;
   }
@@ -689,15 +680,20 @@ function taskListPanel(panel) {
     }
     const qid = item.questionId;
     const qq = q(qid);
-    const active = state.session.currentQuestionId === qid && !!state.session.currentStartedAt;
+    const current = state.session.currentQuestionId === qid;
+    const active = current && !!state.session.currentStartedAt;
     const carried = item.item?.originalDate && item.item.originalDate !== api.studyDayKey();
+    // いま解いている行は色が変わる。もう一度押すと採点へ進むので、その案内を出す。
+    const sub = current
+      ? 'もう一度タップすると採点・暗記へ'
+      : [qq ? `${qq.chapter} ・ ${qq.section}` : null, carried ? '繰り越し' : null].filter(Boolean).join(' ・ ') || null;
     list.append(
       row({
         title: qLabel(qid),
-        sub: [qq ? `${qq.chapter} ・ ${qq.section}` : null, carried ? '繰り越し' : null].filter(Boolean).join(' ・ ') || null,
+        sub,
         right: stateCells(qid),
         onClick: () => tapTaskQuestion(qid, item.item, item.task),
-        classes: active ? ['active'] : [],
+        classes: active ? ['active'] : current ? ['current'] : [],
       })
     );
   }

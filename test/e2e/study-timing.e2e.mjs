@@ -41,7 +41,8 @@ const session = () => page.evaluate(async () => (await import('./src/api.js')).g
 const records = () => page.evaluate(async () => (await import('./src/api.js')).listRecords());
 async function start() { await page.getByRole('button', { name: '学習を開始', exact: true }).click(); }
 async function review() {
-  await page.getByRole('button', { name: '解答終了・採点を始める', exact: true }).click();
+  // 解いている行（色が変わっている行）をもう一度押すと採点へ進む。
+  await page.locator('#screen-home .row.active, #screen-home .row.current').first().click();
   await page.locator('.eval-btn').first().waitFor({ state: 'visible' });
 }
 async function evaluate() { await page.locator('.eval-btn').first().click(); await until(async () => (await records()).length > 0); }
@@ -130,11 +131,16 @@ test('schedule day detail exposes undo and deletion survives synchronization', o
   await page.reload(); assert.equal((await records()).length, 0);
 });
 
-test('accidental start can be cancelled without creating a result', options, async () => {
+test('tapping the timer stops and restarts it, and the digits turn red while stopped', options, async () => {
   await start(); await page.clock.fastForward(10000);
-  await page.getByRole('button', { name: 'この取り組みを取り消す', exact: true }).click();
-  assert.equal((await session()).currentQuestionId, null);
-  assert.equal((await records()).length, 0); assert.equal(await total(), 0);
+  await page.getByRole('button', { name: '一時停止', exact: true }).click();
+  await page.locator('.timer-tap.paused').waitFor({ state: 'visible' });
+  await page.clock.fastForward(60000);
+  assert.equal(await total(), 10);
+  await page.getByRole('button', { name: '再開', exact: true }).click();
+  await page.locator('.timer-tap.paused').waitFor({ state: 'detached' });
+  await page.clock.fastForward(5000);
+  assert.equal(await total(), 15);
 });
 
 test('double evaluation tap and competing draft commits save one result; failed undo is atomic', options, async () => {

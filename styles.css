@@ -170,18 +170,55 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   background: var(--bg-sub);
 }
 
-.timer-total {
-  position: absolute;
-  top: calc(10px + env(safe-area-inset-top));
-  left: 14px;
+/* 「今日の学習時間」と丸い終了ボタンを1段に並べ、そのぶん数字を上へ詰める。 */
+.timer-head {
+  width: 100%;
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 24px;
+}
+
+.timer-total {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   line-height: 1.25;
 }
 
 .timer-total-k { font-size: 10px; color: var(--fg-faint); }
 .timer-total-v { font-size: 14px; color: var(--fg-sub); font-variant-numeric: tabular-nums; }
+
+.finish-btn {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+  background: var(--bg);
+  color: var(--fg-sub);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 数字そのものが一時停止・再開のボタン。押せることが分かるよう下に小さく案内を出す。 */
+.timer-tap {
+  width: 100%;
+  background: none;
+  border: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.timer-hint { font-size: 11px; color: var(--fg-faint); letter-spacing: 0.04em; }
+.timer-tap.paused .timer-value { color: var(--danger); }
+.timer-tap.paused .timer-hint { color: var(--danger); }
 
 .timer-label { font-size: 13px; color: var(--fg-sub); min-height: 20px; }
 
@@ -235,7 +272,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 
 .segmented button {
   flex: 1;
-  min-height: var(--tap);
+  min-height: 34px;
   font-size: 14px;
   color: var(--fg-sub);
   border-bottom: 2px solid transparent;
@@ -265,7 +302,8 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   background: none;
 }
 
-.row.active { background: var(--accent-bg); }
+.row.active, .row.current { background: var(--accent-bg); }
+.row.current { opacity: .92; }
 .row-back { color: var(--accent); }
 .row-finish .row-title { color: var(--accent); }
 .row-indent { padding-left: 32px; }
@@ -828,14 +866,21 @@ body { background: var(--bg-sub); font-family: -apple-system, BlinkMacSystemFont
 #screen-home { overflow: hidden; }
 #screen-home > .panel { margin: 0 var(--page-gutter) 18px; gap: 8px; }
 .segmented { border: 0; border-radius: var(--radius-control); background: var(--segment-bg); padding: 2px; }
-.segmented button { min-height: var(--tap); border: 0; border-radius: 8px; font-size: 15px; }
+.segmented button { min-height: 34px; border: 0; border-radius: 8px; font-size: 14px; }
 .segmented button[aria-selected='true'] { background: var(--bg); box-shadow: var(--segment-shadow); font-weight: 600; }
 #screen-home .panel > .list, #screen-home .eval-list { border-radius: var(--radius-group); background: var(--bg); }
 .empty { padding: 26px 12px; font-size: 15px; }
-#screen-home:not([data-mode='idle']) .timer-panel { padding-top: 46px; padding-bottom: 18px; }
-.timer-total { top: 0; left: var(--page-gutter); }
+/* 学習中は見出しを小さくたたみ、そのぶん「今日やること」を1行でも多く見せる。 */
+#screen-home:not([data-mode='idle']) .view-head {
+  min-height: 0;
+  padding: calc(8px + env(safe-area-inset-top)) var(--page-gutter) 2px;
+}
+#screen-home:not([data-mode='idle']) .view-title { font-size: 20px; }
+#screen-home:not([data-mode='idle']) .timer-panel { padding-top: 4px; padding-bottom: 10px; }
 .timer-total-k { font-size: 12px; }
 .timer-total-v { font-size: 15px; }
+.finish-btn { width: 40px; height: 40px; font-size: 13px; border-radius: 50%; }
+.timer-hint { font-size: 12px; }
 #screen-home:not([data-mode='idle']) .timer-label { align-self: center; text-align: center; }
 .panel-head { border: 0; padding: 8px 0 0; font-size: 13px; }
 .eval-btn { flex: 1 0 60px; padding: 8px 12px; }
@@ -900,7 +945,7 @@ button:active { filter: brightness(.94); }
   :root { --header-height: 64px; }
   .view-head, #screen-schedule .view-head { padding-top: calc(10px + env(safe-area-inset-top)); padding-bottom: 10px; }
   .timer-value { font-size: 52px; }
-  #screen-home:not([data-mode='idle']) .timer-panel { padding-top: 36px; padding-bottom: 8px; }
+  #screen-home:not([data-mode='idle']) .timer-panel { padding-top: 2px; padding-bottom: 4px; }
   .mini-cards { margin-block: 10px; padding-block: 6px; }
 }
 @media (prefers-reduced-motion: reduce) {

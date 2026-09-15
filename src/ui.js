@@ -55,6 +55,30 @@ export function segmented(options, current, onSelect) {
   return bar;
 }
 
+/**
+ * 左右のスワイプでも切り替えられるようにする。
+ *
+ * 縦スクロールを邪魔しないように、横の動きが縦よりはっきり大きいときだけ反応する。
+ * ボタンを押す操作はそのまま残るので、押しても滑らせても同じ結果になる。
+ */
+export function swipeable(node, values, current, onSelect) {
+  let x = null, y = null;
+  node.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { x = null; return; }
+    x = e.touches[0].clientX; y = e.touches[0].clientY;
+  }, { passive: true });
+  node.addEventListener('touchend', (e) => {
+    if (x == null) return;
+    const touch = e.changedTouches[0];
+    const dx = touch.clientX - x, dy = touch.clientY - y;
+    x = null;
+    if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    const index = values.indexOf(current) + (dx < 0 ? 1 : -1);
+    if (index >= 0 && index < values.length) onSelect(values[index]);
+  }, { passive: true });
+  return node;
+}
+
 export function emptyState(text) {
   return el('div', 'empty', text);
 }
