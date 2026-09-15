@@ -832,6 +832,9 @@ body { background: var(--bg-sub); font-family: -apple-system, BlinkMacSystemFont
 .section-toggle[aria-expanded='true'] { background: var(--accent-bg); }
 .section-body:last-child { border-radius: 0 0 var(--radius-group) var(--radius-group); margin-bottom: 20px; overflow: hidden; }
 .timer-panel { padding: 2px var(--page-gutter) 0; border: 0; gap: 2px; }
+/* 「学習を開始」ボタンと「やること／やったこと」欄の間を、その欄と
+   一覧の間の余白（.panel の gap）と同じだけ空ける。 */
+#screen-home[data-mode='idle'] .timer-panel { padding-bottom: 8px; }
 .timer-label { align-self: flex-start; text-align: left; font-size: 16px; min-height: 24px; }
 .timer-value { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 68px; line-height: 64px; font-weight: 300; letter-spacing: 0; }
 .timer-actions { margin-top: 8px; gap: 10px; flex-wrap: wrap; }
