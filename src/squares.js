@@ -58,9 +58,12 @@ export function attemptSquare(record, { label = '', onClick = null } = {}) {
   return makeTappable(node, onClick);
 }
 
-/** 予定のマス（まだやっていない1回ぶん）。 */
+/**
+ * 予定のマス（まだやっていない1回ぶん）。
+ * 繰り越しかどうかは枠などの見た目では区別せず、説明文だけで示す。
+ */
 export function plannedSquare({ label = '', onClick = null, carriedOver = false } = {}) {
-  const node = baseSquare(['sq-plan', ...(carriedOver ? ['sq-carried'] : [])]);
+  const node = baseSquare(['sq-plan']);
   const text = `${label} 未実施の予定${carriedOver ? '（繰り越し）' : ''}`;
   node.setAttribute('aria-label', text);
   node.title = text;
@@ -95,8 +98,7 @@ export function helpPanel() {
     list.append(item(baseSquare(['sq-done', `tone-${ev.tone}`]), `${ev.symbol} ${ev.label}`));
   }
   list.append(item(baseSquare(['sq-done', 'tone-idle']), '評価なし（正解とは数えません）'));
-  list.append(item(baseSquare(['sq-plan']), 'まだやっていない予定'));
-  list.append(item(baseSquare(['sq-plan', 'sq-carried']), 'ほかの日から繰り越した予定'));
+  list.append(item(baseSquare(['sq-plan']), 'まだやっていない予定（ほかの日からの繰り越しも同じ見た目）'));
   wrap.append(list);
 
   wrap.append(el('div', 'sq-help-lead', '段は「例題」と「エクササイズ」に分かれています。'

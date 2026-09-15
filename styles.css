@@ -35,9 +35,6 @@
   --tone-teal: var(--teal);
   --tone-idle: var(--fg-faint);
 
-  /* マスどうしの境目。すき間ではなく、同じ色が続いても数えられるようにするための細い線。 */
-  --sq-sep: rgba(255, 255, 255, .45);
-
   --sq: 30px;
 }
 
@@ -62,7 +59,6 @@
     --violet-bg: #221a38;
     --teal: #2dd4bf;
     --teal-bg: #0f2b28;
-    --sq-sep: rgba(0, 0, 0, .45);
     --on-accent: #0b0b0d;
   }
 }
@@ -87,7 +83,6 @@
   --violet-bg: #221a38;
   --teal: #2dd4bf;
   --teal-bg: #0f2b28;
-  --sq-sep: rgba(0, 0, 0, .45);
   --on-accent: #0b0b0d;
 }
 
@@ -515,7 +510,8 @@ input[type='password'] { width: 100%; }
 /* 正方形のマス（スケジュール・日別の詳細・例題ごとの履歴で共通）      */
 /* ================================================================== */
 
-/* マスは色だけで表す。すき間なく並べるが、右と下に背景色の区切りを入れて数えられるようにする。 */
+/* マスは色だけで表す。すき間なく並べ、枠や区切り線は入れない。
+   同じ色が並ぶと1つの四角い塊に見えるが、それでいい。 */
 .sq {
   flex: none;
   width: var(--sq);
@@ -524,8 +520,6 @@ input[type='password'] { width: 100%; }
   display: inline-block;
   box-sizing: border-box;
   background: var(--bg-sub);
-  /* すき間は空けない。同じ色が並んでも数えられるよう、内側に細い境目だけ入れる。 */
-  box-shadow: inset -1px 0 0 var(--sq-sep), inset 0 -1px 0 var(--sq-sep);
 }
 
 .sq-done.tone-success { background: var(--success); }
@@ -536,12 +530,8 @@ input[type='password'] { width: 100%; }
 .sq-done.tone-teal { background: var(--teal); }
 .sq-done.tone-idle { background: var(--fg-faint); }
 
-/* 予定は枠だけ。塗りつぶしの実績とはっきり分ける。 */
-.sq-plan {
-  background: transparent;
-  box-shadow: inset 0 0 0 1px var(--line-strong);
-}
-.sq-carried { box-shadow: inset 0 0 0 1px var(--accent); }
+/* 予定（未実施）も塗りつぶしの実績と同じく枠なし。色（bg-sub）だけで空だと分かる。
+   繰り越しかどうかは枠で目立たせず、タップしたときの説明文だけで示す。 */
 
 .sq-tappable { cursor: pointer; }
 .sq-tappable:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -550,8 +540,8 @@ input[type='password'] { width: 100%; }
 .sq-row { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
 .sq-row-label { flex: none; width: 2.6em; font-size: 10px; color: var(--fg-sub); line-height: var(--sq); }
 .sq-row.is-empty .sq-row-label { color: var(--fg-faint); }
-/* 何も無い段は、細い点線で「ここは空」と分かるようにする（高さは揃える）。 */
-.sq-row.is-empty .sq-strip { border-bottom: 1px dotted var(--line-strong); height: calc(var(--sq) / 2); min-height: 0; }
+/* 何も無い段は、高さだけ半分にして揃える（線は入れない）。 */
+.sq-row.is-empty .sq-strip { height: calc(var(--sq) / 2); min-height: 0; }
 .sq-strip { display: flex; flex-wrap: wrap; gap: 0; min-width: 0; min-height: var(--sq); flex: 1; }
 
 /* ヘルプ（設定タブのいちばん下と、スケジュール右上の ℹ️ から開く） */
