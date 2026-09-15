@@ -117,19 +117,35 @@ test('home undo cancels one result and time, reopens task, preserves the next ru
   await page.reload(); assert.equal((await records()).length, 0);
 });
 
-test('schedule day detail exposes undo and deletion survives synchronization', options, async () => {
+test('home undo (やったこと) survives synchronization', options, async () => {
+  // スケジュールの日別詳細は「やること」しか出さないので、記録の取り消しは
+  // ホームの「やったこと」タブから行う。取り消しが同期にもきちんと伝わることを確認する。
   const device = await joinDevice(server.app);
   await page.evaluate(async ({ origin, device }) => (await import('./src/cloud-sync.js')).saveCloudConfig({ serverUrl: origin, ...device, enabled: true }), { origin: server.origin, device });
   await start(); await page.clock.fastForward(10000); await review(); await evaluate();
   await page.evaluate(async () => (await import('./src/cloud-sync.js')).syncNow());
-  await page.getByRole('tab', { name: /スケジュール/ }).click();
-  await page.locator('.day-row.is-today').click();
-  await page.locator('.detail-item').first().click();
-  await page.getByRole('button', { name: '未着手に戻す', exact: true }).click();
+  await page.getByRole('button', { name: /終了/, exact: true }).click();
+  await until(async () => !(await session()).active);
+  await page.getByRole('button', { name: /やったこと/ }).click();
+  await page.getByRole('button', { name: /を未着手に戻す/ }).click();
   await until(async () => (await records()).length === 0);
   await page.evaluate(async () => (await import('./src/cloud-sync.js')).syncNow());
   assert.equal((await call(server.app, '/api/sync/pull', { token: device.deviceKey })).body.records.length, 0);
   await page.reload(); assert.equal((await records()).length, 0);
+});
+
+test('schedule day detail shows only the remaining plan, with a working carry-over', options, async () => {
+  // 例題2つのタスクだけ残し、その一方だけ今日のうちに解いて記録する。
+  await start(); await page.clock.fastForward(10000); await review(); await evaluate();
+  await page.getByRole('tab', { name: /スケジュール/ }).click();
+  await page.locator('.day-row.is-today').click();
+  // 済んだ記録の見出し（実施した問題／チャレンジ）は出ず、「残っている予定」だけが出る。
+  await page.getByText(/残っている予定/).waitFor();
+  assert.equal(await page.getByText(/実施した問題/).count(), 0);
+  assert.equal(await page.locator('.detail-item').count(), 1); // ids[1] の1件だけが残っている
+  await page.getByRole('button', { name: '繰り越す', exact: true }).click();
+  await page.getByRole('button', { name: '理由は未入力', exact: true }).click();
+  await until(async () => (await page.locator('.detail-item').count()) === 0);
 });
 
 test('tapping the timer stops and restarts it, and the digits turn red while stopped', options, async () => {

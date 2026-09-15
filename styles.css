@@ -543,6 +543,9 @@ input[type='password'] { width: 100%; }
 /* 何も無い段は、高さだけ半分にして揃える（線は入れない）。 */
 .sq-row.is-empty .sq-strip { height: calc(var(--sq) / 2); min-height: 0; }
 .sq-strip { display: flex; flex-wrap: wrap; gap: 0; min-width: 0; min-height: var(--sq); flex: 1; }
+/* 並んだひと塊としては角を丸める。継ぎ目（隣どうしの内側）は四角のまま。 */
+.sq-strip > .sq:first-child { border-top-left-radius: 6px; border-bottom-left-radius: 6px; }
+.sq-strip > .sq:last-child { border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
 
 /* ヘルプ（設定タブのいちばん下と、スケジュール右上の ℹ️ から開く） */
 .sq-help { padding: 10px 16px 16px; font-size: 13px; color: var(--fg-sub); background: var(--bg-sub); }
