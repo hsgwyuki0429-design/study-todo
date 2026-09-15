@@ -137,9 +137,11 @@ claim直後の停止・timeout・応答保存失敗では実行されたか不�
 | rate_limit | HTTP 429 |
 | provider_failure | HTTP 5xx（500 / 503を含む） |
 | timeout / provider_transport | timeoutまたは通信障害。結果不明 |
-| invalid_provider_response | JSON不正または期待するsession情報なし。結果不明 |
+| invalid_provider_response | JSON不正または期待するsession情報なし。結果不明。`detail` に外れた検査項目（`json` / `type` / `session_id` / `session_url`）だけを付ける |
 
-外部APIのtimeoutは10秒。429/5xxはtemporaryだが同一eventのHTTP再送はしない。
+外部APIのtimeoutは25秒。Fire APIはsessionが作られてから返るため、
+短く切ると実際には起動しているのに結果不明となり、その回は送り直せない。
+429/5xxはtemporaryだが同一eventのHTTP再送はしない。
 HTTP未送信の設定失敗だけは、設定修正後に同じCronが再配信された場合にclaim可能。
 PWAの同期や終了から失敗したdailyを再試行することはない。次の日は新しいdaily eventになる。
 

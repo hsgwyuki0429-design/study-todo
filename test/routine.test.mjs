@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStudyTodoMcpApp } from '../server/app.js';
 import { createMemoryDriver } from '../server/storage/memory-driver.js';
-import { fireClaudeRoutine } from '../server/service/claude-routine.js';
+import { fireClaudeRoutine, PROVIDER_TIMEOUT_MS } from '../server/service/claude-routine.js';
 import { replanEventKey, dailyEventKey, dailyEvent, DEFERRED_KEY } from '../server/service/replan-events.js';
 import { SYNC_KEYS } from '../server/service/sync-service.js';
 import { STORAGE_KEYS } from '../server/auth/tokens.js';
@@ -115,7 +115,7 @@ for (const permission of ['read', 'write']) {
 
 test('timeout persists an uncertain claim and duplicate daily never retries HTTP', async (t) => {
   const original = globalThis.setTimeout;
-  t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => original(fn, ms === 10000 ? 5 : ms, ...args));
+  t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => original(fn, ms === PROVIDER_TIMEOUT_MS ? 5 : ms, ...args));
   const f = await fixture({ fetchImpl: (_url, { signal }) => new Promise((_resolve, reject) => {
     signal.addEventListener('abort', () => reject(new Error('not logged')));
   }) });
@@ -232,6 +232,37 @@ test('timeout and malformed response remain uncertain; no secrets in results', a
   const invalid = await fireClaudeRoutine(event, { env: ENV, fetchImpl: async () => Response.json({ message: ENV.CLAUDE_ROUTINE_API_TOKEN }) });
   assert.equal(invalid.error, 'invalid_provider_response');
   assert.ok(!JSON.stringify([timeout, invalid]).includes(ENV.CLAUDE_ROUTINE_API_TOKEN));
+});
+
+test('an unexpected response body names the failed check, never the provider content', async () => {
+  const cases = [
+    [{ message: ENV.CLAUDE_ROUTINE_API_TOKEN }, 'type'],
+    [{ type: 'routine_fire', claude_code_session_id: 'not-a-session',
+      claude_code_session_url: 'https://claude.ai/code/not-a-session' }, 'session_id'],
+    [{ type: 'routine_fire', claude_code_session_id: 'session_TEST_ONLY',
+      claude_code_session_url: 'https://example.com/code/session_TEST_ONLY' }, 'session_url'],
+  ];
+  for (const [body, detail] of cases) {
+    const result = await fireClaudeRoutine(event, { env: ENV, fetchImpl: async () => Response.json(body) });
+    assert.equal(result.error, 'invalid_provider_response');
+    assert.equal(result.detail, detail);
+    assert.equal(result.outcomeUnknown, true);
+    assert.ok(!JSON.stringify(result).includes(ENV.CLAUDE_ROUTINE_API_TOKEN));
+  }
+  const broken = await fireClaudeRoutine(event, { env: ENV,
+    fetchImpl: async () => new Response(ENV.CLAUDE_ROUTINE_API_TOKEN, { headers: { 'content-type': 'application/json' } }) });
+  assert.equal(broken.detail, 'json');
+  assert.ok(!JSON.stringify(broken).includes(ENV.CLAUDE_ROUTINE_API_TOKEN));
+  // 画面とログへは、この検査項目の名前だけが出る。
+  const f = await fixture({ fetchImpl: async () => Response.json({ type: 'wrong' }) });
+  const reply = await fire(f);
+  assert.equal(reply.body.replan.detail, 'type');
+  assert.ok(!JSON.stringify(reply.body).includes(ENV.CLAUDE_ROUTINE_API_TOKEN));
+});
+
+test('the provider timeout leaves room for session creation', () => {
+  // Fire API はセッションが作られてから返る。短く切ると、起動済みでも結果不明になる。
+  assert.ok(PROVIDER_TIMEOUT_MS >= 20000, 'provider timeout must allow for session creation');
 });
 
 test('secret URL validation rejects other hosts and never follows redirects', async () => {
@@ -574,7 +605,7 @@ for (const [status, error] of [[401, 'authentication'], [403, 'permission'], [40
 
 test('manual fire keeps an uncertain outcome and never re-POSTs after a timeout', async (t) => {
   const original = globalThis.setTimeout;
-  t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => original(fn, ms === 10000 ? 5 : ms, ...args));
+  t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => original(fn, ms === PROVIDER_TIMEOUT_MS ? 5 : ms, ...args));
   const f = await fixture({ fetchImpl: (_url, { signal }) => new Promise((_resolve, reject) => {
     signal.addEventListener('abort', () => reject(new Error('not logged')));
   }) });

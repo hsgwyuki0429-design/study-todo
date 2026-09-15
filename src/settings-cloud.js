@@ -42,16 +42,23 @@ const PLANNER_ERRORS = {
   rate_limit: '回数の制限に達しました。しばらくしてからもう一度押してください',
   provider_failure: 'Claude側で問題が起きています。しばらくしてからもう一度押してください',
   provider_http_error: 'Claudeから正しい応答がありませんでした',
-  timeout: '起動できたか分かりませんでした。Routineの履歴を確認してください（自動では送り直しません）',
-  provider_transport: '起動できたか分かりませんでした。Routineの履歴を確認してください（自動では送り直しません）',
-  invalid_provider_response: '起動できたか分かりませんでした。Routineの履歴を確認してください（自動では送り直しません）',
+  // 下の3つは「届いたかどうか分からない」失敗。起動している可能性があるので、
+  // 自動では送り直さず、Routineの履歴で確かめてもらう。見分けが付くよう文面を分ける。
+  timeout: 'Claudeから時間内に応答がありませんでした。起動しているかもしれないので、'
+    + 'Routineの履歴を確認してください（自動では送り直しません）',
+  provider_transport: 'Claudeへつながりませんでした。起動しているかもしれないので、'
+    + 'Routineの履歴を確認してください（自動では送り直しません）',
+  invalid_provider_response: 'Claudeの応答を読み取れませんでした。起動しているかもしれないので、'
+    + 'Routineの履歴を確認してください（自動では送り直しません）',
 };
 
 function plannerMessage(replan) {
   if (replan?.state === 'triggered') return 'プランナーを起動しました。';
   // 送信の結果が保存前に途切れた場合。押し直しはせず、履歴で確かめてもらう。
   if (replan?.state === 'pending') return 'プランナーへ起動を伝えましたが、結果を確認できませんでした。Routineの履歴を確認してください。';
-  return `プランナーを起動できませんでした：${PLANNER_ERRORS[replan?.error] ?? '原因が分かりませんでした'}`;
+  const reason = PLANNER_ERRORS[replan?.error] ?? '原因が分かりませんでした';
+  // detail はサーバー側の検査項目の名前（固定の語）。原因を追うときだけ役に立つ。
+  return `プランナーを起動できませんでした：${reason}${replan?.detail ? `［${replan.detail}］` : ''}`;
 }
 
 /** 同期で入ってきた内容を、画面が使っている状態へ読み込み直す。 */

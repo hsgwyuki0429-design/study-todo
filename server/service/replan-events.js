@@ -50,7 +50,7 @@ export function readStudyEnd(body) {
 
 // Exclude secret URL, provider ID/URL, auth headers and free-form provider content.
 export function publicReplan(event) {
-  return Object.fromEntries(['eventId', 'trigger', 'date', 'operationId', 'state', 'error', 'retryable', 'temporary', 'outcomeUnknown']
+  return Object.fromEntries(['eventId', 'trigger', 'date', 'operationId', 'state', 'error', 'detail', 'retryable', 'temporary', 'outcomeUnknown']
     .filter((key) => event[key] !== undefined).map((key) => [key, event[key]]));
 }
 
