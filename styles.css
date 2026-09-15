@@ -190,6 +190,9 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 .timer-total-k { font-size: 10px; color: var(--fg-faint); }
 .timer-total-v { font-size: 14px; color: var(--fg-sub); font-variant-numeric: tabular-nums; }
 
+/* 「戻る」「終了」の丸ボタンを1組にまとめて隣り合わせる。 */
+.timer-head-buttons { flex: none; display: flex; gap: 8px; }
+
 .finish-btn {
   flex: none;
   width: 38px;
