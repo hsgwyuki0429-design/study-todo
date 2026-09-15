@@ -54,14 +54,19 @@ export async function fireClaudeRoutine(event, { env, fetchImpl = fetch, timeout
       return { state: 'failed', error: controller.signal.aborted ? 'timeout' : 'invalid_provider_response',
         ...(controller.signal.aborted ? {} : { detail: 'json' }), retryable: false, outcomeUnknown: true };
     }
+    // 起動できた証拠は「200」と「type: routine_fire」まで。
+    // sessionの識別子は後から履歴を追うための参考情報でしかなく、こちらでは使わない。
+    // その形が想定と違うだけで失敗にすると、起動済みなのに「結果不明」となり、
+    // 設計上その回は送り直せないまま失敗として残ってしまう（実際にそうなった）。
     // detail はこちらの検査項目の名前だけ（固定の語）。providerの本文は残さない。
-    const id = body?.claude_code_session_id;
-    const detail = body?.type !== 'routine_fire' ? 'type'
-      : typeof id !== 'string' || !/^session_[A-Za-z0-9_-]{1,150}$/.test(id) ? 'session_id'
-        : body.claude_code_session_url !== `https://claude.ai/code/${id}` ? 'session_url' : null;
-    if (detail) return { state: 'failed', error: 'invalid_provider_response', detail, retryable: false, outcomeUnknown: true };
-    return { state: 'triggered', retryable: false, providerSessionId: id,
-      providerSessionUrl: `https://claude.ai/code/${id}` };
+    if (body?.type !== 'routine_fire') {
+      return { state: 'failed', error: 'invalid_provider_response', detail: 'type', retryable: false, outcomeUnknown: true };
+    }
+    const id = body.claude_code_session_id;
+    // 参考情報として残すのは、そのままURLに置いても安全な形のときだけ。
+    const usable = typeof id === 'string' && /^[A-Za-z0-9_-]{1,200}$/.test(id);
+    return { state: 'triggered', retryable: false,
+      ...(usable ? { providerSessionId: id, providerSessionUrl: `https://claude.ai/code/${id}` } : {}) };
   } catch (error) {
     // detail は例外の種類の名前だけ（TypeError など）。本文・URL・トークンは残さない。
     return { state: 'failed', error: controller.signal.aborted ? 'timeout' : 'provider_transport',
