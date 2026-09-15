@@ -39,7 +39,8 @@ afterEach(async () => { await context?.close(); await server?.close(); });
 
 const session = () => page.evaluate(async () => (await import('./src/api.js')).getSessionState());
 const records = () => page.evaluate(async () => (await import('./src/api.js')).listRecords());
-async function start() { await page.getByRole('button', { name: '学習を開始', exact: true }).click(); }
+// 解きかけの例題があるときは「学習を再開」に変わるので、どちらでも押せるようにする。
+async function start() { await page.getByRole('button', { name: /^学習を(開始|再開)$/ }).click(); }
 async function review() {
   // 解いている行（色が変わっている行）をもう一度押すと採点へ進む。
   await page.locator('#screen-home .row.active, #screen-home .row.current').first().click();
@@ -255,4 +256,35 @@ test('daily total keeps post-midnight study in the prior label and resets at 03:
   const checkpointed = await session();
   assert.deepEqual(checkpointed.questionTiming[ids[0]].byDate, { '2026-09-14': 10, '2026-09-15': 10 });
   assert.equal(await total(), 10);
+});
+
+test('finished sub-items of a multi-question task drop out of the idle "やること" list', options, async () => {
+  const [qA, qB] = await page.evaluate(async () => {
+    const api = await import('./src/api.js');
+    const { loadTasks, refreshToday, render } = await import('./src/state.js');
+    const questions = (await api.listQuestions()).filter((q) => q.type === '基本例題').slice(2, 4);
+    await api.saveTask({
+      id: 'task-multi', date: api.todayKey(), order: 2, kind: 'new', completed: false,
+      questionIds: questions.map((q) => q.id),
+      items: questions.map((q, i) => ({ itemId: 'multi-' + i, questionId: q.id })),
+    });
+    await loadTasks(); await refreshToday(); render();
+    return questions.map((q) => q.id);
+  });
+  const labelOf = (qid) => page.evaluate(async (qid) => (await import('./src/state.js')).qLabel(qid), qid);
+  const [labelA, labelB] = [await labelOf(qA), await labelOf(qB)];
+
+  await start(); // 未着手のタスク（idsの1問目）から始まる
+  // task-multi の最初の未着手問題（qA）を直接タップして解答・記録する。
+  await page.getByText(new RegExp(labelA)).first().click();
+  await until(async () => (await session()).currentQuestionId === qA);
+  await page.clock.fastForward(10000); await review(); await evaluate();
+  await page.getByRole('button', { name: '終了', exact: true }).click();
+  await until(async () => !(await session()).active);
+
+  const todo = page.locator('#screen-home .list .row-title');
+  await until(async () => (await todo.allTextContents()).length > 0);
+  const titles = await todo.allTextContents();
+  assert.ok(!titles.some((t) => t.includes(labelA)), `${labelA} should have moved to やったこと`);
+  assert.ok(titles.some((t) => t.includes(labelB)), `${labelB} should remain in やること`);
 });

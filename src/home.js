@@ -7,7 +7,7 @@ import { undoRecord } from './record-actions.js';
 import { EVALUATIONS, EVAL_MAP } from './api.js';
 import { itemsOf, splitPlanItems } from './plan-items.js';
 import { state, q, qLabel, render, loadTasks, refreshToday } from './state.js';
-import { $, el, fmtMS, fmtShort, row, segmented, swipeable, emptyState } from './ui.js';
+import { $, el, fmtMS, row, segmented, swipeable, emptyState } from './ui.js';
 import { pushPin, reportActivity, syncInBackground } from './cloud-sync.js';
 
 const persist = () => api.setSessionState(state.session);
@@ -466,7 +466,8 @@ function timerPanel() {
     label.textContent = '今日の学習時間';
     value.textContent = fmtMS(dailyElapsed());
     value.dataset.timer = 'today';
-    const b = el('button', 'btn btn-primary', '学習を開始');
+    // 解きかけの例題があるときは、そのまま「再開」と分かるようにする。
+    const b = el('button', 'btn btn-primary', s.currentQuestionId ? '学習を再開' : '学習を開始');
     b.onclick = () => startSession();
     actions.append(b);
     panel.append(label, value, actions);
@@ -629,13 +630,25 @@ function pinButton(task) {
 const challengeSub = (task) =>
   `${task.questionIds.length}問 / ${Math.round((task.timeLimitSeconds ?? 0) / 60)}分`;
 
+/**
+ * タスクを、今日まだやっていない分（pending）だけに絞る。
+ * 一部の問題だけ今日やった複合タスクは、済んだ問題を「やること」側から外す。
+ */
+function pendingTodo(open) {
+  return open
+    .map((task) => task.kind === 'challenge'
+      ? { task, pendingIds: task.questionIds, item: null }
+      : (() => {
+          const split = splitPlanItems(task, todayRecords(), { date: api.studyDayKey() });
+          return { task, pendingIds: split.pending.map((p) => p.questionId), item: split.pending[0] ?? null };
+        })())
+    .filter((t) => t.task.kind === 'challenge' || t.pendingIds.length);
+}
+
 function idlePanel(panel) {
   const open = state.tasks.filter((t) => !t.completed);
-  const todoCount = open.reduce((n, t) => n + (t.kind === 'challenge' ? 1 : t.questionIds.length), 0);
-  if (state.session.currentQuestionId) {
-    const timing = questionTiming(state.session, state.session.currentQuestionId);
-    panel.append(el('div', 'note', `${qLabel(state.session.currentQuestionId)}：${timing.phase === 'review' ? '採点・暗記' : '解答'}の途中。学習を開始すると続きから再開します。`));
-  }
+  const todo = pendingTodo(open);
+  const todoCount = todo.reduce((n, t) => n + (t.task.kind === 'challenge' ? 1 : t.pendingIds.length), 0);
   const tabs = [['todo', `やること ${todoCount}`], ['done', `やったこと ${state.today.records.length}`]];
   const selectTab = (v) => { state.idleTab = v; render(); };
   panel.append(segmented(tabs, state.idleTab, selectTab));
@@ -643,12 +656,11 @@ function idlePanel(panel) {
 
   const list = el('div', 'list');
   if (state.idleTab === 'todo') {
-    if (!open.length) list.append(emptyState('今日のタスクはありません'));
-    for (const task of open) {
-      const first = q(task.questionIds[0]);
-      const item = splitPlanItems(task, todayRecords(), { date: api.studyDayKey() }).pending[0];
+    if (!todo.length) list.append(emptyState('今日のタスクはありません'));
+    for (const { task, pendingIds, item } of todo) {
+      const first = q(pendingIds[0]);
       const node = row({
-        title: task.kind === 'challenge' ? task.title ?? 'チャレンジ' : groupLabel(task.questionIds),
+        title: task.kind === 'challenge' ? task.title ?? 'チャレンジ' : groupLabel(pendingIds),
         sub: task.kind === 'challenge' ? challengeSub(task) : first ? first.chapter + ' ・ ' + first.section : null,
         right: pinButton(task),
       });
@@ -790,17 +802,6 @@ export function renderHome(screen) {
   head.append(el('h1', 'view-title', 'ホーム'));
   screen.append(head);
   screen.append(timerPanel());
-
-  if (s.mode === 'idle') {
-    const cards = el('div', 'mini-cards');
-    const card = (k, v) => {
-      const c = el('div', 'mini-card');
-      c.append(el('div', 'k', k), el('div', 'v', v));
-      return c;
-    };
-    cards.append(card('累計時間', fmtShort(dailyElapsed())), card('解いた問題数', String(state.today.count)));
-    screen.append(cards);
-  }
 
   const panel = el('div', 'panel');
   if (s.mode === 'idle') idlePanel(panel);
