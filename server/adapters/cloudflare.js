@@ -39,7 +39,8 @@ export class StudyTodoStore {
         storage: createDurableObjectDriver(this.state.storage),
         env: this.env,
         waitUntil: (promise) => this.state.waitUntil(promise),
-        onReplan: (summary) => console.info('daily_replan', summary),
+        // 秘密は publicReplan で除いてある（eventId / trigger / date / state / error だけ）。
+        onReplan: (summary) => console.info(summary.trigger === 'manual' ? 'manual_replan' : 'daily_replan', summary),
       });
     }
     return this.app;

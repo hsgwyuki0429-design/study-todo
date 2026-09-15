@@ -46,6 +46,38 @@ trigger=daily_3am eventId=daily_replan_2026-09-15 date=2026-09-15
 通常の学習終了、問題終了、評価入力、同期、アプリ起動、画面表示、pull-forward、
 期限やavailabilityの変更を即時Claude triggerにはしない。
 
+## 手動実行（設定 → AI連携 / 同期 → プランナーを今すぐ実行）
+
+03:00を待たずに同じプランナーを起動したいときの入口。Cron・daily ledger・DO alarm・
+延期処理には一切触らず、設定・権限・Secretの確認、claim、Routine Fire、結果分類は共有する。
+
+```text
+PWA（設定画面）→ POST /api/admin/replan/fire（owner認証）→ DO → Claude Routine Fire API
+```
+
+`ownerGuard`（`STUDY_TODO_OWNER_KEY`）で守る。接続トークン・端末キーでは通らない。
+要求本文は`operationId`だけで、`CLAUDE_ROUTINE_API_TOKEN`と`CLAUDE_ROUTINE_FIRE_URL`は
+これまでどおりWorker Secretからしか読まず、PWAへは返さない。
+応答は`{ ok, replan }`で、`publicReplan`（eventId / trigger / date / operationId / state /
+error / retryable / outcomeUnknown）だけを返す。providerのsession ID / URLはDOの中だけに残す。
+
+| 項目 | daily_3am | manual |
+| --- | --- | --- |
+| 入口 | Cron `0 18 * * *` → `/__internal/daily-replan` | `POST /api/admin/replan/fire` |
+| 台帳 | `studytodo:replan:daily:<date>` | `studytodo:replan:manual:<operationId>` |
+| 冪等性 | 学習日ごとに最大1回 | 同じ`operationId`につき最大1回（押し直すたびに新しい実行） |
+| eventId | `daily_replan_YYYY-MM-DD` | `manual_replan_<operationId>` |
+| 学習中 | `deferred`にしてalarmで再開 | `study_in_progress`で明確に断る（「今すぐ」の意味を曖昧にしない） |
+| 応答 | POSTを待たない | 押した人へ結果を返すため送信結果を待つ（`waitUntil`にも渡す） |
+
+`date`は03:00 JST区切りの学習日で、`src/datetime.js`の`studyDateKeyOf`をdailyと同じに使う。
+手動実行はその日のdailyの記録・`attemptedAt`・`deferred`索引を読み書きしないので、
+dailyが未実行・failed・triggeredのいずれでも実行でき、翌日のCronも通常どおり動く。
+学習実績は作らない。triggerは再計画を始める理由にすぎない。
+
+Logsには`manual_replan`として`eventId` / `trigger` / `date` / `operationId` / `state` / `error`
+だけを出す（`publicReplan`の許可した項目のみ）。
+
 ## 学習中の延期と異常終了
 
 既存の`/api/sync/activity`と端末台帳を利用する。
@@ -97,7 +129,9 @@ claim直後の停止・timeout・応答保存失敗では実行されたか不�
 | error | 意味 |
 | --- | --- |
 | missing_secrets / invalid_configuration | 設定不足・不正。HTTPなし |
-| ai_disabled | AI連携またはread/write無効。HTTPなし |
+| ai_disabled | AI連携が無効（dailyはread/write無効もここに含める）。HTTPなし |
+| read_permission_required / write_permission_required | 手動実行で権限が足りない。HTTPなし |
+| study_in_progress | 手動実行で学習セッションがactive。HTTPなし（延期もしない） |
 | storage_not_atomic | transaction対応DOがない。HTTPなし |
 | invalid_request / authentication / permission / routine_not_found | HTTP 400 / 401 / 403 / 404 |
 | rate_limit | HTTP 429 |
@@ -176,7 +210,10 @@ PWAとWorkerを同じ版へ更新し、Service Worker `aochart-v12`が反映さ�
    終了の再タップ、再同期、再読込でも増えないことを確認する。
 7. 必要な初回確認だけ、ユーザーがDashboardで既存テスト設定を`write_test`にする。
    次の03:00で最大2件モードを確認し、通常運用前にその設定を解除する。
-   日付を偽装する公開endpointやスマホからdailyを再fireするボタンは設けていない。
+   日付を偽装する公開endpointや、dailyイベントを再fireするボタンは設けていない。
+8. 設定 → AI連携 / 同期 →「プランナーを今すぐ実行」を押し、「プランナーを起動しました。」
+   を確認する。Routine履歴に`trigger=manual`が1件だけ増え、当日のdailyの記録が
+   変わらないこと、学習中は「現在学習中のため実行できません」と断ることを確認する。
 
 ## Claude Routine側の最小プロンプト差分
 
@@ -187,6 +224,10 @@ PWAとWorkerを同じ版へ更新し、Service Worker `aochart-v12`が反映さ�
 通常の自動起動triggerはdaily_3amです。dateは03:00 JSTの日次再計画のplanning date、
 eventIdはdaily_replan_YYYY-MM-DDです。active study sessionのため遅れて起動する場合も、
 同じ日次イベントです。sessionIdは必須ではありません。
+trigger=manual は、利用者が設定画面の「プランナーを今すぐ実行」を押したときの正式な
+起動理由です（eventIdはmanual_replan_<operationId>）。daily_3amとまったく同じ計画処理を、
+その時点のdateについて1回だけ行ってください。triggerは起動の理由にすぎず、
+学習実績・完了扱いを生成する根拠にはなりません。
 入力はイベントmetadataのみです。必ずStudyToDo MCPから最新の状態とPlanning Contextを
 取得し、実際の現在日付と学習履歴・未完了・評価・目標・期限・availabilityを確認してください。
 学習0件を苦手の証拠にしないでください。既存Auto Plannerルールに従って必要な場合のみ

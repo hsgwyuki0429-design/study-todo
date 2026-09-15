@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createStudyTodoMcpApp } from '../server/app.js';
 import { createMemoryDriver } from '../server/storage/memory-driver.js';
 import { fireClaudeRoutine } from '../server/service/claude-routine.js';
-import { replanEventKey, dailyEventKey, dailyEvent } from '../server/service/replan-events.js';
+import { replanEventKey, dailyEventKey, dailyEvent, DEFERRED_KEY } from '../server/service/replan-events.js';
 import { SYNC_KEYS } from '../server/service/sync-service.js';
 import { STORAGE_KEYS } from '../server/auth/tokens.js';
 import worker, { StudyTodoStore } from '../server/adapters/cloudflare.js';
@@ -14,6 +14,7 @@ const ENV = { STUDY_TODO_OWNER_KEY: OWNER_KEY,
   CLAUDE_ROUTINE_API_TOKEN: 'routine-token-TEST-ONLY' };
 const ended = { sessionId: 'local-session-1', eventId: 'study_end_local-session-1', date: '2026-09-14', endedAt: '2026-09-14T03:00:00.000Z' };
 const scheduledTime = Date.parse('2026-09-14T18:00:00Z');
+const OPERATION = 'a1b2c3d4e5f60718';
 const event = dailyEvent(scheduledTime);
 const providerResponse = () => Response.json({ type: 'routine_fire',
   claude_code_session_id: 'session_TEST_ONLY', claude_code_session_url: 'https://claude.ai/code/session_TEST_ONLY' });
@@ -362,6 +363,20 @@ test('Cloudflare adapter wires durable transactions and waitUntil (DO storage te
   }), { STUDY_TODO_STORE: binding });
   assert.equal(external.status, 404);
   assert.equal(fired, 1);
+  // 手動実行も同じDOへ届き、Worker Secretだけで起動する。
+  const manual = await worker.fetch(new Request('https://public/api/admin/replan/fire', {
+    method: 'POST', headers: { authorization: `Bearer ${OWNER_KEY}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ operationId: OPERATION }),
+  }), { STUDY_TODO_STORE: binding });
+  assert.equal(manual.status, 200);
+  assert.equal((await manual.json()).replan.state, 'triggered');
+  assert.equal(fired, 2);
+  // 端末キーでは管理APIを通れない。
+  const asDevice = await worker.fetch(new Request('https://public/api/admin/replan/fire', {
+    method: 'POST', headers: { authorization: `Bearer ${device.deviceKey}` }, body: '{}',
+  }), { STUDY_TODO_STORE: binding });
+  assert.equal(asDevice.status, 401);
+  assert.equal(fired, 2);
 });
 
 test('DO alarm persists, re-arms for heartbeat, and fires after lease expiry and DO recreation', async (t) => {
@@ -446,4 +461,197 @@ test('failed receipt persistence returns 503 for PWA retry; malformed provider J
   assert.equal((await f.daily()).error, 'invalid_provider_response');
   assert.equal(f.calls.length, 1);
   assert.ok(!JSON.stringify(logs).includes(ENV.CLAUDE_ROUTINE_API_TOKEN));
+});
+
+/* ------------------------------------------------------------------ */
+/* 手動実行（設定画面の「プランナーを今すぐ実行」）                      */
+/* ------------------------------------------------------------------ */
+
+const fire = (f, { token = OWNER_KEY, body = { operationId: OPERATION } } = {}) =>
+  call(f.app, '/api/admin/replan/fire', { method: 'POST', token, body });
+
+test('manual fire requires the owner key and POST; no secret reaches the PWA', async () => {
+  const f = await fixture();
+  const device = await joinDevice(f.app, 'other');
+  for (const token of [null, 'wrong-owner-key', f.token, device.deviceKey]) {
+    assert.equal((await fire(f, { token })).status, 401);
+  }
+  // 副作用はPOSTだけ。GETやDELETEでは起動しない。
+  for (const method of ['GET', 'DELETE']) {
+    assert.equal((await call(f.app, '/api/admin/replan/fire', { method, token: OWNER_KEY })).status, 404);
+  }
+  assert.equal(f.calls.length, 0);
+
+  const ok = await fire(f);
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.body.replan, { eventId: `manual_replan_${OPERATION}`, trigger: 'manual',
+    date: event.date, operationId: OPERATION, state: 'triggered', retryable: false, outcomeUnknown: false });
+  assert.equal(f.calls.length, 1);
+  const [url, request] = f.calls[0];
+  assert.equal(url, ENV.CLAUDE_ROUTINE_FIRE_URL);
+  // 03:00の自動実行と同じ経路・同じ本文の形。triggerだけが違う。
+  assert.deepEqual(JSON.parse(request.body),
+    { text: `trigger=manual eventId=manual_replan_${OPERATION} date=${event.date}` });
+  const exposed = JSON.stringify(ok.body);
+  assert.ok(!exposed.includes(ENV.CLAUDE_ROUTINE_API_TOKEN));
+  assert.ok(!exposed.includes(ENV.CLAUDE_ROUTINE_FIRE_URL));
+  assert.ok(!exposed.includes('session_TEST_ONLY'));
+  // providerのsession情報はサーバーの中だけに残す。
+  assert.equal((await f.storage.get(`studytodo:replan:manual:${OPERATION}`)).providerSessionId, 'session_TEST_ONLY');
+});
+
+test('manual fire is refused before POST when AI link, permissions, secrets or config are wrong', async () => {
+  for (const [permission, error] of [['read', 'read_permission_required'], ['write', 'write_permission_required']]) {
+    // read は管理APIからは切れないので（常に必要）、保存内容を直接壊して確かめる。
+    const f = await fixture();
+    const settings = await f.storage.get(STORAGE_KEYS.settings);
+    settings.permissions[permission] = false;
+    await f.storage.put(STORAGE_KEYS.settings, settings);
+    const result = await fire(f);
+    assert.equal(result.body.ok, false);
+    assert.equal(result.body.replan.error, error);
+    assert.equal(f.calls.length, 0);
+  }
+  {
+    const f = await fixture();
+    await call(f.app, '/api/admin/settings', { method: 'POST', token: OWNER_KEY, body: { enabled: false } });
+    const result = await fire(f);
+    assert.equal(result.body.ok, false);
+    assert.equal(result.body.replan.error, 'ai_disabled');
+    assert.equal(f.calls.length, 0);
+  }
+  const missing = await fixture({ env: { STUDY_TODO_OWNER_KEY: OWNER_KEY } });
+  assert.equal((await fire(missing)).body.replan.error, 'missing_secrets');
+  assert.equal(missing.calls.length, 0);
+
+  for (const url of ['https://example.com/fire', `${ENV.CLAUDE_ROUTINE_FIRE_URL}?token=x`, 'invalid']) {
+    const f = await fixture({ env: { ...ENV, CLAUDE_ROUTINE_FIRE_URL: url } });
+    assert.equal((await fire(f)).body.replan.error, 'invalid_configuration');
+    assert.equal(f.calls.length, 0);
+  }
+  const broken = await fixture({ env: { ...ENV, CLAUDE_ROUTINE_TEST_MODE: 'nonsense' } });
+  assert.equal((await fire(broken)).body.replan.error, 'invalid_configuration');
+  assert.equal(broken.calls.length, 0);
+
+  const notAtomic = await fixture();
+  notAtomic.storage.transaction = undefined;
+  assert.equal((await fire(notAtomic)).body.replan.error, 'storage_not_atomic');
+  assert.equal(notAtomic.calls.length, 0);
+});
+
+test('repeated taps and the same operationId issue exactly one POST', async () => {
+  const f = await fixture();
+  const replies = await Promise.all(Array.from({ length: 20 }, () => fire(f)));
+  await f.flush();
+  assert.equal(f.calls.length, 1);
+  assert.ok(replies.every((reply) => reply.body.replan.eventId === `manual_replan_${OPERATION}`));
+  // 別のoperationId（押し直し）は、明示的な新しい実行として通す。
+  assert.equal((await fire(f, { body: { operationId: 'second-press-0000' } })).body.replan.state, 'triggered');
+  assert.equal(f.calls.length, 2);
+  // operationIdを省略すると、サーバーが毎回新しいものを作る。
+  const generated = await fire(f, { body: {} });
+  assert.match(generated.body.replan.operationId, /^[0-9a-f]{32}$/);
+  assert.equal(f.calls.length, 3);
+  assert.equal((await fire(f, { body: { operationId: 'short' } })).status, 400);
+  assert.equal((await fire(f, { body: { operationId: 'bad id mode=write_test' } })).status, 400);
+  assert.equal(f.calls.length, 3);
+});
+
+for (const [status, error] of [[401, 'authentication'], [403, 'permission'], [404, 'routine_not_found'],
+  [429, 'rate_limit'], [500, 'provider_failure']]) {
+  test(`manual fire reports provider ${status} without re-firing`, async () => {
+    const f = await fixture({ fetchImpl: async () => new Response(ENV.CLAUDE_ROUTINE_API_TOKEN, { status }) });
+    const result = await fire(f);
+    assert.equal(result.body.ok, false);
+    assert.equal(result.body.replan.error, error);
+    assert.equal(result.body.replan.retryable, false);
+    // 同じ操作の再送では、結果を返すだけで送り直さない。
+    assert.equal((await fire(f)).body.replan.error, error);
+    assert.equal(f.calls.length, 1);
+    assert.ok(!JSON.stringify(result.body).includes(ENV.CLAUDE_ROUTINE_API_TOKEN));
+  });
+}
+
+test('manual fire keeps an uncertain outcome and never re-POSTs after a timeout', async (t) => {
+  const original = globalThis.setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => original(fn, ms === 10000 ? 5 : ms, ...args));
+  const f = await fixture({ fetchImpl: (_url, { signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new Error('not logged')));
+  }) });
+  const result = await fire(f);
+  assert.equal(result.body.replan.error, 'timeout');
+  assert.equal(result.body.replan.outcomeUnknown, true);
+  assert.equal((await fire(f)).body.replan.outcomeUnknown, true);
+  assert.equal(f.calls.length, 1);
+});
+
+test('manual fire is refused while a study session is active, and works once it ends', async () => {
+  const f = await fixture();
+  await heartbeat(f);
+  const refused = await fire(f);
+  assert.equal(refused.body.replan.error, 'study_in_progress');
+  assert.equal(f.calls.length, 0);
+  // 延期はしない。dailyの延期索引にも足さない。
+  assert.deepEqual(await f.storage.get(DEFERRED_KEY), null);
+  assert.equal((await f.end()).body.studyEnd, 'success');
+  assert.equal((await fire(f, { body: { operationId: 'after-the-session' } })).body.replan.state, 'triggered');
+  assert.equal(f.calls.length, 1);
+});
+
+test('manual fire leaves the daily ledger, its at-most-once state and the next 03:00 cron untouched', async () => {
+  const f = await fixture();
+  await f.daily(); await f.flush();
+  const dailyBefore = await f.storage.get(dailyEventKey(event.date));
+  assert.equal(dailyBefore.state, 'triggered');
+  assert.equal((await fire(f)).body.replan.state, 'triggered');
+  assert.deepEqual(await f.storage.get(dailyEventKey(event.date)), dailyBefore);
+  // 手動実行は当日のdailyを作り直さない。翌日のCronはふだんどおり動く。
+  await f.daily(); await f.flush();
+  assert.equal(f.calls.length, 2);
+  const tomorrow = await f.app.replans.daily(scheduledTime + 86400000);
+  await f.flush();
+  assert.equal(tomorrow.eventId, 'daily_replan_2026-09-16');
+  assert.equal(tomorrow.state, 'pending');
+  assert.equal(f.calls.length, 3);
+});
+
+test('manual fire works when the daily event failed or has not run at all', async () => {
+  const failed = await fixture({ fetchImpl: async () => new Response(null, { status: 500 }) });
+  await failed.daily(); await failed.flush();
+  assert.equal((await failed.storage.get(dailyEventKey(event.date))).error, 'provider_failure');
+  // dailyの失敗は手動実行を妨げない。
+  const result = await fire(failed);
+  assert.equal(result.body.replan.state, 'failed'); // 同じ模擬providerなので500のまま
+  assert.equal(failed.calls.length, 2);
+  assert.equal((await failed.storage.get(dailyEventKey(event.date))).error, 'provider_failure');
+
+  const fresh = await fixture();
+  assert.equal((await fire(fresh)).body.replan.state, 'triggered');
+  assert.equal(await fresh.storage.get(dailyEventKey(event.date)), null);
+  // 手動実行のあとでも、その日のdailyは通常どおり1回起動できる。
+  assert.equal((await fresh.daily()).state, 'pending');
+  await fresh.flush();
+  assert.equal(fresh.calls.length, 2);
+});
+
+test('manual planning date follows the 03:00 JST study day', async () => {
+  for (const [at, date] of [['2026-09-14T14:59:59Z', '2026-09-14'], ['2026-09-14T17:59:59Z', '2026-09-14'],
+    ['2026-09-14T18:00:00Z', '2026-09-15'], ['2026-12-31T18:00:00Z', '2027-01-01']]) {
+    const f = await fixture({ now: () => Date.parse(at) });
+    assert.equal((await fire(f)).body.replan.date, date);
+  }
+});
+
+test('manual fire reports safe telemetry only', async () => {
+  const seen = [];
+  const f = await fixture({ onReplan: (summary) => seen.push(summary) });
+  await fire(f);
+  assert.deepEqual(seen.map((entry) => entry.trigger), ['manual']);
+  assert.deepEqual(Object.keys(seen[0]).sort(),
+    ['date', 'eventId', 'operationId', 'outcomeUnknown', 'retryable', 'state', 'trigger']);
+  const logged = JSON.stringify(seen);
+  assert.ok(!logged.includes(ENV.CLAUDE_ROUTINE_API_TOKEN));
+  assert.ok(!logged.includes(ENV.CLAUDE_ROUTINE_FIRE_URL));
+  assert.ok(!logged.includes('session_TEST_ONLY'));
+  assert.ok(!logged.includes(OWNER_KEY));
 });

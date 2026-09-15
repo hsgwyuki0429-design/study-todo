@@ -319,6 +319,15 @@ export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(
       return json(await sync.purgeStudyData());
     }
 
+    // プランナー（03:00の自動再計画と同じClaude Routine）を、その場で1回だけ起動する。
+    // Fire URLとAPIトークンはWorker Secretからだけ読み、応答にも含めない。
+    // 起動できなかった理由は state / error で返す（HTTPは200。画面が日本語に直して出す）。
+    if (path === '/api/admin/replan/fire' && request.method === 'POST') {
+      const body = await readJsonBody(request);
+      const replan = await replans.manual(body);
+      return json({ ok: replan.state === 'triggered', replan });
+    }
+
     if (path === "/api/admin/log" && request.method === "GET") {
       const limit = Number(new URL(request.url).searchParams.get("limit") ?? 20);
       return json(await sync.readLog({ limit }));
