@@ -482,19 +482,23 @@ function timerPanel() {
   totalValue.dataset.timer = 'session';
   total.append(totalValue);
   head.append(total);
+  // 丸ボタンは1つのグループにまとめる。head 自体が space-between のため、
+  // まとめないと「戻る」だけ中央寄りに離れてしまう。
+  const headButtons = el('div', 'timer-head-buttons');
   if (s.mode === 'record_input') {
     // 間違って採点・暗記に進んでしまったときのために、解答中へ戻すボタンを置く。
     const back = el('button', 'finish-btn', '戻る');
     back.title = '解答中へ戻る';
     back.onclick = backToSolve;
-    head.append(back);
+    headButtons.append(back);
   }
   if (s.mode === 'task_list' || s.mode === 'record_input') {
     const finish = el('button', 'finish-btn', '終了');
     finish.title = '学習を終了する';
     finish.onclick = endSession;
-    head.append(finish);
+    headButtons.append(finish);
   }
+  if (headButtons.childNodes.length) head.append(headButtons);
   panel.append(head);
 
   if (s.mode === 'challenge') {
