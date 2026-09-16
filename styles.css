@@ -232,7 +232,7 @@ button {
 .segmented.play-slider { background: var(--segment-bg); }
 .play-slider button { border-radius: 0; min-height: 40px; }
 .play-slider .segmented-thumb { top: 0; height: 100%; border-radius: 0; background: var(--accent); box-shadow: none; }
-.play-slider button[aria-selected='true'] { color: var(--on-accent); }
+.segmented.play-slider button[aria-selected='true'] { color: var(--on-accent); }
 
 .timer-label { font-size: 13px; color: var(--fg-sub); min-height: 20px; }
 
