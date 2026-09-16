@@ -875,8 +875,10 @@ body { background: var(--bg-sub); font-family: -apple-system, BlinkMacSystemFont
 .section-body:last-child { border-radius: 0 0 var(--radius-group) var(--radius-group); margin-bottom: 20px; overflow: hidden; }
 .timer-panel { padding: 2px var(--page-gutter) 0; border: 0; gap: 2px; }
 /* 「学習を開始」ボタンと「やること／やったこと」欄の間を、その欄と
-   一覧の間の余白（.panel の gap）と同じだけ空ける。 */
-#screen-home[data-mode='idle'] .timer-panel { padding-bottom: 8px; }
+   一覧の間の余白（.panel の gap）と同じだけ空ける。
+   上側は、学習中にある「今日の学習時間」の行のぶんだけ詰めて、
+   タイマーの数字が学習中と同じ高さに来るようにする。 */
+#screen-home[data-mode='idle'] .timer-panel { padding-top: 26px; padding-bottom: 8px; }
 .timer-label { align-self: flex-start; text-align: left; font-size: 16px; min-height: 24px; }
 /* できるだけ大きく。上の行が1行に詰まったぶん、ここへ回す。 */
 .timer-value { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 92px; line-height: 1; font-weight: 300; letter-spacing: 0; }
