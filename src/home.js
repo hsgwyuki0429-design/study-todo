@@ -86,13 +86,6 @@ export function dailyElapsed() {
   return (state.today.date === date ? state.today.seconds : 0) + pendingSecondsForDay(state.session, date);
 }
 
-function currentTimerSeconds() {
-  const s = state.session;
-  if (!s.currentQuestionId) return 0;
-  if (s.mode !== 'record_input') return elapsedOf(s.currentQuestionId);
-  return questionTiming(s, s.currentQuestionId).reviewSeconds + (s.currentStartedAt ? since(s.currentStartedAt) : 0);
-}
-
 function startQuestion(questionId) {
   const s = state.session;
   commitCurrent();
@@ -232,6 +225,19 @@ async function togglePause() {
     commitSession();
     clearActivity();
   }
+  await persist();
+  render();
+}
+
+/** いま解いている例題の時間を0秒に戻す。問題は切り替えず、計測だけやり直す。 */
+async function resetCurrentQuestion() {
+  if (recording || endingSession) return;
+  const s = state.session;
+  const qid = s.currentQuestionId;
+  if (!qid) return;
+  delete s.questionElapsed[qid];
+  if (s.questionTiming) delete s.questionTiming[qid];
+  if (s.currentStartedAt) s.currentStartedAt = new Date().toISOString();
   await persist();
   render();
 }
@@ -455,23 +461,25 @@ async function markCompletedTasks() {
 /* ================================================================== */
 
 /**
- * 右上に置くタイマー。「終了」の概念は廃止したので、常にこの一つだけを、
- * できるだけ大きく表示する。真ん中のタイマーが合計に切り替わる（止まっている）
- * あいだは、代わりにここへ今の例題の時間を出す。動いているときは今日の合計。
+ * 右上のボタン置き場。時刻そのものはもう出さない（真ん中の合計と重複するため）。
  * 「ホーム」の見出しと同じ行に置くため、renderHome() 側で view-head へ差し込む。
  */
 function timerHeadRight(s) {
   const right = el('div', 'view-head-right');
-  const paused = (s.mode === 'task_list' || s.mode === 'record_input') && isPaused();
-  const totalValue = el('span', 'timer-total-v', fmtMS(paused ? currentTimerSeconds() : dailyElapsed()));
-  totalValue.dataset.timer = paused ? 'main' : 'session';
-  right.append(totalValue);
   if (s.mode === 'record_input') {
     // 間違って採点・暗記に進んでしまったときのために、解答中へ戻すボタンを置く。
     const back = el('button', 'finish-btn', '戻る');
     back.title = '解答中へ戻る';
     back.onclick = backToSolve;
     right.append(back);
+  }
+  if ((s.mode === 'task_list' || s.mode === 'record_input') && s.currentQuestionId) {
+    // 今解いている例題の時間だけを0秒に戻す（学習中でも一時停止中でも押せる）。
+    const reset = el('button', 'finish-btn', '🔄');
+    reset.title = 'この例題の時間を0秒に戻す';
+    reset.setAttribute('aria-label', 'この例題の時間を0秒に戻す');
+    reset.onclick = resetCurrentQuestion;
+    right.append(reset);
   }
   return right;
 }
@@ -547,10 +555,10 @@ function timerPanel() {
 
   // task_list / record_input
   // 一時停止・再開はスライダーで行う（数字そのものをタップする操作は廃止）。
-  // 止まっているあいだは真ん中に「今日の合計」を、動いているあいだはその例題の時間を出す。
+  // 真ん中には常に「今日の合計」を出す（例題ごとの時間はタスクバー側に出る）。
   const paused = isPaused();
-  value.textContent = fmtMS(paused ? dailyElapsed() : currentTimerSeconds());
-  value.dataset.timer = paused ? 'today' : 'main';
+  value.textContent = fmtMS(dailyElapsed());
+  value.dataset.timer = 'today';
   panel.append(playSlider(s), value);
 
   if (s.mode === 'record_input') {
@@ -573,13 +581,10 @@ export function tickHome() {
   };
   refreshStudyDayIfNeeded();
   set('today', fmtMS(dailyElapsed()));
-  set('session', fmtMS(dailyElapsed()));
   if (s.mode === 'challenge') {
     const limit = s.challengeTimeLimitSeconds ?? 0;
     const e = challengeElapsed();
     set('challenge', fmtMS(s.challengeCountUp ? e : Math.max(0, limit - e)));
-  } else if (s.currentQuestionId) {
-    set('main', fmtMS(currentTimerSeconds()));
   }
   document.querySelectorAll('[data-elapsed-for]').forEach((node) => {
     node.textContent = fmtMS(elapsedOf(node.dataset.elapsedFor));
@@ -602,18 +607,21 @@ function refreshStudyDayIfNeeded() {
 /* 描画：下半分                                                        */
 /* ================================================================== */
 
+/**
+ * 行の右側は時間だけにする。「未着手／一時停止／計測中」は文字にせず、
+ * どれが今解いている行かは行そのものの色（active/current）で示す。
+ * 何の例題か・番号はすでにタイトル（qLabel）に出ているので重ねて出さない。
+ */
 function stateCells(questionId) {
   const s = state.session;
   const active = s.currentQuestionId === questionId && !!s.currentStartedAt;
   const started = (s.questionElapsed[questionId] || 0) > 0 || active;
-  const pill = el('span', `state-pill${active ? ' active' : ''}`,
-    active ? '計測中' : started ? '一時停止' : '未着手');
   const time = el('span', `row-time${active ? ' active' : ''}`, '');
   if (started) {
     time.textContent = fmtMS(elapsedOf(questionId));
     time.dataset.elapsedFor = questionId;
   }
-  return [pill, time];
+  return [time];
 }
 
 const challengeSub = (task) =>
@@ -704,18 +712,13 @@ function taskListPanel(panel) {
       continue;
     }
     const qid = item.questionId;
-    const qq = q(qid);
     const current = state.session.currentQuestionId === qid;
     const active = current && !!state.session.currentStartedAt;
-    const carried = item.item?.originalDate && item.item.originalDate !== api.studyDayKey();
-    // いま解いている行は色が変わる。もう一度押すと採点へ進むので、その案内を出す。
-    const sub = current
-      ? 'もう一度タップすると採点・暗記へ'
-      : [qq ? `${qq.chapter} ・ ${qq.section}` : null, carried ? '繰り越し' : null].filter(Boolean).join(' ・ ') || null;
+    // いま解いている行は色が変わる。もう一度押すと採点へ進むので、その案内だけ残す。
     list.append(
       row({
         title: qLabel(qid),
-        sub,
+        sub: current ? 'もう一度タップすると採点・暗記へ' : null,
         right: stateCells(qid),
         onClick: () => tapTaskQuestion(qid, item.item, item.task),
         classes: active ? ['active'] : current ? ['current'] : [],
