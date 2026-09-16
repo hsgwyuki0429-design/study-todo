@@ -226,7 +226,12 @@ button {
 
 /* 「続いているか・止まっているか」を表す再生スライダー。やること／やったこと
    の切り替えバーと同じ仕組み（segmented）を再利用し、高さ・幅もそのまま。 */
-.play-slider { width: 100%; margin-top: 4px; }
+/* このバーだけ青を基調にする。地は薄い青、選ばれている側の光は濃い青にして、
+   そこだけ記号を白にする。 */
+.play-slider { width: 100%; margin-bottom: 4px; }
+.segmented.play-slider { background: var(--accent-bg); }
+.play-slider .segmented-thumb { background: var(--accent); box-shadow: none; }
+.play-slider button[aria-selected='true'] { color: var(--on-accent); }
 
 .timer-label { font-size: 13px; color: var(--fg-sub); min-height: 20px; }
 

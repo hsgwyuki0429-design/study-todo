@@ -515,7 +515,7 @@ function timerPanel() {
     // 続いているか止まっているかを表すスライダーで代わりに始める。
     value.textContent = fmtMS(dailyElapsed());
     value.dataset.timer = 'today';
-    panel.append(value, playSlider(s));
+    panel.append(playSlider(s), value);
     return panel;
   }
 
@@ -554,7 +554,7 @@ function timerPanel() {
   const paused = isPaused();
   value.textContent = fmtMS(currentTimerSeconds());
   value.classList.toggle('danger', paused);
-  panel.append(value, playSlider(s));
+  panel.append(playSlider(s), value);
 
   if (s.mode === 'record_input') {
     // 採点・暗記中は、どの例題を採点しているか分かるよう問題名を残す。
