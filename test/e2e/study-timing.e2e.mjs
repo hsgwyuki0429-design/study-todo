@@ -386,3 +386,18 @@ test('タップで切り替えても、やること／やったこと の光は�
   assert.ok(transforms.length >= 2, `位置合わせが前の位置→今の位置の2段階になっていない: ${JSON.stringify(transforms)}`);
   assert.notEqual(transforms[0], transforms[transforms.length - 1], '最初と最後で同じ位置ではない（経由地点がある）');
 });
+
+test('carry-over date can be chosen freely, not just today/tomorrow', options, async () => {
+  await page.getByRole('tab', { name: /スケジュール/ }).click();
+  await page.locator('.day-row.is-today').click();
+  await page.getByText(/残っている予定/).waitFor();
+  assert.equal(await page.locator('.detail-item').count(), 2);
+  await page.getByRole('button', { name: '繰り越す', exact: true }).first().click();
+  const dateInput = page.locator('input[type="date"]');
+  await dateInput.waitFor();
+  await dateInput.fill('2026-09-20');
+  await page.getByRole('button', { name: '理由は未入力', exact: true }).click();
+  await until(async () => (await page.locator('.detail-item').count()) === 1);
+  const tasks = await page.evaluate(async () => (await import('./src/api.js')).getTasksInRange('2026-09-20', '2026-09-20'));
+  assert.ok(tasks.some((t) => (t.questionIds ?? []).length > 0), '選んだ日付にタスクが移っている');
+});
