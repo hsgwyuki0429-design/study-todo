@@ -203,7 +203,7 @@ async function startSession(selected = null) {
 
 let endingSession = false;
 let recording = null;
-async function endSession() {
+export async function endSession() {
   if (endingSession || !state.session.active) return;
   endingSession = true;
   try {
@@ -455,7 +455,8 @@ async function markCompletedTasks() {
 /* ================================================================== */
 
 /**
- * 右上に置く、今日の学習時間（全体）と丸いボタン（戻る・終了）。
+ * 右上に置く、今日の学習時間（全体）。「終了」の概念は廃止したので、
+ * 常にこの一つだけを、できるだけ大きく表示する。
  * 「ホーム」の見出しと同じ行に置くため、renderHome() 側で view-head へ差し込む。
  */
 function timerHeadRight(s) {
@@ -469,12 +470,6 @@ function timerHeadRight(s) {
     back.title = '解答中へ戻る';
     back.onclick = backToSolve;
     right.append(back);
-  }
-  if (s.mode === 'task_list' || s.mode === 'record_input') {
-    const finish = el('button', 'finish-btn', '終了');
-    finish.title = '学習を終了する';
-    finish.onclick = endSession;
-    right.append(finish);
   }
   return right;
 }
@@ -550,10 +545,10 @@ function timerPanel() {
 
   // task_list / record_input
   // 一時停止・再開はスライダーで行う（数字そのものをタップする操作は廃止）。
-  // 止まっているあいだは数字を赤くして、ひと目で分かるようにする。
+  // 止まっているあいだは真ん中に「今日の合計」を、動いているあいだはその例題の時間を出す。
   const paused = isPaused();
-  value.textContent = fmtMS(currentTimerSeconds());
-  value.classList.toggle('danger', paused);
+  value.textContent = fmtMS(paused ? dailyElapsed() : currentTimerSeconds());
+  value.dataset.timer = paused ? 'today' : 'main';
   panel.append(playSlider(s), value);
 
   if (s.mode === 'record_input') {
@@ -791,7 +786,7 @@ export function renderHome(screen) {
   screen.dataset.mode = s.mode;
   const head = el('div', 'view-head view-head-row');
   head.append(el('h1', 'view-title', 'ホーム'));
-  if (s.mode !== 'idle') head.append(timerHeadRight(s));
+  head.append(timerHeadRight(s));
   screen.append(head);
   screen.append(timerPanel());
 

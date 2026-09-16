@@ -49,6 +49,9 @@ async function review() {
   await page.locator('.eval-btn').first().waitFor({ state: 'visible' });
 }
 async function evaluate() { await page.locator('.eval-btn').first().click(); await until(async () => (await records()).length > 0); }
+// 「終了」ボタンは廃止した（終了の概念自体を無くしたため）。テストからは
+// home.js の endSession() を直接呼んで、ボタンなしで同じ動作を再現する。
+async function finish() { await page.evaluate(async () => (await import('./src/home.js')).endSession()); }
 const total = () => page.evaluate(async () => (await import('./src/home.js')).dailyElapsed());
 
 test('solve → review with pauses → result → next example, with measured fields synced to MCP', options, async () => {
@@ -84,7 +87,7 @@ test('solve → review with pauses → result → next example, with measured fi
 test('end during review, wait hours and reload offline: resume same draft and daily total', options, async () => {
   await start(); await page.clock.fastForward(60000); await review(); await page.clock.fastForward(30000);
   const previousId = (await session()).sessionId;
-  await page.getByRole('button', { name: '終了', exact: true }).click();
+  await finish();
   await until(async () => !(await session()).active);
   assert.equal((await records()).length, 0);
   assert.equal((await session()).resumeMode, 'record_input');
@@ -100,7 +103,7 @@ test('end during review, wait hours and reload offline: resume same draft and da
   await page.clock.fastForward(15000); await evaluate();
   const [record] = await records();
   assert.equal(record.solveSeconds, 60); assert.equal(record.reviewSeconds, 45); assert.equal(await total(), 105);
-  await page.getByRole('button', { name: '終了', exact: true }).click();
+  await finish();
   await until(async () => !(await session()).active);
   await page.clock.fastForward(3600000); await start();
   assert.equal(await total(), 105);
@@ -126,7 +129,7 @@ test('home undo (やったこと) survives synchronization', options, async () =
   await page.evaluate(async ({ origin, device }) => (await import('./src/cloud-sync.js')).saveCloudConfig({ serverUrl: origin, ...device, enabled: true }), { origin: server.origin, device });
   await start(); await page.clock.fastForward(10000); await review(); await evaluate();
   await page.evaluate(async () => (await import('./src/cloud-sync.js')).syncNow());
-  await page.getByRole('button', { name: /終了/, exact: true }).click();
+  await finish();
   await until(async () => !(await session()).active);
   await page.getByRole('button', { name: /やったこと/ }).click();
   await page.getByRole('button', { name: /を未着手に戻す/ }).click();
@@ -150,16 +153,16 @@ test('schedule day detail shows only the remaining plan, with a working carry-ov
   await until(async () => (await page.locator('.detail-item').count()) === 0);
 });
 
-test('the play slider stops and restarts the timer, and the digits turn red while stopped', options, async () => {
+test('the play slider stops and restarts the timer, and the center digits show the daily total while stopped', options, async () => {
   await start(); await page.clock.fastForward(10000);
   await pause();
-  await page.locator('.timer-value.danger').waitFor({ state: 'visible' });
   await page.clock.fastForward(60000);
   assert.equal(await total(), 10);
+  assert.equal(await page.locator('.timer-value').getAttribute('data-timer'), 'today');
   await start();
-  await page.locator('.timer-value.danger').waitFor({ state: 'detached' });
   await page.clock.fastForward(5000);
   assert.equal(await total(), 15);
+  assert.equal(await page.locator('.timer-value').getAttribute('data-timer'), 'main');
 });
 
 test('double evaluation tap and competing draft commits save one result; failed undo is atomic', options, async () => {
@@ -196,14 +199,14 @@ test('accidentally starting review can be undone with the back button, resuming 
   assert.equal((await session()).mode, 'task_list');
   assert.equal((await session()).questionTiming[ids[0]].phase, 'solve');
   await page.clock.fastForward(5000);
-  await page.getByRole('button', { name: '終了', exact: true }).click();
+  await finish();
   await until(async () => !(await session()).active);
   assert.equal((await records()).length, 0);
 });
 
 test('review continues on the next JST day; completed time stays on the day it was measured', options, async () => {
   await start(); await page.clock.fastForward(60000); await review(); await page.clock.fastForward(30000);
-  await page.getByRole('button', { name: '終了', exact: true }).click();
+  await finish();
   await until(async () => !(await session()).active);
   await page.clock.fastForward(86400000);
   await start();
@@ -222,7 +225,7 @@ test('review continues on the next JST day; completed time stays on the day it w
 
 test('ending during solve resumes solve without a result or the stopped hours', options, async () => {
   await start(); await page.clock.fastForward(20000);
-  await page.getByRole('button', { name: '終了', exact: true }).click();
+  await finish();
   await until(async () => !(await session()).active);
   await page.clock.fastForward(3600000); await page.reload(); await start();
   assert.equal((await session()).mode, 'task_list');
@@ -297,7 +300,7 @@ test('finished sub-items of a multi-question task drop out of the idle "やる�
   await page.getByText(new RegExp(labelA)).first().click();
   await until(async () => (await session()).currentQuestionId === qA);
   await page.clock.fastForward(10000); await review(); await evaluate();
-  await page.getByRole('button', { name: '終了', exact: true }).click();
+  await finish();
   await until(async () => !(await session()).active);
 
   const todo = page.locator('#screen-home .list .row-title');

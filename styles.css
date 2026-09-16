@@ -208,7 +208,7 @@ button {
 /* 「ホーム」の見出しと同じ行（view-head-row）に置く、今日の学習時間（全体）
    と丸ボタン（戻る・終了）。 */
 .view-head-right { flex: none; display: flex; align-items: center; gap: 10px; }
-.timer-total-v { font-size: 14px; color: var(--fg-sub); font-variant-numeric: tabular-nums; }
+.timer-total-v { font-size: 28px; color: var(--fg-sub); font-variant-numeric: tabular-nums; font-weight: 600; }
 
 .finish-btn {
   flex: none;
@@ -886,7 +886,7 @@ body { background: var(--bg-sub); font-family: -apple-system, BlinkMacSystemFont
 .empty { padding: 26px 12px; font-size: 15px; }
 /* 「ホーム」の見出しは、学習中かどうかで位置がずれないよう常に同じ余白にする。 */
 #screen-home:not([data-mode='idle']) .timer-panel { padding-top: 4px; padding-bottom: 10px; }
-.timer-total-v { font-size: 15px; }
+.timer-total-v { font-size: 30px; }
 .finish-btn { width: 40px; height: 40px; font-size: 13px; border-radius: 50%; }
 #screen-home:not([data-mode='idle']) .timer-label { align-self: center; text-align: center; }
 .panel-head { border: 0; padding: 8px 0 0; font-size: 13px; }
