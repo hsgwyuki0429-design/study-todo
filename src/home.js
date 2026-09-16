@@ -714,11 +714,11 @@ function taskListPanel(panel) {
     const qid = item.questionId;
     const current = state.session.currentQuestionId === qid;
     const active = current && !!state.session.currentStartedAt;
-    // いま解いている行は色が変わる。タイトル（例題種類・番号）だけで足りるので、
-    // 説明文は出さない。もう一度タップすると採点・暗記へ進む点は変わらない。
+    // いま解いている行は色が変わる。もう一度押すと採点へ進むので、その案内だけ残す。
     list.append(
       row({
         title: qLabel(qid),
+        sub: current ? 'もう一度タップすると採点・暗記へ' : null,
         right: stateCells(qid),
         onClick: () => tapTaskQuestion(qid, item.item, item.task),
         classes: active ? ['active'] : current ? ['current'] : [],
