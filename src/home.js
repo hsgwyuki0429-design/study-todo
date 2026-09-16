@@ -455,25 +455,50 @@ async function markCompletedTasks() {
 /* ================================================================== */
 
 /**
- * 右上の丸いボタン（戻る・終了）。「ホーム」の見出しと同じ行に置くため、
- * renderHome() 側で view-head へ差し込む。
+ * 右上に置く、今日の学習時間（全体）と丸いボタン（戻る・終了）。
+ * 「ホーム」の見出しと同じ行に置くため、renderHome() 側で view-head へ差し込む。
  */
-function timerHeadButtons(s) {
-  const buttons = el('div', 'timer-head-buttons');
+function timerHeadRight(s) {
+  const right = el('div', 'view-head-right');
+  const totalValue = el('span', 'timer-total-v', fmtMS(dailyElapsed()));
+  totalValue.dataset.timer = 'session';
+  right.append(totalValue);
   if (s.mode === 'record_input') {
     // 間違って採点・暗記に進んでしまったときのために、解答中へ戻すボタンを置く。
     const back = el('button', 'finish-btn', '戻る');
     back.title = '解答中へ戻る';
     back.onclick = backToSolve;
-    buttons.append(back);
+    right.append(back);
   }
   if (s.mode === 'task_list' || s.mode === 'record_input') {
     const finish = el('button', 'finish-btn', '終了');
     finish.title = '学習を終了する';
     finish.onclick = endSession;
-    buttons.append(finish);
+    right.append(finish);
   }
-  return buttons.childNodes.length ? buttons : null;
+  return right;
+}
+
+/**
+ * 「続いているか、止まっているか」を表す再生スライダー。
+ * やること／やったこと の切り替えバーと同じ仕組み（同じ高さ・幅）で、
+ * 左が停止、右が再生。アイドル時は学習の開始、学習中は一時停止・再開を兼ねる。
+ */
+function playSlider(s) {
+  const paused = s.mode === 'idle' ? true : isPaused();
+  const current = paused ? 'stop' : 'play';
+  const bar = segmented(
+    [['stop', '⏹'], ['play', '▶']],
+    current,
+    (value) => {
+      if (value === current) return;
+      if (s.mode === 'idle') { if (value === 'play') startSession(); return; }
+      togglePause();
+    },
+    'play-slider',
+  );
+  bar.classList.add('play-slider');
+  return bar;
 }
 
 function timerPanel() {
@@ -486,25 +511,13 @@ function timerPanel() {
 
   if (s.mode === 'idle') {
     // 学習していないときは「今日の学習時間」の文字を出さず、数字だけを
-    // できるだけ大きく・上に詰めて見せる。
+    // できるだけ大きく・上に詰めて見せる。「学習を開始」ボタンは廃止し、
+    // 続いているか止まっているかを表すスライダーで代わりに始める。
     value.textContent = fmtMS(dailyElapsed());
     value.dataset.timer = 'today';
-    // 解きかけの例題があるときは、そのまま「再開」と分かるようにする。
-    const b = el('button', 'btn btn-primary', s.currentQuestionId ? '学習を再開' : '学習を開始');
-    b.onclick = () => startSession();
-    actions.append(b);
-    panel.append(value, actions);
+    panel.append(value, playSlider(s));
     return panel;
   }
-
-  // 「今日の学習時間」の数字と、一時停止・再開の案内を1行にまとめる。
-  // 丸いボタン（戻る・終了）は「ホーム」の見出しと同じ行へ移したので、ここには置かない。
-  const totalRow = el('div', 'timer-total-row');
-  totalRow.append(el('span', 'timer-total-k', '今日の学習時間'));
-  const totalValue = el('span', 'timer-total-v', fmtMS(dailyElapsed()));
-  totalValue.dataset.timer = 'session';
-  totalRow.append(totalValue);
-  panel.append(totalRow);
 
   if (s.mode === 'challenge') {
     const task = currentChallengeTask();
@@ -536,29 +549,21 @@ function timerPanel() {
   }
 
   // task_list / record_input
-  // ボタンは置かず、数字そのものを押して一時停止・再開する。
-  // 止まっているあいだは赤くして、ひと目で分かるようにする。
+  // 一時停止・再開はスライダーで行う（数字そのものをタップする操作は廃止）。
+  // 止まっているあいだは数字を赤くして、ひと目で分かるようにする。
   const paused = isPaused();
-  const name = s.currentQuestionId ? qLabel(s.currentQuestionId) : null;
-  label.textContent = name
-    ? paused
-      ? `${name}（一時停止中）`
-      : `${name} ${s.mode === 'record_input' ? '採点・暗記中' : 'を解いています'}`
-    : '問題をタップして開始';
   value.textContent = fmtMS(currentTimerSeconds());
+  value.classList.toggle('danger', paused);
+  panel.append(value, playSlider(s));
 
-  const tap = el('button', `timer-tap${paused ? ' paused' : ''}`);
-  // 読み上げ・自動テストからは「一時停止」「再開」のボタンとして見えるようにする。
-  tap.setAttribute('aria-label', paused ? '再開' : '一時停止');
-  tap.onclick = togglePause;
-  tap.append(value);
-  // 「タップで再開」などの案内は、タイマーの数字より上（今日の学習時間と同じ行）に置く。
-  const hint = el('span', `timer-hint${paused ? ' paused' : ''}`, paused ? '▶ タップで再開' : '❚❚ タップで一時停止');
-  totalRow.append(hint);
-
-  // ラベル（問題名や状態）の文字数で表示が変わっても数字の位置がずれないよう、
-  // ラベルは数字の下に置く。
-  panel.append(tap, label);
+  if (s.mode === 'record_input') {
+    // 採点・暗記中は、どの例題を採点しているか分かるよう問題名を残す。
+    const name = s.currentQuestionId ? qLabel(s.currentQuestionId) : null;
+    if (name) {
+      label.textContent = paused ? `${name}（一時停止中）` : `${name} 採点・暗記中`;
+      panel.append(label);
+    }
+  }
   return panel;
 }
 
@@ -638,7 +643,7 @@ function idlePanel(panel) {
   const todoCount = todo.reduce((n, t) => n + (t.task.kind === 'challenge' ? 1 : t.pendingIds.length), 0);
   const tabs = [['todo', `やること ${todoCount}`], ['done', `やったこと ${state.today.records.length}`]];
   const selectTab = (v) => { state.idleTab = v; render(); };
-  panel.append(segmented(tabs, state.idleTab, selectTab));
+  panel.append(segmented(tabs, state.idleTab, selectTab, 'home-tabs'));
   swipeable(panel, tabs.map(([v]) => v), state.idleTab, selectTab);
 
   const list = el('div', 'list');
@@ -681,7 +686,7 @@ function appendDoneRecords(list) {
 function taskListPanel(panel) {
   const tabs = [['todo', 'やること'], ['done', 'やったこと ' + state.today.records.length]];
   const selectTab = (value) => { state.idleTab = value; render(); };
-  panel.append(segmented(tabs, state.idleTab, selectTab));
+  panel.append(segmented(tabs, state.idleTab, selectTab, 'home-tabs'));
   swipeable(panel, tabs.map(([v]) => v), state.idleTab, selectTab);
   if (state.idleTab === 'done') {
     const list = el('div', 'list'); appendDoneRecords(list); panel.append(list); return;
@@ -786,8 +791,7 @@ export function renderHome(screen) {
   screen.dataset.mode = s.mode;
   const head = el('div', 'view-head view-head-row');
   head.append(el('h1', 'view-title', 'ホーム'));
-  const headButtons = timerHeadButtons(s);
-  if (headButtons) head.append(headButtons);
+  if (s.mode !== 'idle') head.append(timerHeadRight(s));
   screen.append(head);
   screen.append(timerPanel());
 

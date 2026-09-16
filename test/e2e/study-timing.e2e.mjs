@@ -39,8 +39,10 @@ afterEach(async () => { await context?.close(); await server?.close(); });
 
 const session = () => page.evaluate(async () => (await import('./src/api.js')).getSessionState());
 const records = () => page.evaluate(async () => (await import('./src/api.js')).listRecords());
-// 解きかけの例題があるときは「学習を再開」に変わるので、どちらでも押せるようにする。
-async function start() { await page.getByRole('button', { name: /^学習を(開始|再開)$/ }).click(); }
+// 「学習開始」ボタンは廃止し、続いているか止まっているかを表すスライダー
+// （やること／やったこと と同じ仕組み）で代わりに始める・再開する。
+async function start() { await page.getByRole('button', { name: '▶', exact: true }).click(); }
+async function pause() { await page.getByRole('button', { name: '⏹', exact: true }).click(); }
 async function review() {
   // 解いている行（色が変わっている行）をもう一度押すと採点へ進む。
   await page.locator('#screen-home .row.active, #screen-home .row.current').first().click();
@@ -56,17 +58,17 @@ test('solve → review with pauses → result → next example, with measured fi
     serverUrl: origin, ...device, enabled: true,
   }), { origin: server.origin, device });
   await start(); await page.clock.fastForward(60000);
-  await page.getByRole('button', { name: '一時停止', exact: true }).click();
+  await pause();
   await page.clock.fastForward(300000);
   assert.equal(await total(), 60);
-  await page.getByRole('button', { name: '再開', exact: true }).click();
+  await start();
   await page.clock.fastForward(10000); await review();
   assert.equal((await session()).mode, 'record_input');
   await page.clock.fastForward(20000);
   assert.equal(await page.locator('[data-timer="main"]').textContent(), '00:20');
-  await page.getByRole('button', { name: '一時停止', exact: true }).click();
+  await pause();
   await page.clock.fastForward(120000);
-  await page.getByRole('button', { name: '再開', exact: true }).click();
+  await start();
   await page.clock.fastForward(10000); await evaluate();
   await until(async () => (await session()).currentQuestionId === ids[1]);
   const [record] = await records();
@@ -148,14 +150,14 @@ test('schedule day detail shows only the remaining plan, with a working carry-ov
   await until(async () => (await page.locator('.detail-item').count()) === 0);
 });
 
-test('tapping the timer stops and restarts it, and the digits turn red while stopped', options, async () => {
+test('the play slider stops and restarts the timer, and the digits turn red while stopped', options, async () => {
   await start(); await page.clock.fastForward(10000);
-  await page.getByRole('button', { name: '一時停止', exact: true }).click();
-  await page.locator('.timer-tap.paused').waitFor({ state: 'visible' });
+  await pause();
+  await page.locator('.timer-value.danger').waitFor({ state: 'visible' });
   await page.clock.fastForward(60000);
   assert.equal(await total(), 10);
-  await page.getByRole('button', { name: '再開', exact: true }).click();
-  await page.locator('.timer-tap.paused').waitFor({ state: 'detached' });
+  await start();
+  await page.locator('.timer-value.danger').waitFor({ state: 'detached' });
   await page.clock.fastForward(5000);
   assert.equal(await total(), 15);
 });
@@ -268,7 +270,7 @@ test('daily total keeps post-midnight study in the prior label and resets at 03:
   assert.equal(values.current, 10);
   assert.deepEqual(values.draft, {}); // running time is included from the live timestamp until checkpoint.
   assert.equal(values.prior, 0); assert.equal(values.next, 0);
-  await page.getByRole('button', { name: '一時停止', exact: true }).click();
+  await pause();
   const checkpointed = await session();
   assert.deepEqual(checkpointed.questionTiming[ids[0]].byDate, { '2026-09-14': 10, '2026-09-15': 10 });
   assert.equal(await total(), 10);
@@ -307,7 +309,7 @@ test('finished sub-items of a multi-question task drop out of the idle "やる�
 
 test('やること／やったこと の切り替えバーは指の動きにつれて滑る', options, async () => {
   const drag = (points) => page.evaluate((points) => {
-    const bar = document.querySelector('#screen-home .segmented');
+    const bar = document.querySelector('#screen-home .panel .segmented');
     const rect = bar.getBoundingClientRect();
     const y = rect.top + rect.height / 2;
     const fire = (type, x) => {
@@ -317,7 +319,7 @@ test('やること／やったこと の切り替えバーは指の動きにつ�
     points.forEach(([type, ratio]) => fire(type, rect.left + rect.width * ratio));
   }, points);
 
-  const thumbX = () => page.locator('#screen-home .segmented-thumb').first().evaluate((el) => el.getBoundingClientRect().x);
+  const thumbX = () => page.locator('#screen-home .panel .segmented-thumb').first().evaluate((el) => el.getBoundingClientRect().x);
   const startX = await thumbX();
 
   // 途中まで動かした時点で、指の位置に応じて中間の位置まで動いている（両端に固定されない）。
@@ -331,7 +333,7 @@ test('やること／やったこと の切り替えバーは指の動きにつ�
   await page.waitForTimeout(300);
   await page.getByRole('button', { name: /やったこと/, exact: false }).waitFor();
   assert.equal(
-    await page.locator('#screen-home .segmented button[aria-selected="true"]').textContent(),
+    await page.locator('#screen-home .panel .segmented button[aria-selected="true"]').textContent(),
     'やったこと 0',
   );
 });
@@ -358,8 +360,8 @@ test('下のタブバーは指を離さずドラッグしただけで、その�
 });
 
 test('タップで切り替えても、やること／やったこと の光は前の位置を経由してから今の位置へ動く', options, async () => {
-  await page.locator('#screen-home .segmented').first().waitFor();
-  const thumbX = () => page.locator('#screen-home .segmented-thumb').first().evaluate((el) => el.getBoundingClientRect().x);
+  await page.locator('#screen-home .panel .segmented').first().waitFor();
+  const thumbX = () => page.locator('#screen-home .panel .segmented-thumb').first().evaluate((el) => el.getBoundingClientRect().x);
   const startX = await thumbX();
   // ドラッグではなくタップでも、瞬間移動ではなく「前の位置→今の位置」の
   // 2段階でスタイルが当たっていることを、実際のCSSトランジションの経過時間

@@ -56,7 +56,8 @@ async function addRecords(count = 1) {
   }, count);
 }
 async function start() {
-  await page.getByRole('button', { name: '学習を開始', exact: true }).click();
+  // 「学習開始」ボタンは廃止し、続いているか止まっているかを表すスライダーで始める。
+  await page.getByRole('button', { name: '▶', exact: true }).click();
   return page.evaluate(async () => (await (await import('./src/api.js')).getSessionState()).sessionId);
 }
 async function end() {
@@ -159,7 +160,7 @@ test('PWA UI and backend receipt do not await provider completion', options, asy
       const { idb, STORES } = await import('./src/idb.js');
       return (await idb.get(STORES.meta, 'lastSessionEnd'))?.value?.state === 'acknowledged';
     }));
-    assert.equal(await page.getByRole('button', { name: '学習を開始', exact: true }).count(), 1);
+    assert.equal(await page.getByRole('button', { name: '▶', exact: true }).count(), 1);
     assert.equal(calls.length, 1);
   } finally {
     release?.(Response.json({ type: 'routine_fire', claude_code_session_id: 'session_E2E', claude_code_session_url: 'https://claude.ai/code/session_E2E' }));
