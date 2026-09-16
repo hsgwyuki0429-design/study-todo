@@ -454,6 +454,28 @@ async function markCompletedTasks() {
 /* 描画：上半分                                                        */
 /* ================================================================== */
 
+/**
+ * 右上の丸いボタン（戻る・終了）。「ホーム」の見出しと同じ行に置くため、
+ * renderHome() 側で view-head へ差し込む。
+ */
+function timerHeadButtons(s) {
+  const buttons = el('div', 'timer-head-buttons');
+  if (s.mode === 'record_input') {
+    // 間違って採点・暗記に進んでしまったときのために、解答中へ戻すボタンを置く。
+    const back = el('button', 'finish-btn', '戻る');
+    back.title = '解答中へ戻る';
+    back.onclick = backToSolve;
+    buttons.append(back);
+  }
+  if (s.mode === 'task_list' || s.mode === 'record_input') {
+    const finish = el('button', 'finish-btn', '終了');
+    finish.title = '学習を終了する';
+    finish.onclick = endSession;
+    buttons.append(finish);
+  }
+  return buttons.childNodes.length ? buttons : null;
+}
+
 function timerPanel() {
   const s = state.session;
   const panel = el('div', 'timer-panel');
@@ -463,47 +485,26 @@ function timerPanel() {
   const actions = el('div', 'timer-actions');
 
   if (s.mode === 'idle') {
-    label.textContent = '今日の学習時間';
+    // 学習していないときは「今日の学習時間」の文字を出さず、数字だけを
+    // できるだけ大きく・上に詰めて見せる。
     value.textContent = fmtMS(dailyElapsed());
     value.dataset.timer = 'today';
     // 解きかけの例題があるときは、そのまま「再開」と分かるようにする。
     const b = el('button', 'btn btn-primary', s.currentQuestionId ? '学習を再開' : '学習を開始');
     b.onclick = () => startSession();
     actions.append(b);
-    panel.append(label, value, actions);
+    panel.append(value, actions);
     return panel;
   }
 
-  // 「今日の学習時間」のラベルと数字を2行に分け、右上の丸い「終了」
-  // ボタンは1行目、一時停止・再開の案内は2行目（数字と同じ行）に置く。
-  const head = el('div', 'timer-head');
-  const headRow1 = el('div', 'timer-head-row');
-  headRow1.append(el('span', 'timer-total-k', '今日の学習時間'));
-  // 丸ボタンは1つのグループにまとめる。行自体が space-between のため、
-  // まとめないと「戻る」だけ中央寄りに離れてしまう。
-  const headButtons = el('div', 'timer-head-buttons');
-  if (s.mode === 'record_input') {
-    // 間違って採点・暗記に進んでしまったときのために、解答中へ戻すボタンを置く。
-    const back = el('button', 'finish-btn', '戻る');
-    back.title = '解答中へ戻る';
-    back.onclick = backToSolve;
-    headButtons.append(back);
-  }
-  if (s.mode === 'task_list' || s.mode === 'record_input') {
-    const finish = el('button', 'finish-btn', '終了');
-    finish.title = '学習を終了する';
-    finish.onclick = endSession;
-    headButtons.append(finish);
-  }
-  if (headButtons.childNodes.length) headRow1.append(headButtons);
-  head.append(headRow1);
-
-  const headRow2 = el('div', 'timer-head-row');
+  // 「今日の学習時間」の数字と、一時停止・再開の案内を1行にまとめる。
+  // 丸いボタン（戻る・終了）は「ホーム」の見出しと同じ行へ移したので、ここには置かない。
+  const totalRow = el('div', 'timer-total-row');
+  totalRow.append(el('span', 'timer-total-k', '今日の学習時間'));
   const totalValue = el('span', 'timer-total-v', fmtMS(dailyElapsed()));
   totalValue.dataset.timer = 'session';
-  headRow2.append(totalValue);
-  head.append(headRow2);
-  panel.append(head);
+  totalRow.append(totalValue);
+  panel.append(totalRow);
 
   if (s.mode === 'challenge') {
     const task = currentChallengeTask();
@@ -553,7 +554,7 @@ function timerPanel() {
   tap.append(value);
   // 「タップで再開」などの案内は、タイマーの数字より上（今日の学習時間と同じ行）に置く。
   const hint = el('span', `timer-hint${paused ? ' paused' : ''}`, paused ? '▶ タップで再開' : '❚❚ タップで一時停止');
-  headRow2.append(hint);
+  totalRow.append(hint);
 
   // ラベル（問題名や状態）の文字数で表示が変わっても数字の位置がずれないよう、
   // ラベルは数字の下に置く。
@@ -783,8 +784,10 @@ export function renderHome(screen) {
   const s = state.session;
   screen.innerHTML = '';
   screen.dataset.mode = s.mode;
-  const head = el('div', 'view-head');
+  const head = el('div', 'view-head view-head-row');
   head.append(el('h1', 'view-title', 'ホーム'));
+  const headButtons = timerHeadButtons(s);
+  if (headButtons) head.append(headButtons);
   screen.append(head);
   screen.append(timerPanel());
 
