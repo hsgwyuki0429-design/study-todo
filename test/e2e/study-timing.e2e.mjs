@@ -68,7 +68,7 @@ test('solve → review with pauses → result → next example, with measured fi
   await page.clock.fastForward(10000); await review();
   assert.equal((await session()).mode, 'record_input');
   await page.clock.fastForward(20000);
-  assert.equal(await page.locator('[data-timer="main"]').textContent(), '00:20');
+  assert.equal(await total(), 90);
   await pause();
   await page.clock.fastForward(120000);
   await start();
@@ -153,7 +153,7 @@ test('schedule day detail shows only the remaining plan, with a working carry-ov
   await until(async () => (await page.locator('.detail-item').count()) === 0);
 });
 
-test('the play slider stops and restarts the timer, and the center digits show the daily total while stopped', options, async () => {
+test('the play slider stops and restarts the timer, and the center digits always show the daily total', options, async () => {
   await start(); await page.clock.fastForward(10000);
   await pause();
   await page.clock.fastForward(60000);
@@ -162,7 +162,7 @@ test('the play slider stops and restarts the timer, and the center digits show t
   await start();
   await page.clock.fastForward(5000);
   assert.equal(await total(), 15);
-  assert.equal(await page.locator('.timer-value').getAttribute('data-timer'), 'main');
+  assert.equal(await page.locator('.timer-value').getAttribute('data-timer'), 'today');
 });
 
 test('double evaluation tap and competing draft commits save one result; failed undo is atomic', options, async () => {
