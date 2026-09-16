@@ -455,14 +455,16 @@ async function markCompletedTasks() {
 /* ================================================================== */
 
 /**
- * 右上に置く、今日の学習時間（全体）。「終了」の概念は廃止したので、
- * 常にこの一つだけを、できるだけ大きく表示する。
+ * 右上に置くタイマー。「終了」の概念は廃止したので、常にこの一つだけを、
+ * できるだけ大きく表示する。真ん中のタイマーが合計に切り替わる（止まっている）
+ * あいだは、代わりにここへ今の例題の時間を出す。動いているときは今日の合計。
  * 「ホーム」の見出しと同じ行に置くため、renderHome() 側で view-head へ差し込む。
  */
 function timerHeadRight(s) {
   const right = el('div', 'view-head-right');
-  const totalValue = el('span', 'timer-total-v', fmtMS(dailyElapsed()));
-  totalValue.dataset.timer = 'session';
+  const paused = (s.mode === 'task_list' || s.mode === 'record_input') && isPaused();
+  const totalValue = el('span', 'timer-total-v', fmtMS(paused ? currentTimerSeconds() : dailyElapsed()));
+  totalValue.dataset.timer = paused ? 'main' : 'session';
   right.append(totalValue);
   if (s.mode === 'record_input') {
     // 間違って採点・暗記に進んでしまったときのために、解答中へ戻すボタンを置く。
