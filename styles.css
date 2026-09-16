@@ -92,6 +92,8 @@
    中の要素だけに任せ、上下スワイプでページ全体が動く（ゴムのように
    引っぱられる）のを防ぐ。 */
 html, body { height: 100%; margin: 0; overflow: hidden; overscroll-behavior: none; }
+/* iOSのタップハイライトはbuttonだけに付けても効かないことがあるため、ルートにも指定する。 */
+html { -webkit-tap-highlight-color: rgba(0, 0, 0, 0); }
 
 body {
   background: var(--bg);
@@ -110,9 +112,13 @@ button {
   border: none;
   padding: 0;
   cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
   /* モバイルブラウザの標準タップハイライト（灰色の一瞬の点滅）を消す。
-     押した見た目は、こちらで用意した :active や選択の光だけで表す。 */
-  -webkit-tap-highlight-color: transparent;
+     押した見た目は、こちらで用意した :active や選択の光だけで表す。
+     "transparent" キーワードだと効かない端末があるため rgba で明示する。 */
+  -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+  -webkit-touch-callout: none;
 }
 
 #app {
@@ -158,6 +164,9 @@ button {
   left: 0;
   border-radius: 12px;
   background: var(--accent-bg);
+  /* タブバーの背景も白に近く、塗りだけでは動きがほとんど見えないため、
+     「やること／やったこと」の光と同じ影を付けて、はっきり浮かせる。 */
+  box-shadow: var(--segment-shadow);
   transition: transform .32s cubic-bezier(.2, .8, .3, 1);
   pointer-events: none;
   z-index: 0;
