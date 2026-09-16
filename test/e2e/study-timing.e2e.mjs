@@ -335,3 +335,24 @@ test('やること／やったこと の切り替えバーは指の動きにつ�
     'やったこと 0',
   );
 });
+
+test('下のタブバーは指を離さずドラッグしただけで、その上に来たタブへ切り替わる', options, async () => {
+  const homeBox = await page.locator('.tabbar button[data-tab="home"]').boundingBox();
+  const scheduleBox = await page.locator('.tabbar button[data-tab="schedule"]').boundingBox();
+  const fire = (type, box) => page.evaluate(({ type, x, y }) => {
+    const bar = document.querySelector('.tabbar');
+    const touch = new Touch({ identifier: 1, target: bar, clientX: x, clientY: y });
+    bar.dispatchEvent(new TouchEvent(type, { touches: type === 'touchend' ? [] : [touch], changedTouches: [touch], bubbles: true, cancelable: true }));
+  }, { type, x: box.x + box.width / 2, y: box.y + box.height / 2 });
+
+  await fire('touchstart', homeBox);
+  await fire('touchmove', scheduleBox);
+  await page.waitForTimeout(100);
+  // touchend していない時点で、すでにスケジュールへ切り替わっている。
+  assert.equal(
+    await page.evaluate(() => document.querySelector('.tabbar button[aria-selected="true"]').dataset.tab),
+    'schedule',
+  );
+  assert.equal(await page.evaluate(() => document.querySelector('#screen-schedule').hidden), false);
+  await fire('touchend', scheduleBox);
+});

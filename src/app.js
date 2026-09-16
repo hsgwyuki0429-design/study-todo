@@ -46,6 +46,19 @@ function renderAll() {
   });
 }
 
+/** タブを切り替える。押したときも、ドラッグして上に乗ったときも、これを呼ぶ。 */
+function activateTab(name) {
+  if (name === state.tab) return;
+  // スケジュールは、タブに乗るたびに今日を真ん中へ持ってくる。
+  if (name === 'schedule') {
+    state.schedule.selectedDate = null;
+    state.schedule.centerToday = true;
+  }
+  state.tab = name;
+  render();
+  if (name === 'schedule') syncInBackground();
+}
+
 function buildTabBar() {
   const bar = $('.tabbar');
   bar.innerHTML = '';
@@ -65,18 +78,25 @@ function buildTabBar() {
     };
     m.innerHTML = `<svg viewBox="0 0 28 28" fill="currentColor" focusable="false">${paths[name]}</svg>`;
     b.append(m, document.createTextNode(label));
-    b.onclick = () => {
-      // スケジュールは、タブを押すたびに今日を真ん中へ持ってくる。
-      if (name === 'schedule') {
-        state.schedule.selectedDate = null;
-        state.schedule.centerToday = true;
-      }
-      state.tab = name;
-      render();
-      if (name === 'schedule') syncInBackground();
-    };
+    b.onclick = () => activateTab(name);
     bar.append(b);
   }
+
+  // 「やること／やったこと」のスライドと同じ仕組みで、指を離さなくても
+  // ドラッグしてアイコンの上に来た時点でそのタブが青くなる（切り替わる）。
+  let dragging = false;
+  bar.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    dragging = true;
+  }, { passive: true });
+  bar.addEventListener('touchmove', (e) => {
+    if (!dragging) return;
+    const touch = e.touches[0];
+    const btn = document.elementFromPoint(touch.clientX, touch.clientY)?.closest('.tabbar button');
+    if (btn) activateTab(btn.dataset.tab);
+  }, { passive: true });
+  bar.addEventListener('touchend', () => { dragging = false; }, { passive: true });
+  bar.addEventListener('touchcancel', () => { dragging = false; }, { passive: true });
 }
 
 function bindImportDialog() {
