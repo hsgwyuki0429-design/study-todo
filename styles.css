@@ -907,11 +907,7 @@ body { background: var(--bg-sub); font-family: -apple-system, BlinkMacSystemFont
 }
 #screen-home .panel > .list, #screen-home .eval-list { border-radius: var(--radius-group); background: var(--bg); }
 .empty { padding: 26px 12px; font-size: 15px; }
-/* 学習中は見出しを小さくたたみ、そのぶん「今日やること」を1行でも多く見せる。 */
-#screen-home:not([data-mode='idle']) .view-head {
-  min-height: 0;
-  padding: calc(8px + env(safe-area-inset-top)) var(--page-gutter) 2px;
-}
+/* 「ホーム」の見出しは、学習中かどうかで位置がずれないよう常に同じ余白にする。 */
 #screen-home:not([data-mode='idle']) .timer-panel { padding-top: 4px; padding-bottom: 10px; }
 .timer-total-k { font-size: 12px; }
 .timer-total-v { font-size: 15px; }
