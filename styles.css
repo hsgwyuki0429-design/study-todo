@@ -135,6 +135,8 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   border-top: 1px solid var(--line);
   background: var(--bg);
   padding-bottom: env(safe-area-inset-bottom);
+  /* 指でなぞって切り替えるための領域。ブラウザ標準のスクロールに取られないようにする。 */
+  touch-action: none;
 }
 
 .tabbar button {
