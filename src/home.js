@@ -549,7 +549,9 @@ function timerPanel() {
   tap.onclick = togglePause;
   tap.append(value, el('span', 'timer-hint', paused ? '▶ タップで再開' : '❚❚ タップで一時停止'));
 
-  panel.append(label, tap);
+  // ラベル（問題名や状態）の文字数で表示が変わっても数字の位置がずれないよう、
+  // ラベルは数字の下に置く。
+  panel.append(tap, label);
   return panel;
 }
 
