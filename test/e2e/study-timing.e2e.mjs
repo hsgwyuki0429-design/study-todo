@@ -42,7 +42,7 @@ const records = () => page.evaluate(async () => (await import('./src/api.js')).l
 // 「学習開始」ボタンは廃止し、続いているか止まっているかを表すスライダー
 // （やること／やったこと と同じ仕組み）で代わりに始める・再開する。
 async function start() { await page.getByRole('button', { name: '▶', exact: true }).click(); }
-async function pause() { await page.getByRole('button', { name: '⏹', exact: true }).click(); }
+async function pause() { await page.getByRole('button', { name: '■', exact: true }).click(); }
 async function review() {
   // 解いている行（色が変わっている行）をもう一度押すと採点へ進む。
   await page.locator('#screen-home .row.active, #screen-home .row.current').first().click();

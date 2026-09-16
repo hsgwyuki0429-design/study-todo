@@ -483,7 +483,7 @@ function playSlider(s) {
   const paused = s.mode === 'idle' ? true : isPaused();
   const current = paused ? 'stop' : 'play';
   const bar = segmented(
-    [['stop', '⏹'], ['play', '▶']],
+    [['stop', '■'], ['play', '▶']],
     current,
     (value) => {
       if (value === current) return;
