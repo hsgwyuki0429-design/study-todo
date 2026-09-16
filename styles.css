@@ -103,7 +103,17 @@ body {
   overscroll-behavior: none;
 }
 
-button { font: inherit; color: inherit; background: none; border: none; padding: 0; cursor: pointer; }
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  /* モバイルブラウザの標準タップハイライト（灰色の一瞬の点滅）を消す。
+     押した見た目は、こちらで用意した :active や選択の光だけで表す。 */
+  -webkit-tap-highlight-color: transparent;
+}
 
 #app {
   display: flex;
@@ -148,7 +158,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   left: 0;
   border-radius: 12px;
   background: var(--accent-bg);
-  transition: transform .18s cubic-bezier(.2, .8, .3, 1);
+  transition: transform .32s cubic-bezier(.2, .8, .3, 1);
   pointer-events: none;
   z-index: 0;
 }
@@ -866,7 +876,7 @@ body { background: var(--bg-sub); font-family: -apple-system, BlinkMacSystemFont
   border-radius: 8px;
   background: var(--bg);
   box-shadow: var(--segment-shadow);
-  transition: transform .18s cubic-bezier(.2, .8, .3, 1);
+  transition: transform .32s cubic-bezier(.2, .8, .3, 1);
   pointer-events: none;
 }
 #screen-home .panel > .list, #screen-home .eval-list { border-radius: var(--radius-group); background: var(--bg); }
