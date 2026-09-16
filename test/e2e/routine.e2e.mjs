@@ -62,9 +62,10 @@ async function start() {
 }
 async function end() {
   // Simultaneous handlers model a double tap before IndexedDB completes.
-  await page.evaluate(() => {
-    const button = [...document.querySelectorAll('button')].find((b) => b.textContent === '終了');
-    button.click(); button.click();
+  // 「終了」ボタンは廃止したので、home.js の endSession() を直接ダブルで呼ぶ。
+  await page.evaluate(async () => {
+    const home = await import('./src/home.js');
+    home.endSession(); home.endSession();
   });
   await until(() => page.evaluate(async () => !(await (await import('./src/api.js')).getSessionState()).active));
 }
@@ -210,7 +211,8 @@ test('evaluation write finishes before end, and an already-running sync cannot f
     };
     render();
     document.querySelector('.eval-btn:last-child').click();
-    [...document.querySelectorAll('button')].find((b) => b.textContent === '終了').click();
+    const home = await import('./src/home.js');
+    home.endSession();
   });
   try {
     assert.equal(await page.evaluate(async () => (await (await import('./src/api.js')).getSessionState()).active), true);
