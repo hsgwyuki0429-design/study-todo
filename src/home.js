@@ -717,7 +717,7 @@ function taskListPanel(panel) {
 }
 
 function evalPanel(panel, heading, note) {
-  panel.append(el('div', 'panel-head', heading));
+  if (heading) panel.append(el('div', 'panel-head', heading));
   const list = el('div', 'eval-list');
   for (const ev of EVALUATIONS) {
     const b = el('button', 'eval-btn');
@@ -785,9 +785,10 @@ export function renderHome(screen) {
   const panel = el('div', 'panel');
   if (s.mode === 'idle') idlePanel(panel);
   else if (s.mode === 'record_input') {
-    const timing = questionTiming(s, s.currentQuestionId);
-    panel.append(el('div', 'note', '解答 ' + fmtMS(timing.solveSeconds) + ' ／ ここからは採点・暗記時間として計測します'));
-    evalPanel(panel, qLabel(s.currentQuestionId) + ' の採点・暗記が終わったら結果を記入', '結果を保存すると、次の例題を開始します');
+    // 「解答◯◯／ここからは採点・暗記時間として...」の説明と見出しは、
+    // タイマー下の状態表示（採点・暗記中）と重複するため出さない。
+    // そのぶん結果ボタンをタイマーのすぐ下へ詰める。
+    evalPanel(panel, null, '結果を保存すると、次の例題を開始します');
   }
   else if (s.mode === 'challenge') challengePanel(panel);
   else if (s.mode === 'challenge_review')
