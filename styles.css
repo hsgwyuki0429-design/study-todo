@@ -130,6 +130,7 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
 /* ---------- タブバー ---------- */
 
 .tabbar {
+  position: relative;
   display: flex;
   flex: none;
   border-top: 1px solid var(--line);
@@ -139,7 +140,22 @@ button { font: inherit; color: inherit; background: none; border: none; padding:
   touch-action: none;
 }
 
+/* 選ばれているタブの下に敷く、少し明るい透明の丸めの四角。
+   「やること／やったこと」の光と同じく、指でつまんで動かす感じにする。 */
+.tab-thumb {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: 12px;
+  background: var(--accent-bg);
+  transition: transform .18s cubic-bezier(.2, .8, .3, 1);
+  pointer-events: none;
+  z-index: 0;
+}
+
 .tabbar button {
+  position: relative;
+  z-index: 1;
   flex: 1;
   min-height: 56px;
   font-size: 11px;

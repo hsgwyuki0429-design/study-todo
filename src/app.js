@@ -46,9 +46,17 @@ function renderAll() {
   });
 }
 
+// タブバーのドラッグ中は、選ばれた光（thumb）を指の生の位置にそのままつける。
+// 離れているあいだは、この関数で選ばれているタブの真下へきちんと合わせる。
+let placeTabThumb = null;
+let tabBarDragging = false;
+
 /** タブを切り替える。押したときも、ドラッグして上に乗ったときも、これを呼ぶ。 */
 function activateTab(name) {
-  if (name === state.tab) return;
+  if (name === state.tab) {
+    if (!tabBarDragging) placeTabThumb?.(name, true);
+    return;
+  }
   // スケジュールは、タブに乗るたびに今日を真ん中へ持ってくる。
   if (name === 'schedule') {
     state.schedule.selectedDate = null;
@@ -57,11 +65,20 @@ function activateTab(name) {
   state.tab = name;
   render();
   if (name === 'schedule') syncInBackground();
+  // ドラッグ中は指の生の位置を追わせているので、ここでは動かさない。
+  if (!tabBarDragging) placeTabThumb?.(name, true);
 }
 
 function buildTabBar() {
   const bar = $('.tabbar');
   bar.innerHTML = '';
+  // 「やること／やったこと」と同じ、少し明るい透明の丸めの四角（光）。
+  // 指でつまんで動かしている感じを出すため、独立した要素にして裏に敷く。
+  const thumb = document.createElement('div');
+  thumb.className = 'tab-thumb';
+  bar.append(thumb);
+
+  const buttons = [];
   for (const [name, label, mark] of TABS) {
     const b = document.createElement('button');
     b.setAttribute('role', 'tab');
@@ -80,23 +97,45 @@ function buildTabBar() {
     b.append(m, document.createTextNode(label));
     b.onclick = () => activateTab(name);
     bar.append(b);
+    buttons.push(b);
   }
 
+  placeTabThumb = (name, animate) => {
+    const btn = buttons.find((b) => b.dataset.tab === name);
+    if (!btn) return;
+    thumb.style.transition = animate ? '' : 'none';
+    thumb.style.width = `${btn.offsetWidth}px`;
+    thumb.style.height = `${btn.offsetHeight}px`;
+    thumb.style.transform = `translate(${btn.offsetLeft}px, ${btn.offsetTop}px)`;
+  };
+  // ボタンの実寸はレイアウト確定後に決まるので、初期位置合わせは次のフレームで。
+  requestAnimationFrame(() => placeTabThumb(state.tab, false));
+
   // 「やること／やったこと」のスライドと同じ仕組みで、指を離さなくても
-  // ドラッグしてアイコンの上に来た時点でそのタブが青くなる（切り替わる）。
-  let dragging = false;
+  // ドラッグしてアイコンの上に来た時点でそのタブへ切り替わる。
+  // 光そのものは指の生の位置に追従させ、つまんで動かしている感じを出す。
   bar.addEventListener('touchstart', (e) => {
     if (e.touches.length !== 1) return;
-    dragging = true;
+    tabBarDragging = true;
+    thumb.style.transition = 'none';
   }, { passive: true });
   bar.addEventListener('touchmove', (e) => {
-    if (!dragging) return;
+    if (!tabBarDragging) return;
     const touch = e.touches[0];
     const btn = document.elementFromPoint(touch.clientX, touch.clientY)?.closest('.tabbar button');
     if (btn) activateTab(btn.dataset.tab);
+    const barRect = bar.getBoundingClientRect();
+    const width = thumb.offsetWidth || barRect.width / TABS.length;
+    const x = Math.min(barRect.width - width, Math.max(0, touch.clientX - barRect.left - width / 2));
+    thumb.style.transform = `translate(${x}px, ${buttons[0].offsetTop}px)`;
   }, { passive: true });
-  bar.addEventListener('touchend', () => { dragging = false; }, { passive: true });
-  bar.addEventListener('touchcancel', () => { dragging = false; }, { passive: true });
+  const endDrag = () => {
+    if (!tabBarDragging) return;
+    tabBarDragging = false;
+    placeTabThumb(state.tab, true);
+  };
+  bar.addEventListener('touchend', endDrag, { passive: true });
+  bar.addEventListener('touchcancel', endDrag, { passive: true });
 }
 
 function bindImportDialog() {
