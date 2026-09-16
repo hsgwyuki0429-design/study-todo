@@ -56,12 +56,22 @@ function rangeLabel(questionIds) {
 
 function carryOverPanel(dateKey, task, pending, rerender) {
   const panel = el('div', 'attempt-detail');
-  panel.append(el('div', null, `未実施の${pending.length}件を移します。理由（任意）を選んでください。`));
+  panel.append(el('div', null, `未実施の${pending.length}件を移します。移動先の日付と理由（任意）を選んでください。`));
+
+  // 既定値は「今日」（過ぎた日）か「翌日」（これからの日）。ここから選び直せる。
+  const defaultTarget = dateKey < todayKey() ? todayKey() : api.todayKey(new Date(Date.parse(`${dateKey}T00:00:00`) + 86400000));
+  const dateInput = el('input', 'cloud-input');
+  dateInput.type = 'date';
+  dateInput.min = todayKey();
+  dateInput.value = defaultTarget;
+  panel.append(dateInput);
+
   const actions = el('div', 'setting-actions');
-  const target = dateKey < todayKey() ? todayKey() : api.todayKey(new Date(Date.parse(`${dateKey}T00:00:00`) + 86400000));
   for (const reason of MOVE_REASONS) {
     const button = el('button', 'btn', MOVE_REASON_LABELS[reason]);
     button.onclick = async () => {
+      const target = dateInput.value;
+      if (!target) { dateInput.reportValidity?.(); return; }
       await api.carryOverPlanItems({
         fromDate: dateKey,
         taskId: task.id,
@@ -83,7 +93,7 @@ function carryOverPanel(dateKey, task, pending, rerender) {
     rerender();
   };
   actions.append(cancel);
-  panel.append(el('div', null, `移動先: ${fmtDate(target)}`), actions);
+  panel.append(actions);
   return panel;
 }
 
