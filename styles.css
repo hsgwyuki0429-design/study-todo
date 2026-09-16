@@ -567,22 +567,23 @@ input[type='password'] { width: 100%; }
 .sq-done.tone-teal { background: var(--teal); }
 .sq-done.tone-idle { background: var(--fg-faint); }
 
-/* 予定（未実施）は、色（bg-sub）だけだと薄すぎて見づらいので黒い枠で囲む。
+/* 予定（未実施）は、色（bg-sub）だけだと薄すぎて見づらいので枠で囲む。
+   色はボタンなどほかの枠線と同じ --line-strong を使う。
    隣どうしはくっついたまま（内側に縦線は入れない）で、上下の辺と、
    ひと続きの両端（左右）だけに枠を付ける。
    繰り越しかどうかは枠で目立たせず、タップしたときの説明文だけで示す。 */
-.sq-plan { box-shadow: inset 0 1px 0 var(--fg), inset 0 -1px 0 var(--fg); }
+.sq-plan { box-shadow: inset 0 1px 0 var(--line-strong), inset 0 -1px 0 var(--line-strong); }
 /* 予定は実績のあとに並ぶ実装なので、先頭の予定マスと末尾のマスが
    ひと続きの左右の端になる。 */
 .sq-strip > :not(.sq-plan) + .sq-plan,
 .sq-strip > .sq-plan:first-child {
-  box-shadow: inset 0 1px 0 var(--fg), inset 0 -1px 0 var(--fg), inset 1px 0 0 var(--fg);
+  box-shadow: inset 0 1px 0 var(--line-strong), inset 0 -1px 0 var(--line-strong), inset 1px 0 0 var(--line-strong);
 }
 .sq-plan:last-child {
-  box-shadow: inset 0 1px 0 var(--fg), inset 0 -1px 0 var(--fg), inset -1px 0 0 var(--fg);
+  box-shadow: inset 0 1px 0 var(--line-strong), inset 0 -1px 0 var(--line-strong), inset -1px 0 0 var(--line-strong);
 }
 .sq-plan:first-child:last-child {
-  box-shadow: inset 0 1px 0 var(--fg), inset 0 -1px 0 var(--fg), inset 1px 0 0 var(--fg), inset -1px 0 0 var(--fg);
+  box-shadow: inset 0 1px 0 var(--line-strong), inset 0 -1px 0 var(--line-strong), inset 1px 0 0 var(--line-strong), inset -1px 0 0 var(--line-strong);
 }
 
 .sq-tappable { cursor: pointer; }
