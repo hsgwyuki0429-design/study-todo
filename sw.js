@@ -1,6 +1,6 @@
 // オフラインでも起動できるよう、アプリシェルをキャッシュする。
 // 学習データは IndexedDB にあるため、Service Worker はデータを扱わない。
-const CACHE = 'aochart-v25';
+const CACHE = 'aochart-v26';
 const SHELL = [
   './',
   './index.html',

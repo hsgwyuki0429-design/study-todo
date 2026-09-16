@@ -356,3 +356,33 @@ test('下のタブバーは指を離さずドラッグしただけで、その�
   assert.equal(await page.evaluate(() => document.querySelector('#screen-schedule').hidden), false);
   await fire('touchend', scheduleBox);
 });
+
+test('タップで切り替えても、やること／やったこと の光は前の位置を経由してから今の位置へ動く', options, async () => {
+  await page.locator('#screen-home .segmented').first().waitFor();
+  const thumbX = () => page.locator('#screen-home .segmented-thumb').first().evaluate((el) => el.getBoundingClientRect().x);
+  const startX = await thumbX();
+  // ドラッグではなくタップでも、瞬間移動ではなく「前の位置→今の位置」の
+  // 2段階でスタイルが当たっていることを、実際のCSSトランジションの経過時間
+  // に頼らず（疑似クロック環境でも安定するよう）スタイル変更の履歴で確かめる。
+  await page.evaluate(() => {
+    window.__thumbTransforms = [];
+    const observer = new MutationObserver((records) => {
+      for (const r of records) {
+        if (r.target.classList.contains('segmented-thumb')) window.__thumbTransforms.push(r.target.style.transform);
+      }
+    });
+    observer.observe(document.querySelector('#screen-home'), { attributes: true, attributeFilter: ['style'], subtree: true });
+    window.__thumbObserver = observer;
+  });
+  await page.getByRole('button', { name: /やったこと/ }).click();
+  // 入れ子の requestAnimationFrame は、疑似クロックでは1回の fastForward では
+  // 両方まとめて発火しないことがあるため、少しずつ複数回進める。
+  for (let i = 0; i < 5; i++) await page.clock.fastForward(50);
+  await page.waitForTimeout(250); // CSSトランジション自体は実時間で進む
+  await page.evaluate(() => window.__thumbObserver.disconnect());
+  const transforms = await page.evaluate(() => window.__thumbTransforms);
+  const finalX = await thumbX();
+  assert.notEqual(finalX, startX, '最終的には位置が変わっている');
+  assert.ok(transforms.length >= 2, `位置合わせが前の位置→今の位置の2段階になっていない: ${JSON.stringify(transforms)}`);
+  assert.notEqual(transforms[0], transforms[transforms.length - 1], '最初と最後で同じ位置ではない（経由地点がある）');
+});
