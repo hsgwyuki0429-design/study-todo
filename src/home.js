@@ -475,7 +475,10 @@ function timerHeadRight(s) {
   }
   if ((s.mode === 'task_list' || s.mode === 'record_input') && s.currentQuestionId) {
     // 今解いている例題の時間だけを0秒に戻す（学習中でも一時停止中でも押せる）。
-    const reset = el('button', 'finish-btn', '🔄');
+    // 絵文字（🔄）は端末によって色付きで表示されてしまうため、■と同じく
+    // 常にテキストと同じ色で描かれる図形（インラインSVG）にする。
+    const reset = el('button', 'finish-btn');
+    reset.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" focusable="false" aria-hidden="true"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.44 10.9h-2.09A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>';
     reset.title = 'この例題の時間を0秒に戻す';
     reset.setAttribute('aria-label', 'この例題の時間を0秒に戻す');
     reset.onclick = resetCurrentQuestion;
