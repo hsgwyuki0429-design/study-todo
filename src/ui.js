@@ -47,25 +47,24 @@ export function row({ title, sub, right, onClick, classes = [] }) {
 // この画面にいまある segmented() が最後にどの値を選んでいたか。
 // render() のたびにバー全体を作り直すので、タップで切り替えたときも
 // 「前の位置→今の位置」へ滑らせるために、作り直しをまたいで覚えておく。
-let lastSegmentedValue = null;
-// バー上のドラッグそのものが、離した時点ですでに指の位置へ光を動かし終えて
-// いる場合は true。作り直し後にもう一度アニメーションさせると二重に動いて
-// 見えるので、そのときだけ滑らせ直しを省く。
-let lastSegmentedChangeWasDrag = false;
+// 1画面に複数のバー（やること／やったこと、再生スライダーなど）が同時に
+// あっても混ざらないよう、呼び出し側が渡す key ごとに分けて覚える。
+const lastSegmentedState = new Map();
 
 /**
- * やること／やったことの切り替えバー。選ばれている側の背景（丸い光）は
- * 独立した要素（thumb）にして、指でつまんで動かしているあいだはその指に
- * そのままついてくるようにする。離した位置で近いほうへ切り替わる。
+ * やること／やったことの切り替えバー（や、同じ仕組みの再生スライダーなど）。
+ * 選ばれている側の背景（丸い光）は独立した要素（thumb）にして、指でつまんで
+ * 動かしているあいだはその指にそのままついてくるようにする。
+ * 離した位置で近いほうへ切り替わる。
  *
  * タップやスワイプなど、バーの外からの切り替えでも、前の位置から今の位置へ
  * 光が滑って見えるようにする（render() のたびにバーを作り直すため）。
  */
-export function segmented(options, current, onSelect) {
-  const previousValue = lastSegmentedValue;
-  const changedByDrag = lastSegmentedChangeWasDrag;
-  lastSegmentedValue = current;
-  lastSegmentedChangeWasDrag = false;
+export function segmented(options, current, onSelect, key = 'default') {
+  const prev = lastSegmentedState.get(key);
+  const previousValue = prev?.value ?? null;
+  const changedByDrag = prev?.viaDrag ?? false;
+  lastSegmentedState.set(key, { value: current, viaDrag: false });
 
   const bar = el('div', 'segmented');
   const thumb = el('div', 'segmented-thumb');
@@ -124,7 +123,7 @@ export function segmented(options, current, onSelect) {
     const dx = e.changedTouches[0].clientX - dragStartX;
     const from = indexOf(current);
     const to = Math.min(buttons.length - 1, Math.max(0, from + (dx > 30 ? 1 : dx < -30 ? -1 : 0)));
-    if (to !== from) { lastSegmentedChangeWasDrag = true; onSelect(options[to][0]); }
+    if (to !== from) { lastSegmentedState.set(key, { value: options[to][0], viaDrag: true }); onSelect(options[to][0]); }
     else placeThumb(from, true);
     e.stopPropagation();
   }, { passive: true });
