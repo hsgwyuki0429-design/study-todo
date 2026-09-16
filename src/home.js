@@ -474,16 +474,12 @@ function timerPanel() {
     return panel;
   }
 
-  // 全体の学習時間（左上に小さく）と、右上の丸い「終了」ボタンを1段にまとめる。
-  // 横に並べることでタイマーの数字をそのぶん上へ詰められる。
+  // 「今日の学習時間」のラベルと数字を2行に分け、右上の丸い「終了」
+  // ボタンは1行目、一時停止・再開の案内は2行目（数字と同じ行）に置く。
   const head = el('div', 'timer-head');
-  const total = el('div', 'timer-total');
-  total.append(el('span', 'timer-total-k', '今日の学習時間'));
-  const totalValue = el('span', 'timer-total-v', fmtMS(dailyElapsed()));
-  totalValue.dataset.timer = 'session';
-  total.append(totalValue);
-  head.append(total);
-  // 丸ボタンは1つのグループにまとめる。head 自体が space-between のため、
+  const headRow1 = el('div', 'timer-head-row');
+  headRow1.append(el('span', 'timer-total-k', '今日の学習時間'));
+  // 丸ボタンは1つのグループにまとめる。行自体が space-between のため、
   // まとめないと「戻る」だけ中央寄りに離れてしまう。
   const headButtons = el('div', 'timer-head-buttons');
   if (s.mode === 'record_input') {
@@ -499,7 +495,14 @@ function timerPanel() {
     finish.onclick = endSession;
     headButtons.append(finish);
   }
-  if (headButtons.childNodes.length) head.append(headButtons);
+  if (headButtons.childNodes.length) headRow1.append(headButtons);
+  head.append(headRow1);
+
+  const headRow2 = el('div', 'timer-head-row');
+  const totalValue = el('span', 'timer-total-v', fmtMS(dailyElapsed()));
+  totalValue.dataset.timer = 'session';
+  headRow2.append(totalValue);
+  head.append(headRow2);
   panel.append(head);
 
   if (s.mode === 'challenge') {
@@ -547,7 +550,10 @@ function timerPanel() {
   // 読み上げ・自動テストからは「一時停止」「再開」のボタンとして見えるようにする。
   tap.setAttribute('aria-label', paused ? '再開' : '一時停止');
   tap.onclick = togglePause;
-  tap.append(value, el('span', 'timer-hint', paused ? '▶ タップで再開' : '❚❚ タップで一時停止'));
+  tap.append(value);
+  // 「タップで再開」などの案内は、タイマーの数字より上（今日の学習時間と同じ行）に置く。
+  const hint = el('span', `timer-hint${paused ? ' paused' : ''}`, paused ? '▶ タップで再開' : '❚❚ タップで一時停止');
+  headRow2.append(hint);
 
   // ラベル（問題名や状態）の文字数で表示が変わっても数字の位置がずれないよう、
   // ラベルは数字の下に置く。
