@@ -229,12 +229,26 @@ async function togglePause() {
   render();
 }
 
-/** いま解いている例題の時間を0秒に戻す。問題は切り替えず、計測だけやり直す。 */
+/**
+ * いま解いている例題の時間を0秒に戻す。問題は切り替えず、計測だけやり直す。
+ * すでに0秒（一度リセットしたあと、まだ動かしていない）のまま押したときは、
+ * 今度は例題の選択そのものを外す（やることリストのただの1件に戻す）。
+ */
 async function resetCurrentQuestion() {
   if (recording || endingSession) return;
   const s = state.session;
   const qid = s.currentQuestionId;
   if (!qid) return;
+  if (elapsedOf(qid) === 0) {
+    if (s.mode === 'record_input') s.mode = 'task_list';
+    s.currentQuestionId = null;
+    s.currentStartedAt = null;
+    s.currentPlanItemId = null;
+    s.currentPlanTaskId = null;
+    await persist();
+    render();
+    return;
+  }
   delete s.questionElapsed[qid];
   if (s.questionTiming) delete s.questionTiming[qid];
   if (s.currentStartedAt) s.currentStartedAt = new Date().toISOString();

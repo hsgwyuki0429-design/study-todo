@@ -49,6 +49,7 @@ async function review() {
   await page.locator('.eval-btn').first().waitFor({ state: 'visible' });
 }
 async function evaluate() { await page.locator('.eval-btn').first().click(); await until(async () => (await records()).length > 0); }
+async function resetTimer() { await page.getByRole('button', { name: 'この例題の時間を0秒に戻す', exact: true }).click(); }
 // 「終了」ボタンは廃止した（終了の概念自体を無くしたため）。テストからは
 // home.js の endSession() を直接呼んで、ボタンなしで同じ動作を再現する。
 async function finish() { await page.evaluate(async () => (await import('./src/home.js')).endSession()); }
@@ -163,6 +164,19 @@ test('the play slider stops and restarts the timer, and the center digits always
   await page.clock.fastForward(5000);
   assert.equal(await total(), 15);
   assert.equal(await page.locator('.timer-value').getAttribute('data-timer'), 'today');
+});
+
+test('reset button zeroes the paused example, then clears its selection on the next press', options, async () => {
+  await start(); await page.clock.fastForward(15000);
+  await pause();
+  assert.equal((await session()).currentQuestionId, ids[0]);
+  await resetTimer();
+  await until(async () => !(await session()).questionElapsed[ids[0]]);
+  assert.equal((await session()).currentQuestionId, ids[0]);
+  await resetTimer();
+  await until(async () => (await session()).currentQuestionId == null);
+  assert.equal((await session()).currentQuestionId, null);
+  assert.equal((await session()).mode, 'task_list');
 });
 
 test('double evaluation tap and competing draft commits save one result; failed undo is atomic', options, async () => {
