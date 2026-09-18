@@ -1,6 +1,6 @@
 {
-  "name": "青チャート学習管理",
-  "short_name": "青チャート",
+  "name": "study todo",
+  "short_name": "study todo",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
