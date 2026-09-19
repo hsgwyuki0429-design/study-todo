@@ -654,8 +654,16 @@ function questionSub(questionId) {
   return question.title || [question.chapter, question.section].filter(Boolean).join(' ・ ') || null;
 }
 
-/** まとめて出す行の2段目。題名は決められないので、章・単元を出す。 */
+/**
+ * まとめて出す行（「基本例題 3〜4」など）の2段目。
+ * まとめられていても何の問題かは分かるようにしたいので、題名を順に並べて出す。
+ * 題名を持たない EXERCISES だけの行は、代わりに章・単元を出す。
+ */
 function groupSub(questionIds) {
+  const titles = questionIds.map((id) => q(id)?.title).filter(Boolean);
+  // 数が多い行で題名が何行にもなってしまわないよう、3件までにする。
+  if (titles.length > 3) return `${titles.slice(0, 3).join(' ／ ')} ほか${titles.length - 3}件`;
+  if (titles.length) return titles.join(' ／ ');
   const first = q(questionIds[0]);
   return first ? [first.chapter, first.section].filter(Boolean).join(' ・ ') || null : null;
 }
