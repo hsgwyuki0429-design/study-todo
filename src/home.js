@@ -118,16 +118,6 @@ function doneSet() {
 
 export const isDone = (qid) => doneSet().has(qid);
 
-export function groupLabel(questionIds) {
-  const qs = questionIds.map(q).filter(Boolean);
-  if (qs.length === 0) return `${questionIds.length}問`;
-  if (qs.length === 1) return qs[0].label;
-  const sameType = qs.every((x) => x.type === qs[0].type);
-  const nums = qs.map((x) => x.number).sort((a, b) => a - b);
-  const consecutive = nums.every((n, i) => i === 0 || n === nums[i - 1] + 1);
-  if (sameType && consecutive) return `${qs[0].type} ${nums[0]}〜${nums[nums.length - 1]}`;
-  return qs.map((x) => x.label).join('、');
-}
 
 /**
  * セッション中の並び：例題は「1回の取り組み」ごとに1行、チャレンジは1行のまま混在させる。
@@ -654,19 +644,6 @@ function questionSub(questionId) {
   return question.title || [question.chapter, question.section].filter(Boolean).join(' ・ ') || null;
 }
 
-/**
- * まとめて出す行（「基本例題 3〜4」など）の2段目。
- * まとめられていても何の問題かは分かるようにしたいので、題名を順に並べて出す。
- * 題名を持たない EXERCISES だけの行は、代わりに章・単元を出す。
- */
-function groupSub(questionIds) {
-  const titles = questionIds.map((id) => q(id)?.title).filter(Boolean);
-  // 数が多い行で題名が何行にもなってしまわないよう、3件までにする。
-  if (titles.length > 3) return `${titles.slice(0, 3).join(' ／ ')} ほか${titles.length - 3}件`;
-  if (titles.length) return titles.join(' ／ ');
-  const first = q(questionIds[0]);
-  return first ? [first.chapter, first.section].filter(Boolean).join(' ・ ') || null : null;
-}
 
 /** 何周目の取り組みか。これまでの回数（今日の分も含む）に1を足したもの。 */
 const roundOf = (questionId) => (state.attemptCounts[questionId] ?? 0) + 1;
@@ -683,25 +660,29 @@ function roundCells(questionIds) {
 }
 
 /**
- * タスクを、今日まだやっていない分（pending）だけに絞る。
+ * 「やること」に並べる行。今日まだやっていない分（pending）だけを出す。
  * 一部の問題だけ今日やった複合タスクは、済んだ問題を「やること」側から外す。
+ *
+ * 例題は1問で1行にする。まとめて「基本例題3〜4」と出すと題名が出せず、
+ * どれから始まるのかも分からないため。チャレンジはひとまとまりで1行。
  */
 function pendingTodo(open) {
-  return open
-    .map((task) => task.kind === 'challenge'
-      ? { task, pendingIds: task.questionIds, item: null }
-      : (() => {
-          const split = splitPlanItems(task, todayRecords(), { date: api.studyDayKey() });
-          return { task, pendingIds: split.pending.map((p) => p.questionId), item: split.pending[0] ?? null };
-        })())
-    .filter((t) => t.task.kind === 'challenge' || t.pendingIds.length);
+  const entries = [];
+  for (const task of open) {
+    if (task.kind === 'challenge') {
+      entries.push({ task, item: null });
+      continue;
+    }
+    const split = splitPlanItems(task, todayRecords(), { date: api.studyDayKey() });
+    for (const item of split.pending) entries.push({ task, item });
+  }
+  return entries;
 }
 
 function idlePanel(panel) {
   const open = state.tasks.filter((t) => !t.completed);
   const todo = pendingTodo(open);
-  const todoCount = todo.reduce((n, t) => n + (t.task.kind === 'challenge' ? 1 : t.pendingIds.length), 0);
-  const tabs = [['todo', `やること ${todoCount}`], ['done', `やったこと ${state.today.records.length}`]];
+  const tabs = [['todo', `やること ${todo.length}`], ['done', `やったこと ${state.today.records.length}`]];
   const selectTab = (v) => { state.idleTab = v; render(); };
   panel.append(segmented(tabs, state.idleTab, selectTab, 'home-tabs'));
   swipeable(panel, tabs.map(([v]) => v), state.idleTab, selectTab);
@@ -709,20 +690,19 @@ function idlePanel(panel) {
   const list = el('div', 'list');
   if (state.idleTab === 'todo') {
     if (!todo.length) list.append(emptyState('今日のタスクはありません'));
-    for (const { task, pendingIds, item } of todo) {
+    for (const { task, item } of todo) {
       const node = row({
-        title: task.kind === 'challenge' ? task.title ?? 'チャレンジ' : groupLabel(pendingIds),
-        // 例題が1問だけの行は題名を出す。複数まとめた行は、どれの題名か決められないので出さない。
-        sub: task.kind === 'challenge' ? challengeSub(task)
-          : pendingIds.length === 1 ? questionSub(pendingIds[0]) : groupSub(pendingIds),
-        right: task.kind === 'challenge' ? null : roundCells(pendingIds),
+        title: item ? qLabel(item.questionId) : task.title ?? 'チャレンジ',
+        sub: item ? questionSub(item.questionId) : challengeSub(task),
+        right: item ? roundCells([item.questionId]) : null,
       });
       const main = node.querySelector('.row-main');
       const start = el('button', 'row-main');
       start.style.textAlign = 'left';
       start.append(...main.childNodes);
-      start.onclick = () => task.kind === 'challenge' ? openChallenge(task)
-        : item && startSession({ questionId: item.questionId, item, task });
+      start.onclick = () => item
+        ? startSession({ questionId: item.questionId, item, task })
+        : openChallenge(task);
       main.replaceWith(start);
       list.append(node);
     }
