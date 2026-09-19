@@ -32,6 +32,24 @@ export function fmtTime(iso) {
 
 export const fmtDate = (key) => key.replace(/-/g, '/');
 
+/**
+ * 1行に収める。長い題名は字を少しずつ小さくして、それでも入らないときだけ末尾を「…」にする。
+ * 幅は画面に入ってからでないと測れないので、次の描画のタイミングで測る。
+ */
+export function fitOneLine(node, { min = 10 } = {}) {
+  if (!node) return node;
+  node.classList.add('one-line');
+  requestAnimationFrame(() => {
+    if (!node.isConnected) return;
+    let size = parseFloat(getComputedStyle(node).fontSize);
+    while (node.scrollWidth > node.clientWidth && size > min) {
+      size -= 0.5;
+      node.style.fontSize = `${size}px`;
+    }
+  });
+  return node;
+}
+
 /** 一覧の行。押せる行は button、押せない行は div にする。 */
 export function row({ title, sub, right, onClick, classes = [] }) {
   const node = el(onClick ? 'button' : 'div', ['row', ...classes].join(' '));

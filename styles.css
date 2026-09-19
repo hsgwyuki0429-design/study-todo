@@ -855,6 +855,8 @@ body { background: var(--bg-sub); font-family: -apple-system, BlinkMacSystemFont
 .row { padding: 10px 12px; background: var(--bg); }
 .row-title { font-size: var(--font-body); line-height: 1.45; overflow-wrap: anywhere; }
 .row-sub { margin-top: 2px; font-size: var(--font-caption); line-height: 1.5; overflow-wrap: anywhere; }
+/* 題名は1行に収める（入らないぶんは fitOneLine が字を小さくする）。 */
+.one-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
 .row-chevron, .section-toggle .section-mark { font-size: 24px; line-height: 1; font-weight: 300; color: var(--fg-faint); }
 #screen-records > .list { flex: 0 1 auto; margin: 0 var(--page-gutter) 18px; border-radius: var(--radius-group); background: var(--bg); }
 #screen-records > .list > .row { min-height: 63px; padding-block: 8px; }

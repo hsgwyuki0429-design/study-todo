@@ -7,7 +7,7 @@ import { undoRecord } from './record-actions.js';
 import { EVALUATIONS, EVAL_MAP } from './api.js';
 import { itemsOf, splitPlanItems } from './plan-items.js';
 import { state, q, qLabel, render, loadTasks, refreshToday } from './state.js';
-import { $, el, fmtMS, row, segmented, swipeable, emptyState } from './ui.js';
+import { $, el, fmtMS, fitOneLine, row, segmented, swipeable, emptyState } from './ui.js';
 import { reportActivity, syncInBackground } from './cloud-sync.js';
 
 const persist = () => api.setSessionState(state.session);
@@ -696,6 +696,7 @@ function idlePanel(panel) {
         sub: item ? questionSub(item.questionId) : challengeSub(task),
         right: item ? roundCells([item.questionId]) : null,
       });
+      if (item) fitOneLine(node.querySelector('.row-sub'));
       const main = node.querySelector('.row-main');
       const start = el('button', 'row-main');
       start.style.textAlign = 'left';
@@ -752,15 +753,15 @@ function taskListPanel(panel) {
     const current = state.session.currentQuestionId === qid;
     const active = current && !!state.session.currentStartedAt;
     // いま解いている行は色が変わる。もう一度押すと採点へ進むので、その案内だけ残す。
-    list.append(
-      row({
-        title: qLabel(qid),
-        sub: current ? 'もう一度タップすると採点・暗記へ' : questionSub(qid),
-        right: [...roundCells([qid]), ...stateCells(qid)],
-        onClick: () => tapTaskQuestion(qid, item.item, item.task),
-        classes: active ? ['active'] : current ? ['current'] : [],
-      })
-    );
+    const node = row({
+      title: qLabel(qid),
+      sub: current ? 'もう一度タップすると採点・暗記へ' : questionSub(qid),
+      right: [...roundCells([qid]), ...stateCells(qid)],
+      onClick: () => tapTaskQuestion(qid, item.item, item.task),
+      classes: active ? ['active'] : current ? ['current'] : [],
+    });
+    if (!current) fitOneLine(node.querySelector('.row-sub'));
+    list.append(node);
   }
   panel.append(list);
 }
