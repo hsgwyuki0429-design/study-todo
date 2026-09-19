@@ -645,6 +645,36 @@ const challengeSub = (task) =>
   `${task.questionIds.length}問 / ${Math.round((task.timeLimitSeconds ?? 0) / 60)}分`;
 
 /**
+ * 行の2段目に出す題名。番号だけだと何の問題か分からないので、例題一覧の見出しを出す。
+ * 題名を持たない EXERCISES では、代わりに章・単元を出す。
+ */
+function questionSub(questionId) {
+  const question = q(questionId);
+  if (!question) return null;
+  return question.title || [question.chapter, question.section].filter(Boolean).join(' ・ ') || null;
+}
+
+/** まとめて出す行の2段目。題名は決められないので、章・単元を出す。 */
+function groupSub(questionIds) {
+  const first = q(questionIds[0]);
+  return first ? [first.chapter, first.section].filter(Boolean).join(' ・ ') || null : null;
+}
+
+/** 何周目の取り組みか。これまでの回数（今日の分も含む）に1を足したもの。 */
+const roundOf = (questionId) => (state.attemptCounts[questionId] ?? 0) + 1;
+
+/**
+ * 「2周目」の印。まとめて出す行では、全部が同じ周回のときだけ出す
+ * （1周目と3周目が混ざった行に1つの数字を出すと、どちらの話か分からなくなる）。
+ */
+function roundCells(questionIds) {
+  const rounds = questionIds.map(roundOf);
+  const round = rounds[0];
+  if (!round || rounds.some((n) => n !== round)) return [];
+  return [el('span', 'row-round', `${round}周目`)];
+}
+
+/**
  * タスクを、今日まだやっていない分（pending）だけに絞る。
  * 一部の問題だけ今日やった複合タスクは、済んだ問題を「やること」側から外す。
  */
@@ -672,10 +702,12 @@ function idlePanel(panel) {
   if (state.idleTab === 'todo') {
     if (!todo.length) list.append(emptyState('今日のタスクはありません'));
     for (const { task, pendingIds, item } of todo) {
-      const first = q(pendingIds[0]);
       const node = row({
         title: task.kind === 'challenge' ? task.title ?? 'チャレンジ' : groupLabel(pendingIds),
-        sub: task.kind === 'challenge' ? challengeSub(task) : first ? first.chapter + ' ・ ' + first.section : null,
+        // 例題が1問だけの行は題名を出す。複数まとめた行は、どれの題名か決められないので出さない。
+        sub: task.kind === 'challenge' ? challengeSub(task)
+          : pendingIds.length === 1 ? questionSub(pendingIds[0]) : groupSub(pendingIds),
+        right: task.kind === 'challenge' ? null : roundCells(pendingIds),
       });
       const main = node.querySelector('.row-main');
       const start = el('button', 'row-main');
@@ -735,8 +767,8 @@ function taskListPanel(panel) {
     list.append(
       row({
         title: qLabel(qid),
-        sub: current ? 'もう一度タップすると採点・暗記へ' : null,
-        right: stateCells(qid),
+        sub: current ? 'もう一度タップすると採点・暗記へ' : questionSub(qid),
+        right: [...roundCells([qid]), ...stateCells(qid)],
         onClick: () => tapTaskQuestion(qid, item.item, item.task),
         classes: active ? ['active'] : current ? ['current'] : [],
       })

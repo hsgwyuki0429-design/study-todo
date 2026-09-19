@@ -470,6 +470,14 @@ export async function getQuestionAttempts(questionId, { includeVoided = false } 
       || String(a.timestamp).localeCompare(String(b.timestamp)));
 }
 
+/** 問題ID -> これまでの取り組み回数。「何周目か」を出すのに使う。 */
+export async function getAttemptCounts() {
+  const records = await listRecords();
+  const counts = {};
+  for (const record of records) counts[record.questionId] = (counts[record.questionId] ?? 0) + 1;
+  return counts;
+}
+
 /** 期間の学習記録を、日付ごとにまとめる（カレンダーの実績マスに使う）。 */
 export async function getAttemptsByDate(fromDate, toDate) {
   const records = await listRecords();

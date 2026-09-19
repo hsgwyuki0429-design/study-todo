@@ -341,7 +341,7 @@ test("MCP から追加した情報を読める", async () => {
     ["数と式", "集合と命題", "2次関数", "図形と計量", "データの分析"],
   );
   assert.equal(info.subjects[0].chapters[0].sectionDetails[0].page, 15);
-  assert.ok(info.questionTypes.some((t) => t.type === "基本例題" && t.count === 269));
+  assert.ok(info.questionTypes.some((t) => t.type === "基本例題" && t.count === 268));
   assert.equal(info.needsReviewCount, 241);
 
   const one = await callTool(app, token, "getQuestion", { id: "aochart1a-m1-ex-001" });
@@ -376,14 +376,14 @@ test("『基本例題だけ』『難しい問題を除く』で絞れる", async
   const token = await enableAiLink(app, { write: false });
 
   const basic = await callTool(app, token, "listQuestions", { types: ["基本例題"], limit: 1 });
-  assert.equal(basic.total, 269);
+  assert.equal(basic.total, 268);
 
   const easy = await callTool(app, token, "listQuestions", { types: ["基本例題"], difficultyTo: 2, limit: 1 });
   assert.ok(easy.total > 0);
   assert.ok(easy.total < basic.total);
 
   const both = await callTool(app, token, "listQuestions", { types: ["基本例題", "重要例題"], limit: 1 });
-  assert.equal(both.total, 269 + 70);
+  assert.equal(both.total, 268 + 71);
 });
 
 test("『例題50〜65』は教科を指定して取れる", async () => {

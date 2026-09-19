@@ -318,6 +318,19 @@ button {
 .row-title { font-size: 15px; }
 .row-sub { font-size: 12px; color: var(--fg-sub); }
 
+/* 「2周目」の印。時間と並ぶので、数字より控えめにする。 */
+.row-round {
+  flex: none;
+  align-self: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--fg-sub);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .row-time { font-variant-numeric: tabular-nums; font-size: 14px; color: var(--fg-sub); }
 .row-time.active { color: var(--accent); }
 .row-chevron { color: var(--fg-faint); font-size: 18px; }

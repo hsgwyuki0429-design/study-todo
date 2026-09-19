@@ -14,6 +14,8 @@ export const state = {
   tasks: [],          // 今日のタスク
   questions: new Map(),
   today: { seconds: 0, count: 0, records: [] },
+  // 問題ID -> これまでの取り組み回数。ホームの「何周目」の表示に使う。
+  attemptCounts: {},
 
   records: {
     toc: { chapter: null, section: null, questionId: null, attemptId: null },
@@ -41,7 +43,9 @@ export const setRenderer = (fn) => { renderFn = fn; };
 export const render = () => renderFn();
 
 export async function refreshToday() {
-  state.today = await api.getTodayStats();
+  const [today, attemptCounts] = await Promise.all([api.getTodayStats(), api.getAttemptCounts()]);
+  state.today = today;
+  state.attemptCounts = attemptCounts;
 }
 
 export async function loadTasks() {

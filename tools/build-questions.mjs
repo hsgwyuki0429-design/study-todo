@@ -201,8 +201,9 @@ export function summarize(questions) {
  * 版が小さいものはサーバーが受け取らない、という決まりにしてそれを防いでいる。
  *
  *   1 … 593問（数学I+A。EXERCISES を含む）
+ *   2 … 例題の題名・掲載ページ・種類を配布Excelの表記に合わせて直した
  */
-const MASTER_VERSION = 1;
+const MASTER_VERSION = 2;
 
 function buildDocument(questions) {
   return {
