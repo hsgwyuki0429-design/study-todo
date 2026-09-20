@@ -576,7 +576,8 @@ test('manual fire requires the owner key and POST; no secret reaches the PWA', a
   const ok = await fire(f);
   assert.equal(ok.status, 200);
   assert.deepEqual(ok.body.replan, { eventId: `manual_replan_${OPERATION}`, trigger: 'manual',
-    date: event.date, operationId: OPERATION, state: 'triggered', retryable: false, outcomeUnknown: false });
+    date: event.date, operationId: OPERATION, state: 'triggered', retryable: false, outcomeUnknown: false,
+    provider: 'claude_routine' });
   assert.equal(f.calls.length, 1);
   const [url, request] = f.calls[0];
   assert.equal(url, ENV.CLAUDE_ROUTINE_FIRE_URL);
@@ -739,7 +740,7 @@ test('manual fire reports safe telemetry only', async () => {
   await fire(f);
   assert.deepEqual(seen.map((entry) => entry.trigger), ['manual']);
   assert.deepEqual(Object.keys(seen[0]).sort(),
-    ['date', 'eventId', 'operationId', 'outcomeUnknown', 'retryable', 'state', 'trigger']);
+    ['date', 'eventId', 'operationId', 'outcomeUnknown', 'provider', 'retryable', 'state', 'trigger']);
   const logged = JSON.stringify(seen);
   assert.ok(!logged.includes(ENV.CLAUDE_ROUTINE_API_TOKEN));
   assert.ok(!logged.includes(ENV.CLAUDE_ROUTINE_FIRE_URL));

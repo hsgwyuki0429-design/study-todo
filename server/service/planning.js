@@ -20,6 +20,22 @@ import {
 } from "../../src/estimates.js";
 import { availabilityForDate } from "../../src/availability.js";
 
+/**
+ * 判断した時点と、保存する時点が同じかを見るための版。
+ *
+ * goalsRevision と availabilityRevision だけでは、判断のあいだに増えた学習記録に
+ * 気づけない。自動反映では、古い履歴で作った案がそのまま保存されるほうが危ないので、
+ * 学習記録の件数と最新の時刻も版に含める。
+ */
+export function plannerSnapshotVersion({ records = [], goalsRevision = 0, availabilityRevision = 0 } = {}) {
+  let latest = "";
+  for (const record of records) {
+    const stamp = String(record.updatedAt ?? record.timestamp ?? "");
+    if (stamp > latest) latest = stamp;
+  }
+  return `g${goalsRevision}.a${availabilityRevision}.r${records.length}.t${latest}`;
+}
+
 /** 予定項目ID → 目標ID の対応表。実績を目標へ結び付けるときに使う。 */
 export function buildItemGoalMap(plans = []) {
   const map = new Map();

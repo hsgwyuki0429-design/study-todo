@@ -9,7 +9,14 @@
 #
 # 秘密（STUDY_TODO_OWNER_KEY）は必ず secret として入れること。
 # Routine 接続も Worker Secrets のみ: CLAUDE_ROUTINE_FIRE_URL / CLAUDE_ROUTINE_API_TOKEN
+# Jev（TypeSafe AI）も同じく secret: JEV_API_KEY（JEV_API_URL / JEV_MODEL は任意）
 # このファイルへ直接書くとGitHubへ公開されてしまう。
+#
+# どのプランナーを動かすかは PLANNER_PROVIDER で決める（既定は claude_routine）。
+#   claude_routine … これまでどおり Claude Routine を起動する
+#   jev_shadow     … Jev の案を作るが、保存はしない（品質を測る段階）
+#   jev            … Jev の案を、制約を確かめたうえで保存する
+#   off            … 自動再計画をしない
 
 name = "study-todo-mcp"
 main = "server/adapters/cloudflare.js"
@@ -34,6 +41,8 @@ invocation_logs = true
 enabled = false
 
 [vars]
+# 段階的に進める。shadow で判断の質を見てから jev へ切り替える。
+PLANNER_PROVIDER = "claude_routine"
 STUDY_TODO_SITE_ORIGIN = "https://hsgwyuki0429-design.github.io/study-todo"
 STUDY_TODO_ALLOWED_ORIGINS = "https://hsgwyuki0429-design.github.io"
 

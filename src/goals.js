@@ -13,8 +13,13 @@
 //   attempt（取り組む）… 対象の問題に、この目標のために1回ずつ取り組めば達成。
 //                        評価が不正解でも「取り組んだ」として数える。
 //   mastery（習得する）… 対象の問題が、決めた評価（既定は perfect）になっていれば達成。
-//                        判定は「この目標に関連する **最新** の記録」で行う（latest 方式）。
-//                        「一度でも満たしたことがあるか」ではない。画面と docs にも明記する。
+//                        数え方（mode）は3つ。
+//                          latest（既定）… この目標に関連する **最新** の記録で判定する。
+//                          ever          … 一度でも条件を満たしたことがあれば達成。
+//                          count         … 条件を満たした取り組みが **合計 count 回** で達成。
+//                        count は「perfectを2回そろえたら一旦クリア」という進め方のためにある。
+//                        どの数え方でも、数えるのは「この目標に結び付いた取り組み」だけなので、
+//                        新しい目標が過去の周回の記録で達成扱いになることはない。
 //
 // 大事な決めごと:
 //   実績は、目標へ **明示的に結び付いた取り組み** だけを数える。
@@ -27,6 +32,13 @@ export const GOAL_STATUSES = Object.freeze(['active', 'achieved', 'paused', 'can
 /** 習得の既定条件。青チャートの評価のうち「◯完璧にできた」だけを合格とする。 */
 export const DEFAULT_MASTERY_EVALUATIONS = Object.freeze(['perfect']);
 
+/** 習得の数え方。count は「合計何回そろえば達成か」を持つ。 */
+export const GOAL_MASTERY_MODES = Object.freeze(['latest', 'ever', 'count']);
+
+/** count 方式の既定（perfect 2回でクリア）と、受け付ける範囲。 */
+export const DEFAULT_MASTERY_COUNT = 2;
+export const MASTERY_COUNT_RANGE = Object.freeze({ min: 1, max: 10 });
+
 export const GOAL_STATUS_LABELS = Object.freeze({
   active: '進行中',
   achieved: '達成',
@@ -38,6 +50,15 @@ export const GOAL_COMPLETION_LABELS = Object.freeze({
   attempt: '取り組む（1回ずつ解けば達成）',
   mastery: '習得する（最新の結果が条件を満たせば達成）',
 });
+
+/** 達成条件を、数え方まで含めて人が読める言葉にする。 */
+export function completionLabel(completion) {
+  if (completion?.type !== 'mastery') return GOAL_COMPLETION_LABELS.attempt;
+  const evaluations = (completion.evaluations ?? DEFAULT_MASTERY_EVALUATIONS).join('・');
+  if (completion.mode === 'count') return `習得する（${evaluations} を合計${completion.count ?? DEFAULT_MASTERY_COUNT}回）`;
+  if (completion.mode === 'ever') return `習得する（一度でも ${evaluations}）`;
+  return `習得する（最新の結果が ${evaluations}）`;
+}
 
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -88,12 +109,21 @@ function normalizeCompletion(raw) {
   const evaluations = Array.isArray(source.evaluations) && source.evaluations.length
     ? [...new Set(source.evaluations.filter((value) => typeof value === 'string' && value))].slice(0, 5)
     : [...DEFAULT_MASTERY_EVALUATIONS];
+  const mode = GOAL_MASTERY_MODES.includes(source.mode) ? source.mode : 'latest';
   return {
     type,
     evaluations,
     // latest = この目標に関連する最新の記録で判定する（初期仕様）。
-    mode: source.mode === 'ever' ? 'ever' : 'latest',
+    mode,
+    ...(mode === 'count' ? { count: normalizeMasteryCount(source.count) } : {}),
   };
+}
+
+/** count 方式の回数。範囲外は既定へ寄せる（黙って0回にはしない）。 */
+export function normalizeMasteryCount(value) {
+  const count = Number(value);
+  if (!Number.isFinite(count)) return DEFAULT_MASTERY_COUNT;
+  return Math.max(MASTERY_COUNT_RANGE.min, Math.min(MASTERY_COUNT_RANGE.max, Math.round(count)));
 }
 
 function normalizeScopeFilter(raw) {
@@ -157,6 +187,11 @@ export function questionSatisfied(goal, attempts = []) {
   const evaluations = goal.completion.evaluations ?? DEFAULT_MASTERY_EVALUATIONS;
   if (goal.completion.mode === 'ever') {
     return attempts.some((record) => evaluations.includes(record.evaluation));
+  }
+  if (goal.completion.mode === 'count') {
+    // 合計で何回そろったか。連続である必要はない（失敗を挟んでも回数は消えない）。
+    const need = normalizeMasteryCount(goal.completion.count);
+    return attempts.filter((record) => evaluations.includes(record.evaluation)).length >= need;
   }
   // latest（初期仕様）… この目標に関連する最新の記録で判定する。
   return evaluations.includes(attempts[attempts.length - 1].evaluation);

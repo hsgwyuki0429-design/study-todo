@@ -3,7 +3,7 @@ import { runTransaction, supportsTransactions } from '../storage/driver.js';
 import { DEFAULT_TIMEZONE_OFFSET_MINUTES, isDateKey, studyDateKeyOf } from '../../src/datetime.js';
 import { STORAGE_KEYS, DEFAULT_SETTINGS, generateToken } from '../auth/tokens.js';
 import { SYNC_KEYS } from './sync-service.js';
-import { fireClaudeRoutine, routineConfigurationError } from './claude-routine.js';
+import { plannerConfigurationError, plannerProviderOf, runPlanner } from './planner-provider.js';
 
 // Keep old study_end keys as closed-session tombstones. Never fire them again.
 export const replanEventKey = SYNC_KEYS.replanEvent;
@@ -49,9 +49,15 @@ export function readStudyEnd(body) {
 }
 
 // Exclude secret URL, provider ID/URL, auth headers and free-form provider content.
+//
+// 内部の状態は pending / evaluating / validated / applied / no_change / deferred / failed。
+// triggered（Claude Routine へ起動を伝えた）は「計画が更新し終わった」ではないので、
+// applied とは別の状態のまま残してある。
 export function publicReplan(event) {
-  return Object.fromEntries(['eventId', 'trigger', 'date', 'operationId', 'state', 'error', 'detail', 'retryable', 'temporary', 'outcomeUnknown']
-    .filter((key) => event[key] !== undefined).map((key) => [key, event[key]]));
+  return Object.fromEntries([
+    'eventId', 'trigger', 'date', 'operationId', 'state', 'error', 'detail', 'retryable', 'temporary', 'outcomeUnknown',
+    'provider', 'proposed', 'applied', 'unplaced', 'deferredToNextRun', 'appliedAt', 'shadow', 'usage',
+  ].filter((key) => event[key] !== undefined).map((key) => [key, event[key]]));
 }
 
 async function arm(tx, at) {
@@ -75,7 +81,8 @@ async function activeUntil(tx, at) {
 }
 
 export function createReplanEvents({ storage, env, now = () => Date.now(),
-  waitUntil = (promise) => { void promise.catch(() => {}); }, fetchImpl = fetch, onReplan = () => {} }) {
+  waitUntil = (promise) => { void promise.catch(() => {}); }, fetchImpl = fetch, onReplan = () => {},
+  plannerRunner = null }) {
   const report = (event) => { try { onReplan(publicReplan(event)); } catch { /* telemetry must not affect delivery */ } };
 
   /**
@@ -87,7 +94,7 @@ export function createReplanEvents({ storage, env, now = () => Date.now(),
     if (!settings.enabled) return 'ai_disabled';
     if (!settings.permissions?.read) return 'read_permission_required';
     if (!settings.permissions?.write) return 'write_permission_required';
-    return routineConfigurationError(env);
+    return plannerConfigurationError(env);
   }
 
   const coarseBlocker = (error) => (error?.endsWith('_permission_required') ? 'ai_disabled' : error);
@@ -101,7 +108,7 @@ export function createReplanEvents({ storage, env, now = () => Date.now(),
    */
   function fireAfterClaim(key, event) {
     const job = (async () => {
-      const outcome = await fireClaudeRoutine(event, { env, fetchImpl });
+      const outcome = await runPlanner(event, { env, fetchImpl, plannerRunner });
       let merged = { ...event, ...outcome };
       await runTransaction(storage, async (tx) => {
         const current = await tx.get(key);
@@ -132,7 +139,7 @@ export function createReplanEvents({ storage, env, now = () => Date.now(),
       if (previous) return { event: previous, dispatch: false };
       const at = now();
       const error = (await blocker(tx)) ?? (await activeUntil(tx, at) ? 'study_in_progress' : null);
-      const entry = { ...event, revision: 1, ...testMode(),
+      const entry = { ...event, revision: 1, ...testMode(), provider: plannerProviderOf(env),
         receivedAt: new Date(at).toISOString(), updatedAt: new Date(at).toISOString(),
         state: error ? 'failed' : 'pending', retryable: false,
         ...(error ? { error } : { attemptedAt: new Date(at).toISOString(), outcomeUnknown: true }) };
@@ -160,7 +167,7 @@ export function createReplanEvents({ storage, env, now = () => Date.now(),
       // dailyの失敗分類は既存の契約のまま（read/writeの不足もai_disabledにまとめる）。
       const error = coarseBlocker(await blocker(tx));
       const until = error ? null : await activeUntil(tx, at);
-      const entry = { ...event, revision: (previous?.revision ?? 0) + 1, ...testMode(),
+      const entry = { ...event, revision: (previous?.revision ?? 0) + 1, ...testMode(), provider: plannerProviderOf(env),
         receivedAt: previous?.receivedAt ?? new Date(at).toISOString(), updatedAt: new Date(at).toISOString(),
         state: error ? 'failed' : until ? 'deferred' : 'pending', retryable: false,
         ...(error ? { error } : until ? {} : { attemptedAt: new Date(at).toISOString(), outcomeUnknown: true }) };

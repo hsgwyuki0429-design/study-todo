@@ -32,8 +32,16 @@ const PLANNER_ERRORS = {
   read_permission_required: 'AI連携の「学習状況を見る」権限を許可してください',
   write_permission_required: 'AI連携の「予定を変更する」権限を許可してください',
   study_in_progress: '現在学習中のため実行できません。学習終了後にもう一度押してください',
-  missing_secrets: 'サーバーにRoutineの設定がありません',
-  invalid_configuration: 'Routineの設定が正しくありません',
+  missing_secrets: 'サーバーにプランナーの接続設定がありません',
+  invalid_configuration: 'プランナーの接続設定が正しくありません',
+  planner_disabled: '自動プランナーがオフに設定されています',
+  planner_not_available: 'このサーバーでは自動プランナーを動かせません',
+  // 下の3つは Jev のプランナー（サーバーの中で最後まで走る方式）の失敗。
+  // 予定は「全部成功か、全部未反映か」のどちらかなので、二重にはならない。
+  planner_failure: 'プランナーの途中で問題が起きました。予定は変更していません',
+  blocking_warning: '作った案が学習可能時間か期限を超えるため、保存しませんでした',
+  missing_revision: '予定の版を取り直せませんでした。もう一度押してください',
+  context_stale: '実行中に学習記録か目標が変わりました。もう一度押してください',
   storage_not_atomic: 'サーバーの保存先が古い設定です（docs/mcp.md の「保存先の移行」）',
   invalid_request: 'Routineが要求を受け付けませんでした',
   authentication: 'RoutineのAPIトークンが使えません',
@@ -53,8 +61,22 @@ const PLANNER_ERRORS = {
     + 'Routineの履歴を確認してください（自動では送り直しません）',
 };
 
+/** 何をしたかを、保存された事実だけで短く伝える。 */
+function plannerOutcome(replan) {
+  const unplaced = replan.unplaced?.length
+    ? `（${replan.unplaced.length}件は学習可能時間か期限の都合で置けませんでした）` : '';
+  const carried = replan.deferredToNextRun ? `（${replan.deferredToNextRun}件は次回へ回しました）` : '';
+  return `予定を${replan.applied ?? 0}件更新しました${unplaced}${carried}。`;
+}
+
 function plannerMessage(replan) {
+  // Claude Routine は「起動を伝えた」までしか分からない。計画の更新完了ではない。
   if (replan?.state === 'triggered') return 'プランナーを起動しました。';
+  if (replan?.state === 'applied') return plannerOutcome(replan);
+  if (replan?.state === 'no_change') return '見直しましたが、変える予定はありませんでした。';
+  if (replan?.state === 'validated') {
+    return `案を${replan.proposed ?? 0}件作りました（下見のみ・保存はしていません）。`;
+  }
   // 送信の結果が保存前に途切れた場合。押し直しはせず、履歴で確かめてもらう。
   if (replan?.state === 'pending') return 'プランナーへ起動を伝えましたが、結果を確認できませんでした。Routineの履歴を確認してください。';
   const reason = PLANNER_ERRORS[replan?.error] ?? '原因が分かりませんでした';

@@ -68,6 +68,7 @@ python3 -m http.server 8000
 | `src/seed.js` | 初期データ |
 | `sw.js` | アプリシェルのキャッシュ（オフライン起動）。`src/*.js` を全部載せる。過不足は `test/shell.test.mjs` が見張る |
 | `server/` | MCP Server（Cloudflare Workers + Durable Object。詳細は `docs/mcp.md`） |
+| `server/service/planner-*.js` | 自動プランナー（判断は Jev、配分と検証はコード。詳細は `docs/planner.md`） |
 | `server/service/task-changes.js` | 予定をタスク単位で安全に書き換える処理（ID維持・競合の確認・保護・変更の取り消し） |
 | `server/storage/do-driver.js` | Durable Object の保存先（まとめ書きに対応。KVからの引っ越しつき） |
 | `test/` | 判定のしかたの自動テスト（`npm test`） |
@@ -140,6 +141,8 @@ python3 -m http.server 8000
 タイマーは「問題を始めてから評価を記録するまで」なので、答え合わせの時間は既定で含む扱いにしてある。
 
 日々の配分は Claude に頼む（`docs/mcp.md` の「目標と再計画」）。
+毎日03:00の自動再計画をサーバーの中で完結させる方式（Jev）もある。
+実行先は `PLANNER_PROVIDER` で選ぶ（詳細は `docs/planner.md`）。
 アプリ側は数えること（実績・残量・見積もり・時間の過不足）と、安全に保存することを受け持つ。
 
 ## ホーム画面

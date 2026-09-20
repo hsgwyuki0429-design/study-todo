@@ -39,7 +39,9 @@ import {
 } from "../../src/records-model.js";
 import {
   GOAL_COMPLETION_TYPES,
+  GOAL_MASTERY_MODES,
   GOAL_STATUSES,
+  MASTERY_COUNT_RANGE,
   normalizeGoal,
   selectQuestions,
 } from "../../src/goals.js";
@@ -52,6 +54,7 @@ import {
   dateRange,
   estimateFor,
   goalProgress,
+  plannerSnapshotVersion,
   truncatedChallengeIds,
 } from "./planning.js";
 import { buildOutline, compareQuestions, questionHaystack } from "../../src/question-order.js";
@@ -91,6 +94,14 @@ const EVALUATION_LABELS = Object.freeze({
   calc_error: "△ 計算ミス",
   wrong_approach: "✕ 方針が違った",
 });
+
+/** 習得の「合計何回」。count 方式でないときは持たせない（意味の無い値を残さない）。 */
+function readMasteryCount(completion) {
+  if (completion?.count === undefined || completion.count === null) return undefined;
+  return readInteger(completion.count, "completion.count", {
+    required: true, min: MASTERY_COUNT_RANGE.min, max: MASTERY_COUNT_RANGE.max,
+  });
+}
 
 const uid = (prefix) => `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
@@ -613,14 +624,21 @@ export function createStudyService({ sync, now = () => Date.now() }) {
     // 1. 下見のときから、目標や学習可能時間が変わっていないか。
     const expectedContext = args.expectedContext ?? null;
     if (expectedContext) {
-      rejectUnknownKeys(expectedContext, ["goalsRevision", "availabilityRevision"], "expectedContext");
+      rejectUnknownKeys(expectedContext, ["goalsRevision", "availabilityRevision", "plannerSnapshotVersion"], "expectedContext");
+      const goalsRevision = await sync.goalsRevision();
       const currentContext = {
-        goalsRevision: await sync.goalsRevision(),
+        goalsRevision,
         availabilityRevision: bundle.availability.revision,
+        plannerSnapshotVersion: plannerSnapshotVersion({
+          records: bundle.records, goalsRevision, availabilityRevision: bundle.availability.revision,
+        }),
       };
       const stale = Object.entries(currentContext)
-        .filter(([key, value]) => expectedContext[key] !== undefined && Number(expectedContext[key]) !== Number(value))
-        .map(([key, value]) => ({ field: key, expected: Number(expectedContext[key]), current: value }));
+        .filter(([key, value]) => expectedContext[key] !== undefined
+          && (key === "plannerSnapshotVersion"
+            ? String(expectedContext[key]) !== String(value)
+            : Number(expectedContext[key]) !== Number(value)))
+        .map(([key, value]) => ({ field: key, expected: expectedContext[key], current: value }));
       if (stale.length) {
         return {
           ok: false,
@@ -1570,6 +1588,10 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       const to = args.to ? readDateArg(args.to, "to", args) : shiftDateKey(todayKey, 13);
       if (to < from) fail("to は from 以降の日付にしてください。", "to");
       const dates = dateRange(from, to, { max: 60 });
+      // 自動プランナーは全件を見る必要がある。truncated のまま「全部見た」と思わないよう、
+      // 上限を呼ぶ側から上げられるようにしてある（MCP からは既定のまま）。
+      const unplannedLimit = readInteger(args.unplannedLimit, "unplannedLimit", { min: 1, max: 5000, fallback: 200 });
+      const overdueLimit = readInteger(args.overdueLimit, "overdueLimit", { min: 1, max: 5000, fallback: 200 });
       const goalIds = args.goalIds === undefined || args.goalIds === null
         ? null
         : readArray(args.goalIds, "goalIds", { max: 50 }).map((id, index) => readString(id, `goalIds[${index}]`, { required: true, max: 80 }));
@@ -1637,10 +1659,12 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         to,
         goals: progress,
         days,
-        unplanned: unplanned.slice(0, 200),
-        unplannedTruncated: unplanned.length > 200,
-        overdue: overdue.slice(0, 200),
-        overdueTruncated: overdue.length > 200,
+        unplanned: unplanned.slice(0, unplannedLimit),
+        unplannedTruncated: unplanned.length > unplannedLimit,
+        unplannedTotal: unplanned.length,
+        overdue: overdue.slice(0, overdueLimit),
+        overdueTruncated: overdue.length > overdueLimit,
+        overdueTotal: overdue.length,
         moves: moves.moves,
         movesTotal: moves.total,
         availability: bundle.availability,
@@ -1650,13 +1674,19 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         expectedContext: {
           goalsRevision: await sync.goalsRevision(),
           availabilityRevision: bundle.availability.revision,
+          // 判断している間に学習記録が増えていないかも見る（自動反映のため）。
+          plannerSnapshotVersion: plannerSnapshotVersion({
+            records: bundle.records,
+            goalsRevision: await sync.goalsRevision(),
+            availabilityRevision: bundle.availability.revision,
+          }),
         },
         estimateNote: "estimateSeconds は保存された実績と設定から計算した値です。confidence が low のものは仮の値です。",
         limits: {
           days: dates.length,
           maxDays: 60,
-          unplannedLimit: 200,
-          overdueLimit: 200,
+          unplannedLimit,
+          overdueLimit,
           movesLimit: 30,
         },
         howTo: "1) ここで今の状態を受け取る 2) 配分案を changes にまとめる 3) validatePlanChanges で確かめる"
@@ -1812,7 +1842,7 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       const completion = args.completion === undefined || args.completion === null
         ? { type: "attempt" }
         : (() => {
-          rejectUnknownKeys(args.completion, ["type", "evaluations", "mode"], "completion");
+          rejectUnknownKeys(args.completion, ["type", "evaluations", "mode", "count"], "completion");
           const type = readEnum(args.completion.type, "completion.type", [...GOAL_COMPLETION_TYPES], { required: true });
           if (type === "attempt") return { type };
           return {
@@ -1821,7 +1851,8 @@ export function createStudyService({ sync, now = () => Date.now() }) {
               ? readArray(args.completion.evaluations, "completion.evaluations", { min: 1, max: 5 })
                 .map((value, index) => readEnum(value, `completion.evaluations[${index}]`, [...EVALUATIONS], { required: true }))
               : undefined,
-            mode: readEnum(args.completion.mode, "completion.mode", ["latest", "ever"], { fallback: "latest" }),
+            mode: readEnum(args.completion.mode, "completion.mode", [...GOAL_MASTERY_MODES], { fallback: "latest" }),
+            count: readMasteryCount(args.completion),
           };
         })();
 
@@ -1886,14 +1917,15 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         patch.questionIds = questionIds;
       }
       if (args.completion !== undefined) {
-        rejectUnknownKeys(args.completion, ["type", "evaluations", "mode"], "completion");
+        rejectUnknownKeys(args.completion, ["type", "evaluations", "mode", "count"], "completion");
         patch.completion = {
           type: readEnum(args.completion.type, "completion.type", [...GOAL_COMPLETION_TYPES], { required: true }),
           evaluations: args.completion.evaluations
             ? readArray(args.completion.evaluations, "completion.evaluations", { min: 1, max: 5 })
               .map((value, index) => readEnum(value, `completion.evaluations[${index}]`, [...EVALUATIONS], { required: true }))
             : undefined,
-          mode: readEnum(args.completion.mode, "completion.mode", ["latest", "ever"], { fallback: "latest" }),
+          mode: readEnum(args.completion.mode, "completion.mode", [...GOAL_MASTERY_MODES], { fallback: "latest" }),
+          count: readMasteryCount(args.completion),
         };
       }
       if (!Object.keys(patch).length) fail("変更する項目を1つ以上渡してください。", "title");

@@ -47,6 +47,7 @@ export const TASK_KINDS = {
 export { itemsOf, splitPlanItems, MOVE_REASONS, MOVE_REASON_LABELS, MOVE_KIND_LABELS } from './plan-items.js';
 export {
   GOAL_COMPLETION_LABELS, GOAL_COMPLETION_TYPES, GOAL_STATUSES, GOAL_STATUS_LABELS,
+  DEFAULT_MASTERY_COUNT, completionLabel,
   selectQuestions, goalAttempts, questionSatisfied,
 } from './goals.js';
 export { WEEKDAY_KEYS, WEEKDAY_LABELS, availabilityForDate } from './availability.js';

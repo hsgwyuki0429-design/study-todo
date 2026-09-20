@@ -5,7 +5,8 @@
 
 import * as api from './api.js';
 import {
-  GOAL_COMPLETION_LABELS, GOAL_STATUS_LABELS, WEEKDAY_KEYS, WEEKDAY_LABELS,
+  DEFAULT_MASTERY_COUNT, GOAL_COMPLETION_LABELS, GOAL_STATUS_LABELS, WEEKDAY_KEYS, WEEKDAY_LABELS,
+  completionLabel,
 } from './api.js';
 import { state, render } from './state.js';
 import { el, row, fmtDate } from './ui.js';
@@ -47,7 +48,14 @@ function goalSummary(goal, progress) {
   return parts.join(' ・ ');
 }
 
-async function goalForm(list, rerender) {
+async /** 画面の選択肢と、保存する達成条件の対応。 */
+const COMPLETION_DRAFTS = Object.freeze({
+  attempt: { type: 'attempt' },
+  mastery: { type: 'mastery', evaluations: ['perfect'], mode: 'latest' },
+  mastery_count: { type: 'mastery', evaluations: ['perfect'], mode: 'count', count: DEFAULT_MASTERY_COUNT },
+});
+
+function goalForm(list, rerender) {
   const questions = [...state.questions.values()];
   const chapters = [...new Set(questions.map((question) => question.chapter))];
   const draft = newGoal;
@@ -85,9 +93,12 @@ async function goalForm(list, rerender) {
     rerender();
   };
 
+  // 「習得する」は数え方まで選ぶ。プランナーの「perfect2回で一旦クリア」と
+  // 画面の達成表示が食い違わないよう、同じ completion をそのまま保存する。
   const completionSelect = el('select');
   completionSelect.append(new Option(GOAL_COMPLETION_LABELS.attempt, 'attempt'));
-  completionSelect.append(new Option(GOAL_COMPLETION_LABELS.mastery, 'mastery'));
+  completionSelect.append(new Option('習得する（最新の結果が ◯完璧にできた）', 'mastery'));
+  completionSelect.append(new Option(`習得する（◯完璧にできた を合計${DEFAULT_MASTERY_COUNT}回）`, 'mastery_count'));
   completionSelect.value = draft.completionType;
   completionSelect.onchange = () => { draft.completionType = completionSelect.value; };
 
@@ -108,7 +119,8 @@ async function goalForm(list, rerender) {
     el('div', 'row-sub', '対象の範囲'), chapterSelect, sectionSelect,
     el('div', 'row-sub', `対象 ${targets.length}問（いま選んでいる範囲の問題が、作成時に確定します）`),
     el('div', 'row-sub', '達成条件'), completionSelect,
-    el('div', 'row-sub', '「習得する」は、この目標に結び付いた最新の取り組みが ◯完璧にできた であれば達成とします。'),
+    el('div', 'row-sub', '「習得する」はこの目標に結び付いた取り組みだけで判定します。'
+      + `合計${DEFAULT_MASTERY_COUNT}回を選ぶと、◯完璧にできた が${DEFAULT_MASTERY_COUNT}回そろった時点で一旦クリアになります。`),
     el('div', 'row-sub', '優先順位'), prioritySelect,
   );
   const actions = el('div', 'setting-actions');
@@ -126,9 +138,7 @@ async function goalForm(list, rerender) {
         title: draft.title.trim(),
         deadline: draft.deadline,
         questionIds: targets.map((question) => question.id),
-        completion: draft.completionType === 'mastery'
-          ? { type: 'mastery', evaluations: ['perfect'], mode: 'latest' }
-          : { type: 'attempt' },
+        completion: COMPLETION_DRAFTS[draft.completionType] ?? { type: 'attempt' },
         priority: draft.priority,
       });
       newGoal = null;
@@ -159,7 +169,7 @@ export async function renderGoalCard(list, rerender) {
     list.append(node);
     const detail = el('div', 'row-sub goal-detail');
     detail.textContent = [
-      GOAL_COMPLETION_LABELS[goal.completion.type],
+      completionLabel(goal.completion),
       `優先度 ${goal.priority}`,
       goal.startDate ? `開始 ${fmtDate(goal.startDate)}` : null,
     ].filter(Boolean).join(' ・ ');

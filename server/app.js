@@ -24,6 +24,7 @@ import { SERVER_INSTRUCTIONS, createTools } from "./tools.js";
 import { createSyncService } from "./service/sync-service.js";
 import { DATA_VERSION, createStudyService } from "./service/study-service.js";
 import { createReplanEvents, readStudyEnd } from './service/replan-events.js';
+import { createPlannerRunner } from './service/planner-runner.js';
 
 export const SERVER_INFO = Object.freeze({
   name: "study-todo",
@@ -101,13 +102,19 @@ export function readConfig(env = {}) {
  * サーバー本体を組み立てる。
  * storage（保存先）と env（設定）を差し替えるだけで、どの環境でも動く。
  */
-export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(), waitUntil, routineFetch, onReplan }) {
+export function createStudyTodoMcpApp({ storage, env = {}, now = () => Date.now(), waitUntil, routineFetch, onReplan, plannerFetch }) {
   const config = readConfig(env);
   const sync = createSyncService({ storage, now });
   const service = createStudyService({ sync, now });
   const auth = createAuth({ storage, ownerKey: config.ownerKey, now });
   const oauth = createOAuth({ storage, now });
-  const replans = createReplanEvents({ storage, env, now, waitUntil, fetchImpl: routineFetch, onReplan });
+  // Jev のプランナーは、このサーバーの中で同じサービス関数を使う。
+  // 内部からの呼び出しでも actorKind: ai の保護（完了・実行中・固定）はそのまま効く。
+  // 学習記録を作る・直す機能は、プランナーへ渡していない。
+  const plannerRunner = createPlannerRunner({
+    service, sync, env, now, fetchImpl: plannerFetch ?? routineFetch ?? fetch,
+  });
+  const replans = createReplanEvents({ storage, env, now, waitUntil, fetchImpl: routineFetch, onReplan, plannerRunner });
   const mcp = createMcpServer({
     serverInfo: SERVER_INFO,
     instructions: SERVER_INSTRUCTIONS,

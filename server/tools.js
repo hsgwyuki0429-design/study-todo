@@ -21,7 +21,7 @@ import { ValidationError } from "./core/validate.js";
 import { SERVICE_LIMITS } from "./service/study-service.js";
 import { EVALUATIONS, MISTAKE_EVALUATIONS, TASK_KINDS } from "./service/merge.js";
 import { CHANGE_LIMITS } from "./service/task-changes.js";
-import { GOAL_COMPLETION_TYPES, GOAL_STATUSES } from "../src/goals.js";
+import { GOAL_COMPLETION_TYPES, GOAL_MASTERY_MODES, GOAL_STATUSES, MASTERY_COUNT_RANGE } from "../src/goals.js";
 import { WEEKDAY_KEYS } from "../src/availability.js";
 import { EVALUATION_VALUES } from "../src/records-model.js";
 import { RELATION_SOURCES, RELATION_TYPES, STORED_RELATION_TYPES } from "./service/question-relations.js";
@@ -115,6 +115,11 @@ const EXPECTED_CONTEXT_SCHEMA = {
   properties: {
     goalsRevision: { type: "integer", minimum: 0, description: "目標全体の版。" },
     availabilityRevision: { type: "integer", minimum: 0, description: "学習可能時間の設定の版。" },
+    plannerSnapshotVersion: {
+      type: "string", maxLength: 120,
+      description: "目標・学習可能時間に加えて、学習記録の件数と最新時刻まで含めた版。"
+        + "渡すと、計画を作っている間に学習記録が増えていた場合も context_stale で断る。",
+    },
   },
 };
 
@@ -885,8 +890,14 @@ export function createTools() {
               },
               mode: {
                 type: "string",
-                enum: ["latest", "ever"],
-                description: "latest（既定）=この目標に結び付いた最新の取り組みで判定 / ever=一度でも条件を満たせば達成。",
+                enum: [...GOAL_MASTERY_MODES],
+                description: "latest（既定）=この目標に結び付いた最新の取り組みで判定 / ever=一度でも条件を満たせば達成 / count=条件を満たした取り組みが合計 count 回で達成。",
+              },
+              count: {
+                type: "integer",
+                minimum: MASTERY_COUNT_RANGE.min,
+                maximum: MASTERY_COUNT_RANGE.max,
+                description: "mode=count のときの回数。既定は2（perfectを2回そろえたら一旦クリア）。",
               },
             },
           },
@@ -918,7 +929,8 @@ export function createTools() {
             properties: {
               type: { type: "string", enum: [...GOAL_COMPLETION_TYPES] },
               evaluations: { type: "array", items: { type: "string", enum: [...EVALUATIONS] }, maxItems: 5 },
-              mode: { type: "string", enum: ["latest", "ever"] },
+              mode: { type: "string", enum: [...GOAL_MASTERY_MODES] },
+              count: { type: "integer", minimum: MASTERY_COUNT_RANGE.min, maximum: MASTERY_COUNT_RANGE.max },
             },
           },
           priority: { type: "integer", minimum: 1, maximum: 5, description: "新しい優先順位。" },
@@ -1189,6 +1201,8 @@ export function createTools() {
           from: { ...DATE_PROPERTY, description: "開始日。省略すると今日。" },
           to: { ...DATE_PROPERTY, description: "終了日。省略すると今日から2週間。最大60日。" },
           goalIds: { type: "array", items: { type: "string", maxLength: 80 }, maxItems: 50, description: "対象の目標。省略すると進行中のものすべて。" },
+          unplannedLimit: { type: "integer", minimum: 1, maximum: 5000, description: "未配置分の上限。省略すると200。unplannedTruncated が true のときに上げる。" },
+          overdueLimit: { type: "integer", minimum: 1, maximum: 5000, description: "過ぎた日に残っている分の上限。省略すると200。" },
           timezoneOffsetMinutes: TIMEZONE_PROPERTY,
         },
       },
