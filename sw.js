@@ -1,6 +1,6 @@
 // オフラインでも起動できるよう、アプリシェルをキャッシュする。
 // 学習データは IndexedDB にあるため、Service Worker はデータを扱わない。
-const CACHE = 'aochart-v50';
+const CACHE = 'aochart-v51';
 const SHELL = [
   './',
   './index.html',
@@ -71,7 +71,9 @@ self.addEventListener('fetch', (e) => {
     || (e.request.destination === '' && (e.request.headers.get('accept') ?? '').includes('text/html'));
 
   e.respondWith(
-    fetch(e.request)
+    // GitHub Pages は10分ほどブラウザのHTTPキャッシュを使わせるため、毎回サーバーへ確かめる。
+    // これが無いと、配った直後でも古い画面のまま開き続けてしまう。
+    fetch(e.request.url, { cache: 'no-cache', credentials: 'same-origin' })
       .then((res) => {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(e.request, copy));
