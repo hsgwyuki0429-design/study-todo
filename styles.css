@@ -952,3 +952,69 @@ button:active { filter: brightness(.94); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* ---------- ホーム：スマホを横にした学習中 ---------- */
+/* 画面全体をタイマーにする。上に再生バー（端末の幅いっぱい）と今の例題、
+   左端から引き出す「次にやる例題」の一覧。ノッチ側は safe-area で避ける。 */
+#screen-home[data-landscape] {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-sub);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+.land-top { flex: none; display: flex; align-items: center; gap: 16px; padding: 8px 16px 0; }
+.land-top .play-slider { flex: 1; min-width: 0; margin: 0; }
+.land-info { flex: none; max-width: 40%; text-align: right; }
+.land-question { font-size: 20px; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+.land-status { font-size: 12px; color: var(--fg-sub); }
+.land-center { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
+.land-timer {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: min(36vw, 52vh);
+  line-height: 1;
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.land-timer.danger { color: var(--danger); }
+.land-sub { font-size: 14px; color: var(--fg-sub); font-variant-numeric: tabular-nums; }
+.land-bottom { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 0 16px 10px; }
+.land-actions { display: flex; gap: 10px; justify-content: center; }
+.land-actions .btn { flex: 0 1 220px; min-height: 40px; font-size: 15px; }
+.land-actions .btn-primary { min-height: 40px; }
+.land-eval { display: flex; gap: 8px; }
+.land-eval .eval-btn {
+  flex: 1 1 0; min-width: 0; flex-direction: column; gap: 2px; padding: 6px 4px;
+  border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--bg);
+}
+.land-eval .eval-btn .lbl { font-size: 12px; text-align: center; }
+.land-handle {
+  position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  width: 22px; height: 64px; border-radius: 0 12px 12px 0;
+  background: var(--bg); color: var(--fg-sub); font-size: 20px; line-height: 1;
+  box-shadow: var(--segment-shadow);
+  z-index: 5;
+}
+.land-scrim { z-index: 6; position: absolute; inset: 0; background: rgba(0, 0, 0, .35); opacity: 0; pointer-events: none; transition: opacity .25s; }
+.land-scrim.open { opacity: 1; pointer-events: auto; }
+.land-drawer {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  width: min(340px, 60vw);
+  display: flex; flex-direction: column;
+  padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background: var(--bg);
+  box-shadow: var(--sheet-shadow);
+  z-index: 7;
+  transform: translateX(-105%);
+  transition: transform .3s cubic-bezier(.2, .8, .3, 1);
+}
+.land-drawer.open { transform: none; }
+.land-drawer-head { flex: none; display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; font-size: 14px; font-weight: 600; border-bottom: 1px solid var(--line); }
+.land-drawer-close { width: 36px; height: 36px; font-size: 22px; color: var(--fg-sub); }
+.land-drawer .list { flex: 1; min-height: 0; }
+.land-center { overflow: hidden; }
+#screen-home[data-landscape='eval'] .land-timer { font-size: min(30vw, 28vh); }

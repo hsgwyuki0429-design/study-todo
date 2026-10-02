@@ -593,8 +593,7 @@ function timerPanel() {
 export function tickHome() {
   const s = state.session;
   const set = (name, text) => {
-    const n = document.querySelector(`[data-timer="${name}"]`);
-    if (n) n.textContent = text;
+    document.querySelectorAll(`[data-timer="${name}"]`).forEach((n) => { n.textContent = text; });
   };
   refreshStudyDayIfNeeded();
   set('today', fmtMS(dailyElapsed()));
@@ -802,10 +801,212 @@ function challengePanel(panel) {
 
 /* ================================================================== */
 
+/* ================================================================== */
+/* 描画：スマホを横にした学習中の画面                                   */
+/* ================================================================== */
+
+/**
+ * 横向きのスマホ（高さが低い横長）。タブレットや PC の広い画面は対象にしない。
+ * 学習中だけ、タイマーを画面いっぱいにした専用レイアウトに切り替える。
+ */
+const landscapeQuery = window.matchMedia('(orientation: landscape) and (max-height: 600px)');
+const isLandscapeFocus = () => landscapeQuery.matches && state.session.mode !== 'idle';
+
+// 左から引き出す「次にやる例題」の一覧を開いているか。再描画をまたいで覚える。
+let drawerOpen = false;
+
+landscapeQuery.addEventListener('change', () => {
+  drawerOpen = false;
+  if (state.tab === 'home') render();
+});
+
+function setDrawer(screen, open) {
+  drawerOpen = open;
+  screen.querySelector('.land-drawer')?.classList.toggle('open', open);
+  screen.querySelector('.land-scrim')?.classList.toggle('open', open);
+}
+
+/** 横向きの下側に並べる操作ボタン（戻る・採点へ・リセットなど）。 */
+function landActions(s) {
+  const actions = el('div', 'land-actions');
+  const add = (text, onClick, cls = 'btn') => {
+    const b = el('button', cls, text);
+    b.onclick = onClick;
+    actions.append(b);
+  };
+  if (s.mode === 'task_list' && s.currentQuestionId) add('解答終了・採点へ', beginReview, 'btn btn-primary');
+  if (s.mode === 'record_input') add('解答中へ戻る', backToSolve);
+  if ((s.mode === 'task_list' || s.mode === 'record_input') && s.currentQuestionId) {
+    add(elapsedOf(s.currentQuestionId) === 0 ? '選択を外す' : '時間を0秒に戻す', resetCurrentQuestion);
+  }
+  if (s.mode === 'challenge') {
+    add(s.challengeCountUp ? 'カウントダウン表示' : 'カウントアップ表示', async () => {
+      s.challengeCountUp = !s.challengeCountUp;
+      await persist();
+      render();
+    });
+    add('中断', abortChallenge);
+    add('終了', finishChallenge, 'btn btn-primary');
+  }
+  return actions;
+}
+
+/** 結果ボタンを横一列に並べる（採点・暗記中／チャレンジの記録中）。 */
+function landEvalRow() {
+  const list = el('div', 'land-eval');
+  for (const ev of EVALUATIONS) {
+    const b = el('button', 'eval-btn');
+    b.append(el('span', `sym tone-${ev.tone}`, ev.symbol));
+    b.append(el('span', 'lbl', ev.label));
+    b.onclick = () => recordEvaluation(ev.value);
+    list.append(b);
+  }
+  return list;
+}
+
+/** 左から出す一覧。次にやる例題が並び、押すとその例題へ切り替わる。 */
+function landDrawer(screen) {
+  const s = state.session;
+  const drawer = el('div', `land-drawer${drawerOpen ? ' open' : ''}`);
+  const head = el('div', 'land-drawer-head');
+  head.append(el('span', null, s.mode.startsWith('challenge') ? 'チャレンジの問題' : '次にやる例題'));
+  const close = el('button', 'land-drawer-close', '×');
+  close.setAttribute('aria-label', '閉じる');
+  close.onclick = () => setDrawer(screen, false);
+  head.append(close);
+  const list = el('div', 'list');
+
+  if (s.mode === 'challenge') {
+    for (const qid of challengeQuestionIds(currentChallengeTask())) {
+      list.append(row({
+        title: qLabel(qid),
+        right: stateCells(qid),
+        onClick: () => { drawerOpen = false; tapChallengeQuestion(qid); },
+        classes: s.currentQuestionId === qid && s.currentStartedAt ? ['active'] : [],
+      }));
+    }
+  } else if (s.mode === 'challenge_review') {
+    s.reviewQueue.forEach((qid, i) => list.append(row({
+      title: qLabel(qid),
+      classes: i === s.reviewIndex ? ['current'] : [],
+    })));
+  } else {
+    const items = flattenTasks();
+    if (!items.length) list.append(emptyState('今日のタスクは終わりました'));
+    for (const item of items) {
+      if (item.type === 'challenge') {
+        list.append(row({
+          title: item.task.title ?? 'チャレンジ',
+          sub: challengeSub(item.task),
+          onClick: () => { drawerOpen = false; openChallenge(item.task); },
+        }));
+        continue;
+      }
+      const qid = item.questionId;
+      const current = s.currentQuestionId === qid;
+      list.append(row({
+        title: qLabel(qid),
+        sub: current ? '解いている例題' : null,
+        right: stateCells(qid),
+        onClick: () => { drawerOpen = false; tapTaskQuestion(qid, item.item, item.task); },
+        classes: current && s.currentStartedAt ? ['active'] : current ? ['current'] : [],
+      }));
+    }
+  }
+  drawer.append(head, list);
+  return drawer;
+}
+
+/** 左端からのスワイプで一覧を開き、一覧の上で左へ払うか外側を押すと閉じる。 */
+function bindDrawerSwipe(screen) {
+  let startX = null, startY = null, fromEdge = false, onDrawer = false;
+  screen.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { startX = null; return; }
+    const t = e.touches[0];
+    startX = t.clientX; startY = t.clientY;
+    fromEdge = !drawerOpen && t.clientX <= 28;
+    onDrawer = !!e.target.closest?.('.land-drawer');
+  }, { passive: true });
+  screen.addEventListener('touchend', (e) => {
+    if (startX == null) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - startX, dy = t.clientY - startY;
+    startX = null;
+    if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    if (fromEdge && dx > 0) setDrawer(screen, true);
+    else if (drawerOpen && onDrawer && dx < 0) setDrawer(screen, false);
+  }, { passive: true });
+}
+
+function renderLandscape(screen) {
+  const s = state.session;
+  // 結果ボタンを並べる段階では、下に場所を空けるためタイマーを少し小さくする。
+  screen.dataset.landscape = s.mode === 'record_input' || s.mode === 'challenge_review' ? 'eval' : '1';
+  const top = el('div', 'land-top');
+  top.append(playSlider(s));
+
+  const info = el('div', 'land-info');
+  const challenge = s.mode === 'challenge' || s.mode === 'challenge_review';
+  const task = challenge ? currentChallengeTask() : null;
+  const qid = s.mode === 'challenge_review' ? s.reviewQueue[s.reviewIndex] : s.currentQuestionId;
+  const name = qid ? qLabel(qid) : task?.title ?? (challenge ? 'チャレンジ' : '問題を選んでください');
+  info.append(el('div', 'land-question', name));
+  const paused = isPaused();
+  let status = '';
+  if (s.mode === 'record_input') status = paused ? '一時停止中' : '採点・暗記中';
+  else if (s.mode === 'challenge_review') status = `記録 ${s.reviewIndex + 1}/${s.reviewQueue.length}`;
+  else if (s.mode === 'challenge') status = (s.challengeCountUp ? '経過時間' : '残り時間') + (paused ? '（一時停止中）' : '');
+  else if (paused) status = '一時停止中';
+  if (status) info.append(el('div', 'land-status', status));
+  top.append(info);
+
+  const value = el('div', 'land-timer');
+  if (s.mode === 'challenge') {
+    const limit = s.challengeTimeLimitSeconds ?? 0;
+    value.textContent = fmtMS(s.challengeCountUp ? challengeElapsed() : Math.max(0, limit - challengeElapsed()));
+    value.dataset.timer = 'challenge';
+    value.classList.add('danger');
+  } else if (s.mode === 'challenge_review') {
+    value.textContent = fmtMS(s.questionElapsed[qid] || 0);
+  } else {
+    value.textContent = fmtMS(dailyElapsed());
+    value.dataset.timer = 'today';
+  }
+  const center = el('div', 'land-center');
+  center.append(value);
+  if (s.mode === 'task_list' || s.mode === 'record_input') {
+    const label = el('div', 'land-sub');
+    label.append('今日の学習時間');
+    if (qid) {
+      const per = el('span', null, '');
+      per.dataset.elapsedFor = qid;
+      per.textContent = fmtMS(elapsedOf(qid));
+      label.append(' ・ この例題 ', per);
+    }
+    center.append(label);
+  }
+
+  const bottom = el('div', 'land-bottom');
+  if (s.mode === 'record_input' || s.mode === 'challenge_review') bottom.append(landEvalRow());
+  else bottom.append(landActions(s));
+  if (s.mode === 'record_input') bottom.append(landActions(s));
+
+  const handle = el('button', 'land-handle', '›');
+  handle.setAttribute('aria-label', '次にやる例題を開く');
+  handle.onclick = () => setDrawer(screen, true);
+  const scrim = el('div', `land-scrim${drawerOpen ? ' open' : ''}`);
+  scrim.onclick = () => setDrawer(screen, false);
+
+  screen.append(top, center, bottom, handle, scrim, landDrawer(screen));
+  bindDrawerSwipe(screen);
+}
+
 export function renderHome(screen) {
   const s = state.session;
   screen.innerHTML = '';
   screen.dataset.mode = s.mode;
+  if (isLandscapeFocus()) return renderLandscape(screen);
+  delete screen.dataset.landscape;
   const head = el('div', 'view-head view-head-row');
   head.append(el('h1', 'view-title', 'ホーム'));
   head.append(timerHeadRight(s));
