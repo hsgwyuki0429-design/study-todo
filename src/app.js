@@ -110,6 +110,8 @@ function buildTabBar() {
   };
   // ボタンの実寸はレイアウト確定後に決まるので、初期位置合わせは次のフレームで。
   requestAnimationFrame(() => placeTabThumb(state.tab, false));
+  // 向きや幅が変わったときも、光を選ばれているタブの真下へ置き直す。
+  window.addEventListener('resize', () => placeTabThumb(state.tab, false));
 
   // 「やること／やったこと」のスライドと同じ仕組みで、指を離さなくても
   // ドラッグしてアイコンの上に来た時点でそのタブへ切り替わる。

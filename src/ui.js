@@ -98,6 +98,16 @@ export function segmented(options, current, onSelect, key = 'default') {
     }
   });
 
+  // 端末の向きや幅が変わると、ボタンの実寸も変わる。光（thumb）はピクセル指定なので、
+  // バーの大きさが変わるたびに置き直す（置き直さないと古い大きさのまま残る）。
+  if (typeof ResizeObserver !== 'undefined') {
+    let first = true;
+    new ResizeObserver(() => {
+      if (first) { first = false; return; }
+      if (!dragging) placeThumb(indexOf(current), false);
+    }).observe(bar);
+  }
+
   // このバー上で始まった指の動きは、外側（一覧全体のスワイプ）へ伝えない。
   // 伝わると同じ操作で二重に切り替わってしまう。
   let dragStartX = null, dragBaseLeft = 0, dragging = false;
