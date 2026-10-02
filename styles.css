@@ -1018,3 +1018,14 @@ button:active { filter: brightness(.94); }
 .land-drawer .list { flex: 1; min-height: 0; }
 .land-center { overflow: hidden; }
 #screen-home[data-landscape='eval'] .land-timer { font-size: min(30vw, 28vh); }
+/* iPhone SE など、高さが360px以下の小さな横画面。 */
+@media (max-height: 360px) {
+  .land-top { padding-top: 6px; gap: 12px; }
+  .land-question { font-size: 17px; }
+  .land-bottom { gap: 6px; padding-bottom: 8px; }
+  .land-actions .btn { min-height: 36px; font-size: 14px; padding-block: 4px; }
+  .land-eval .eval-btn { padding: 4px 2px; gap: 1px; }
+  .land-eval .eval-btn .sym { width: 28px; height: 28px; font-size: 14px; }
+  .land-eval .eval-btn .lbl { font-size: 10px; line-height: 1.2; }
+  #screen-home[data-landscape='eval'] .land-timer { font-size: min(26vw, 24vh); }
+}
