@@ -33,6 +33,7 @@ import {
 } from "./task-changes.js";
 import { dateKeyOf, isDateKey, monthKeyOf, todayKeyOf } from "../../src/datetime.js";
 import { mergeRelationEntries } from "./question-relations.js";
+import { MEMO_LIMITS, newMemoId, normalizeStoredMemo, pickNewerMemo, sortMemos } from "../../src/ai-memos.js";
 import {
   hashQuestions,
   mergeAvailability,
@@ -84,6 +85,8 @@ export const SYNC_KEYS = Object.freeze({
   estimates: "studytodo:estimates",
   // 問題どうしの関連（前提・同系統・演習）。片方向だけ覚え、逆向きは読むときに作る。
   relations: "studytodo:relations",
+  // AIメモ（byId）と、消したメモのID（deleted）、二重送信を防ぐ操作IDの控え（operations）。
+  memos: "studytodo:memos",
 });
 
 export const SYNC_LIMITS = Object.freeze({
@@ -156,6 +159,7 @@ const DEFAULT_RECORD_OPS = { entries: [] };
 const DEFAULT_AVAILABILITY_DOC = { weekly: {}, overrides: {}, todayRemaining: null, reserveMinutes: 0, updatedAt: null };
 const DEFAULT_ESTIMATES = { byQuestion: {} };
 const DEFAULT_RELATIONS = { byKey: {} };
+const DEFAULT_MEMOS = { byId: {}, deleted: {}, operations: [], updatedAt: null };
 
 export function createSyncService({ storage, now = () => Date.now() }) {
   async function readDoc(key, defaults) {
@@ -419,8 +423,9 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     knownQuestionIds = null,
     doneItemIds = null,
     undoOf = null,
+    memo = null,
   }) {
-    const fingerprint = fingerprintOf(request);
+    const fingerprint = fingerprintOf(request, memo);
     const at = new Date(now()).toISOString();
 
     return runTransaction(storage, async (tx) => {
@@ -439,6 +444,14 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         }
         // 同じ要求の再送。前と同じ結果を返すだけで、予定は動かさない。
         return { ...already.result, replayed: true };
+      }
+
+      // メモを添えるときは、書けることを先に確かめる（予定だけ変わってメモが無い、を作らない）。
+      const memoDocument = memo
+        ? ((await tx.get(SYNC_KEYS.memos)) ?? structuredClone(DEFAULT_MEMOS))
+        : null;
+      if (memoDocument && Object.keys(memoDocument.byId ?? {}).length >= MEMO_LIMITS.stored) {
+        return memoLimitResult();
       }
 
       const dates = [...request.expectedRevisions.keys()];
@@ -486,6 +499,26 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         document.moves = capMoves(merged);
         await tx.put(SYNC_KEYS.moves, document);
       }
+      // 予定の変更と同じ操作の中でメモも作る。ここまで来たのは変更が通ったときだけ。
+      let savedMemo = null;
+      if (memoDocument) {
+        savedMemo = {
+          id: newMemoId(),
+          createdAt: at,
+          updatedAt: at,
+          author: { kind: actorKind === "ai" ? "ai" : "user", name: actorName },
+          category: memo.category,
+          body: memo.body,
+          relatedChangeId: changeId,
+          pinned: false,
+          status: "active",
+          revision: 1,
+        };
+        memoDocument.byId = { ...(memoDocument.byId ?? {}), [savedMemo.id]: savedMemo };
+        memoDocument.updatedAt = at;
+        memoDocument.revision = Number(memoDocument.revision ?? 0) + 1;
+        await tx.put(SYNC_KEYS.memos, memoDocument);
+      }
       const result = {
         ok: true,
         changeId,
@@ -495,6 +528,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         summary: outcome.summary,
         moves,
         days: Object.values(outcome.plans).map(summarizePlan),
+        ...(savedMemo ? { memo: savedMemo } : {}),
       };
       const record = {
         id: changeId,
@@ -816,6 +850,168 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       draft.updatedAt = new Date(now()).toISOString();
     }, { defaults: structuredClone(DEFAULT_RELATIONS) });
     return { deleted };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* AIメモ                                                              */
+  /* ------------------------------------------------------------------ */
+
+  async function readMemoDocument() {
+    return readDoc(SYNC_KEYS.memos, DEFAULT_MEMOS);
+  }
+
+  /** 保存してあるメモ（pinned が先頭、残りは更新の新しい順）。 */
+  async function readMemos() {
+    const document = await readMemoDocument();
+    return sortMemos(Object.values(document.byId ?? {}));
+  }
+
+  /** 消したメモのID。since（ミリ秒）より新しく消したものだけにもできる。 */
+  async function readMemoDeletions({ since = null } = {}) {
+    const document = await readMemoDocument();
+    return Object.entries(document.deleted ?? {})
+      .filter(([, at]) => since === null || Date.parse(at) > since)
+      .map(([id]) => id);
+  }
+
+  function capTombstones(deleted) {
+    const ids = Object.keys(deleted);
+    if (ids.length <= MEMO_LIMITS.tombstones) return deleted;
+    const keep = ids.sort((a, b) => Date.parse(deleted[b]) - Date.parse(deleted[a])).slice(0, MEMO_LIMITS.tombstones);
+    return Object.fromEntries(keep.map((id) => [id, deleted[id]]));
+  }
+
+  const memoLimitResult = () => ({
+    ok: false,
+    error: "memo_limit",
+    message: `AIメモは${MEMO_LIMITS.stored}件までです。古いメモを deleteAiMemo で整理してから足してください。`,
+  });
+
+  /**
+   * メモを1件足す。同じ operationId の送り直しは、前の結果を返すだけで二重にならない。
+   * 同じ operationId で内容が違うときは、何も足さずに断る。
+   */
+  async function addMemo({ input, author, operationId, fingerprint }) {
+    const at = new Date(now()).toISOString();
+    const { result } = await updateDocument(storage, SYNC_KEYS.memos, (draft) => {
+      draft.byId = draft.byId ?? {};
+      draft.operations = draft.operations ?? [];
+      const prior = draft.operations.find((entry) => entry.operationId === operationId);
+      if (prior) {
+        if (prior.fingerprint !== fingerprint) {
+          return {
+            ok: false,
+            error: "operation_conflict",
+            memoId: prior.memoId,
+            message: "同じ operationId で、内容の違うメモがすでに保存されています。別の operationId を使ってください。",
+          };
+        }
+        return { ok: true, replayed: true, memoId: prior.memoId, memo: draft.byId[prior.memoId] ?? null };
+      }
+      if (Object.keys(draft.byId).length >= MEMO_LIMITS.stored) return memoLimitResult();
+      const memo = { id: newMemoId(), createdAt: at, updatedAt: at, author, ...input, revision: 1 };
+      draft.byId[memo.id] = memo;
+      draft.operations = [{ operationId, fingerprint, memoId: memo.id }, ...draft.operations].slice(0, MEMO_LIMITS.operations);
+      draft.updatedAt = at;
+      return { ok: true, memo };
+    }, { defaults: structuredClone(DEFAULT_MEMOS) });
+    return result;
+  }
+
+  /**
+   * メモを書き換える。expectedRevision が今と違えば、何も変えずに競合を返す。
+   * patch の項目は呼ぶ側で確かめ済みのもの。questionIds が空なら項目ごと外す。
+   */
+  async function updateMemo({ id, expectedRevision, patch }) {
+    const at = new Date(now()).toISOString();
+    const { result } = await updateDocument(storage, SYNC_KEYS.memos, (draft) => {
+      const memo = draft.byId?.[id];
+      if (!memo) return { ok: false, error: "memo_not_found", id, message: "そのメモは見つかりません（消されたか、IDが違います）。" };
+      if (Number(memo.revision) !== expectedRevision) {
+        return {
+          ok: false,
+          error: "revision_conflict",
+          id,
+          expectedRevision,
+          currentRevision: memo.revision,
+          memo,
+          message: "メモが読んだあとで書き換えられています。何も変更していません。",
+          nextAction: "返ってきた memo（または getAiMemos）の今の内容と revision を見て、必要ならやり直してください。",
+        };
+      }
+      const next = { ...memo, ...patch, updatedAt: at, revision: Number(memo.revision) + 1 };
+      if (Array.isArray(next.questionIds) && !next.questionIds.length) delete next.questionIds;
+      draft.byId[id] = next;
+      draft.updatedAt = at;
+      return { ok: true, memo: next };
+    }, { defaults: structuredClone(DEFAULT_MEMOS) });
+    return result;
+  }
+
+  /** メモを消す。revision が違えば何も消さずに競合を返す。消したIDは墓標として残す。 */
+  async function deleteMemo({ id, expectedRevision }) {
+    const at = new Date(now()).toISOString();
+    const { result } = await updateDocument(storage, SYNC_KEYS.memos, (draft) => {
+      const memo = draft.byId?.[id];
+      if (!memo) return { ok: false, error: "memo_not_found", id, message: "そのメモは見つかりません（すでに消されたか、IDが違います）。" };
+      if (Number(memo.revision) !== expectedRevision) {
+        return {
+          ok: false,
+          error: "revision_conflict",
+          id,
+          expectedRevision,
+          currentRevision: memo.revision,
+          memo,
+          message: "メモが読んだあとで書き換えられています。何も消していません。",
+          nextAction: "返ってきた memo の今の内容を見て、それでも消すなら currentRevision を expectedRevision にして送り直してください。",
+        };
+      }
+      delete draft.byId[id];
+      draft.deleted = capTombstones({ ...(draft.deleted ?? {}), [id]: at });
+      draft.updatedAt = at;
+      return { ok: true, id, deletedAt: at };
+    }, { defaults: structuredClone(DEFAULT_MEMOS) });
+    return result;
+  }
+
+  /**
+   * 端末から届いたメモの変更を重ねる。
+   * 利用者が画面で「解決済み」にした・消した分がここから入る。
+   * メモは revision の大きいほうを残し、消した（墓標のある）メモは復活させない。
+   */
+  async function pushMemos({ memos = [], deletions = [] } = {}) {
+    const at = new Date(now()).toISOString();
+    const outcome = { stored: 0, ignored: 0, deleted: 0 };
+    await updateDocument(storage, SYNC_KEYS.memos, (draft) => {
+      draft.byId = draft.byId ?? {};
+      draft.deleted = draft.deleted ?? {};
+      for (const id of deletions.slice(0, MEMO_LIMITS.perPush)) {
+        if (typeof id !== "string" || !id || id.length > MEMO_LIMITS.idLength) continue;
+        if (draft.byId[id]) {
+          delete draft.byId[id];
+          outcome.deleted += 1;
+        }
+        draft.deleted[id] = at;
+      }
+      for (const raw of memos.slice(0, MEMO_LIMITS.perPush)) {
+        const memo = normalizeStoredMemo(raw, { now: now() });
+        if (!memo || draft.deleted[memo.id]) {
+          outcome.ignored += 1;
+          continue;
+        }
+        const current = draft.byId[memo.id];
+        if (pickNewerMemo(current, memo) !== memo) continue;
+        if (!current && Object.keys(draft.byId).length >= MEMO_LIMITS.stored) {
+          outcome.ignored += 1;
+          continue;
+        }
+        draft.byId[memo.id] = memo;
+        outcome.stored += 1;
+      }
+      draft.deleted = capTombstones(draft.deleted);
+      if (outcome.stored || outcome.deleted) draft.updatedAt = at;
+    }, { defaults: structuredClone(DEFAULT_MEMOS) });
+    return outcome;
   }
 
   /* ------------------------------------------------------------------ */
@@ -1153,6 +1349,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
       SYNC_KEYS.deletions,
       SYNC_KEYS.availability,
       SYNC_KEYS.estimates,
+      SYNC_KEYS.memos,
     ];
     for (const key of keys) await storage.delete(key);
 
@@ -1208,6 +1405,12 @@ export function createSyncService({ storage, now = () => Date.now() }) {
     readRelationEntries,
     writeRelationEntries,
     deleteRelationEntries,
+    readMemos,
+    readMemoDeletions,
+    addMemo,
+    updateMemo,
+    deleteMemo,
+    pushMemos,
     readPlacements,
     setTaskPinned,
     reportActivity,
@@ -1500,6 +1703,16 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         }
       }
 
+      // AIメモ。画面で「解決済み」にした・消した分が届く（revision の大きいほうを残す）。
+      let memosOutcome = { stored: 0, ignored: 0, deleted: 0 };
+      const memoDeletions = Array.isArray(payload.memoDeletions) ? payload.memoDeletions : [];
+      if (Array.isArray(payload.memos) || memoDeletions.length) {
+        memosOutcome = await pushMemos({
+          memos: Array.isArray(payload.memos) ? payload.memos : [],
+          deletions: memoDeletions,
+        });
+      }
+
       if (goals.length) {
         const incoming = goals.map((goal) => normalizeGoal(goal, { now: at })).filter(Boolean);
         await updateDocument(storage, SYNC_KEYS.goals, (document) => {
@@ -1569,6 +1782,7 @@ export function createSyncService({ storage, now = () => Date.now() }) {
           duplicatedMoves: moves.length - addedMoves,
           availability: availabilityOutcome,
           estimates: estimatesStored,
+          memos: memosOutcome,
           goals: goals.length,
         },
         questionsStored,
@@ -1628,6 +1842,9 @@ export function createSyncService({ storage, now = () => Date.now() }) {
         availability: await readAvailability(),
         // 見積もりの「指定」だけを配る。実績から計算できる分は配らない。
         estimates: await readEstimateEntries(),
+        // AIメモ。件数が多いときは、pinned と新しいものから配る。消したメモのIDも添える。
+        memos: (await readMemos()).slice(0, MEMO_LIMITS.perPull),
+        memoDeletions: await readMemoDeletions({ since: sinceMs }),
         goals,
         questions: {
           version: questions.version,

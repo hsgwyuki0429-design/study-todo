@@ -231,10 +231,12 @@ export function parseChangeRequest(args = {}) {
 }
 
 /** 同じ操作IDで内容だけ違う要求を見分けるための指紋。 */
-export function fingerprintOf(request) {
+export function fingerprintOf(request, memo = null) {
   return JSON.stringify({
     expected: [...request.expectedRevisions.entries()].sort(),
     changes: request.changes,
+    // メモを添えたときだけ指紋に含める（添えない要求の指紋は、これまでと同じ）。
+    ...(memo ? { memo } : {}),
   });
 }
 

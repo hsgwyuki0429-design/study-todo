@@ -14,6 +14,7 @@
 import { idb, STORES } from './idb.js';
 import * as api from './api.js';
 import { hashQuestions } from './hash.js';
+import { pickNewerMemo } from './ai-memos.js';
 
 export const CLOUD_META_KEY = 'cloud';
 
@@ -309,7 +310,7 @@ export async function resetSyncCursor() {
 /** 送るものを組み立てる。初回（lastPulledAtMs が無い）はローカルの全部を送る。 */
 async function buildPayload(config) {
   const first = !config.lastPulledAtMs;
-  const [records, challenges, goals, questions, outbox, planMeta, moves] = await Promise.all([
+  const [records, challenges, goals, questions, outbox, planMeta, moves, memos] = await Promise.all([
     idb.all(STORES.records),
     idb.all(STORES.challenges),
     api.getGoals({ includeDeleted: true }),
@@ -317,12 +318,15 @@ async function buildPayload(config) {
     api.listOutbox(),
     api.getPlanMeta(),
     idb.all(STORES.moves),
+    idb.all(STORES.memos),
   ]);
   const [availability, estimateEntries] = await Promise.all([api.getAvailability(), api.getEstimateEntries()]);
 
   const queuedRecordIds = new Set(outbox.filter((e) => e.type === 'record').map((e) => e.id));
   const queuedChallengeIds = new Set(outbox.filter((e) => e.type === 'challenge').map((e) => e.id));
   const queuedMoveIds = new Set(outbox.filter((e) => e.type === 'move').map((e) => e.id));
+  const queuedMemoIds = new Set(outbox.filter((e) => e.type === 'memo').map((e) => e.id));
+  const deletedMemoIds = [...new Set(outbox.filter((e) => e.type === 'memo_deleted').map((e) => e.id))];
   // この端末で消したもの。送るまで覚えておく（送らないと次の同期で戻ってくる）。
   const deletedRecordIds = [...new Set(outbox.filter((e) => e.type === 'record_deleted').map((e) => e.id))];
   const deletedChallengeIds = [...new Set(outbox.filter((e) => e.type === 'challenge_deleted').map((e) => e.id))];
@@ -332,11 +336,15 @@ async function buildPayload(config) {
   const challengesToSend = first ? challenges : challenges.filter((c) => queuedChallengeIds.has(c.id));
   // 繰り越しの記録も追加専用。同じ id を何度送っても増えない。
   const movesToSend = first ? moves : moves.filter((m) => queuedMoveIds.has(m.id));
+  // AIメモは、この端末で「解決済み」にした・消した分だけ送る（初回は全部）。
+  // サーバーは revision の大きいほうを残すので、同じものを何度送っても増えない。
+  const memosToSend = first ? memos : memos.filter((m) => queuedMemoIds.has(m.id));
   // First-sync overflow must survive after lastPulledAtMs advances.
   // Only acknowledged chunks may be removed from the outbox.
   if (first) {
     for (const [type, entries, limit] of [
       ['record', recordsToSend, PUSH_CHUNK], ['challenge', challengesToSend, 100], ['move', movesToSend, 200],
+      ['memo', memosToSend, 200],
     ]) {
       await idb.putAll(STORES.outbox, entries.slice(limit).map((entry) => ({
         key: `${type}:${entry.id}`, type, id: entry.id, queuedAt: Date.now(),
@@ -347,6 +355,8 @@ async function buildPayload(config) {
     ...recordsToSend.slice(0, PUSH_CHUNK).map((r) => `record:${r.id}`),
     ...challengesToSend.slice(0, 100).map((r) => `challenge:${r.id}`),
     ...movesToSend.slice(0, 200).map((r) => `move:${r.id}`),
+    ...memosToSend.slice(0, 200).map((r) => `memo:${r.id}`),
+    ...deletedMemoIds.slice(0, 200).map((id) => `memo_deleted:${id}`),
     ...deletedRecordIds.slice(0, 200).map((id) => `record_deleted:${id}`),
     ...deletedChallengeIds.slice(0, 200).map((id) => `challenge_deleted:${id}`),
   ]);
@@ -393,6 +403,9 @@ async function buildPayload(config) {
         challenges: deletedChallengeIds.slice(0, 200),
       },
       moves: movesToSend.slice(0, 200),
+      memos: memosToSend.slice(0, 200),
+      // この端末で消したAIメモのID。サーバーは墓標として覚え、ほかの端末からも消す。
+      memoDeletions: deletedMemoIds.slice(0, 200),
       // 学習可能時間と見積もりの指定も送る（どちらも消さずに重ねられる）。
       availability,
       estimates: estimateEntries,
@@ -405,13 +418,14 @@ async function buildPayload(config) {
     remainingRecords: Math.max(0, recordsToSend.length - PUSH_CHUNK)
       + Math.max(0, challengesToSend.length - 100) + Math.max(0, movesToSend.length - 200)
       + Math.max(0, deletedRecordIds.length - 200) + Math.max(0, deletedChallengeIds.length - 200)
+      + Math.max(0, memosToSend.length - 200) + Math.max(0, deletedMemoIds.length - 200)
       + Math.max(0, taskPlans.length - 120),
   };
 }
 
 /** 受け取った内容をローカルへ重ねる。ここでも消す操作は一切しない。 */
 async function applySnapshot(snapshot) {
-  const applied = { records: 0, challenges: 0, deleted: 0, plans: 0, goals: 0, questions: 0, moves: 0, availability: 0, estimates: 0, purged: false };
+  const applied = { records: 0, challenges: 0, deleted: 0, plans: 0, goals: 0, questions: 0, moves: 0, availability: 0, estimates: 0, memos: 0, purged: false };
 
   // ほかの端末で「学習データをすべて削除」が行われていたら、まずこの端末も消す。
   //
@@ -523,6 +537,25 @@ async function applySnapshot(snapshot) {
     }
     await idb.put(STORES.meta, { key: api.ESTIMATES_KEY, value: merged });
     applied.estimates = Object.keys(snapshot.estimates).length;
+  }
+
+  // AIメモ。ほかの端末やAIが消したものはここからも消し、残りは revision の大きいほうを残す
+  // （この端末で解決済みにしたばかりの新しい版を、古い内容で戻さない）。
+  for (const id of snapshot.memoDeletions ?? []) {
+    await idb.del(STORES.memos, id).catch(() => {});
+  }
+  const deletedMemos = new Set(snapshot.memoDeletions ?? []);
+  const localMemos = new Map((await idb.all(STORES.memos)).map((memo) => [memo.id, memo]));
+  const memosToSave = [];
+  for (const incoming of snapshot.memos ?? []) {
+    if (!incoming?.id || deletedMemos.has(incoming.id)) continue;
+    if (pickNewerMemo(localMemos.get(incoming.id), incoming) === incoming) {
+      memosToSave.push(incoming);
+    }
+  }
+  if (memosToSave.length) {
+    await idb.putAll(STORES.memos, memosToSave);
+    applied.memos = memosToSave.length;
   }
 
   // 繰り越しの記録も、無いものだけ足す（消さない・上書きしない）。

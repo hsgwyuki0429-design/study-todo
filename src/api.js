@@ -10,6 +10,7 @@ import { itemsOf, splitPlanItems, withItems } from './plan-items.js';
 import { normalizeGoal, goalAttempts as goalAttemptsOf, questionSatisfied as questionSatisfiedFor } from './goals.js';
 import { normalizeAvailability, availabilityForDate } from './availability.js';
 import { estimateForQuestion } from './estimates.js';
+import { sortMemos } from './ai-memos.js';
 import { checkpoint } from './study-timing.js';
 import {
   RECORD_SOURCE_LABELS, describeRecord, durationEntriesByStudyDate, durationOnStudyDate, hasDuration, hasExactTime,
@@ -23,8 +24,10 @@ import {
 // 1.5.0 で学習記録に date（実施日）・datePrecision・source（どうやって入った記録か）・
 // revision（訂正の版）・corrections（訂正の履歴）を足し、
 // 評価と所要時間に「未登録（null）」を入れられるようにした。
+// 1.6.0 で AIメモ（memos）を足した。IndexedDB は v4 で memos ストアを足すだけで、
+// 既存のストアには触れない。
 // どれも足すだけで、古いデータはそのまま読める（古い記録は timestamp から実施日を出す）。
-export const DATA_VERSION = '1.5.0';
+export const DATA_VERSION = '1.6.0';
 
 export const EVALUATIONS = [
   { value: 'perfect', symbol: '◯', label: '完璧にできた', tone: 'success' },
@@ -659,7 +662,7 @@ export async function deleteChallengeResult(challengeId) {
 /**
  * 学習データをすべて消す。設定画面から、本人がはっきり選んだときだけ呼ぶ。
  *
- * 消すのは学習記録・チャレンジ・予定・目標・繰り越し。
+ * 消すのは学習記録・チャレンジ・予定・目標・繰り越し・AIメモ。
  * 問題マスタと、この端末の設定（同期の鍵など）は残す。
  * クラウドを使っているときは、クラウド側も消さないと次の同期で戻ってくる。
  */
@@ -670,8 +673,9 @@ export async function purgeStudyData() {
     tasks: (await idb.all(STORES.tasks)).length,
     goals: (await idb.all(STORES.goals)).length,
     moves: (await idb.all(STORES.moves)).length,
+    memos: (await idb.all(STORES.memos)).length,
   };
-  for (const store of [STORES.records, STORES.challenges, STORES.tasks, STORES.goals, STORES.moves, STORES.outbox]) {
+  for (const store of [STORES.records, STORES.challenges, STORES.tasks, STORES.goals, STORES.moves, STORES.memos, STORES.outbox]) {
     await idb.clear(store);
   }
   // 予定の版・学習可能時間・見積もりの指定も、いっしょに初期状態へ戻す。
@@ -680,6 +684,49 @@ export async function purgeStudyData() {
     await idb.del(STORES.meta, key).catch(() => {});
   }
   return removed;
+}
+
+/* ------------------------------------------------------------------ */
+/* AIメモ                                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * AIメモの一覧（pinned が先頭、残りは更新の新しい順）。
+ * メモはAIがクラウド経由で足し、同期でこの端末へ届く。ここで変えられるのは、
+ * 利用者が画面でできること（解決済みにする・戻す・消す）だけ。
+ */
+export async function listMemos({ status = null, category = null, questionId = null } = {}) {
+  const all = await idb.all(STORES.memos);
+  return sortMemos(all.filter((memo) => (
+    (!status || memo.status === status)
+    && (!category || memo.category === category)
+    && (!questionId || (memo.questionIds ?? []).includes(questionId))
+  )));
+}
+
+/** メモの状態を変える。revision を1つ上げ、同期の控えに積む（クラウドの古い版に負けないため）。 */
+export async function setMemoStatus(id, status) {
+  const memo = await idb.get(STORES.memos, id);
+  if (!memo) return null;
+  const next = {
+    ...memo,
+    status,
+    updatedAt: new Date().toISOString(),
+    revision: Number(memo.revision ?? 0) + 1,
+  };
+  await idb.put(STORES.memos, next);
+  await enqueueOutbox('memo', id);
+  return next;
+}
+
+/** メモを消す。消したIDは控えに残し、同期でクラウドとほかの端末からも消す。 */
+export async function deleteMemo(id) {
+  const memo = await idb.get(STORES.memos, id);
+  if (!memo) return { ok: false, error: 'not_found' };
+  await idb.del(STORES.memos, id);
+  await clearOutboxEntries([`memo:${id}`]);
+  await enqueueOutbox('memo_deleted', id);
+  return { ok: true };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1054,13 +1101,14 @@ export async function setSessionState(value) {
 /* ------------------------------------------------------------------ */
 
 export async function exportAll() {
-  const [questions, records, tasks, challenges, goals, moves, settings] = await Promise.all([
+  const [questions, records, tasks, challenges, goals, moves, memos, settings] = await Promise.all([
     idb.all(STORES.questions),
     idb.all(STORES.records),
     idb.all(STORES.tasks),
     idb.all(STORES.challenges),
     idb.all(STORES.goals),
     idb.all(STORES.moves),
+    idb.all(STORES.memos),
     getSettings(),
   ]);
   const [availability, estimateEntries] = await Promise.all([getAvailability(), getEstimateEntries()]);
@@ -1078,6 +1126,8 @@ export async function exportAll() {
     // 実績から計算できる見積もりは、書き出さない（記録から作り直せる）。
     availability,
     estimates: estimateEntries,
+    // AIメモ（AIの気づきと申し送り）。
+    memos,
     settings,
   };
 }
