@@ -10,6 +10,7 @@ import { renderCloudCard } from './settings-cloud.js';
 import * as cloud from './cloud-sync.js';
 import { renderAvailabilityCard, renderGoalCard } from './settings-plan.js';
 import { helpPanel } from './squares.js';
+import { renderMemoPanel } from './memos.js';
 import { countDemoStudyData, removeDemoStudyData, loadQuestionMaster } from './seed.js';
 
 async function update(patch) {
@@ -168,7 +169,7 @@ async function buildBackup(list) {
   list.append(exportWrap);
   list.append(row({
     title: '書き出される内容',
-    sub: '問題マスタ・学習記録・予定・チャレンジ結果・目標・繰り越しの記録・学習可能時間・見積もりの指定。'
+    sub: '問題マスタ・学習記録・予定・チャレンジ結果・目標・繰り越しの記録・学習可能時間・見積もりの指定・AIメモ。'
       + '鍵（管理キー・端末キー・接続トークン）は入りません。',
     classes: ['row-indent'],
   }));
@@ -201,7 +202,7 @@ async function buildDangerZone(list) {
   }));
   list.append(row({
     title: '消えるもの',
-    sub: '学習記録・チャレンジ結果・予定・目標・繰り越しの記録・学習可能時間・見積もりの指定。'
+    sub: '学習記録・チャレンジ結果・予定・目標・繰り越しの記録・学習可能時間・見積もりの指定・AIメモ。'
       + ' 問題マスタと、同期の鍵は残ります。',
     classes: ['row-indent'],
   }));
@@ -294,6 +295,14 @@ export async function renderSettings(screen) {
         state.settings.theme,
         (v) => update({ theme: v })));
     },
+  });
+
+  const memos = await api.listMemos({ status: 'active' });
+  await section(screen, {
+    id: 'memos',
+    title: 'AIメモ',
+    sub: memos.length ? `${memos.length}件が有効（AIの気づきと申し送り）` : 'AIの気づきと申し送り（まだありません）',
+    build: renderMemoPanel,
   });
 
   await section(screen, {

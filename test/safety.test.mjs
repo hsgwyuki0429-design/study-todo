@@ -54,8 +54,9 @@ test("消せるのは本人が申告した実績だけで、まとめて初期�
   // 全部を消す・初期化するような操作は、AIからは一切できない（設定画面からだけ）。
   // deleteQuestionRelations は実績ではなく、AIが推測で入れた問題どうしの関連を
   // 直すためのもの（学習記録・予定には触らない）。
+  // deleteAiMemo はAIメモ（気づきの覚え書き）を1件ずつ消すもので、これも実績には触らない。
   const destructive = toolNames.filter((name) => /delete|remove|clear|reset|wipe|purge/i.test(name));
-  assert.deepEqual(destructive.sort(), ["deleteChallengeResults", "deleteQuestionRelations", "deleteStudyRecords"]);
+  assert.deepEqual(destructive.sort(), ["deleteAiMemo", "deleteChallengeResults", "deleteQuestionRelations", "deleteStudyRecords"]);
 });
 
 test("タイマー（この端末の状態）を操作するツールは存在しない", () => {

@@ -25,6 +25,20 @@ import { GOAL_COMPLETION_TYPES, GOAL_STATUSES } from "../src/goals.js";
 import { WEEKDAY_KEYS } from "../src/availability.js";
 import { EVALUATION_VALUES } from "../src/records-model.js";
 import { RELATION_SOURCES, RELATION_TYPES, STORED_RELATION_TYPES } from "./service/question-relations.js";
+import { MEMO_CATEGORIES, MEMO_CATEGORY_HINTS, MEMO_LIMITS, MEMO_STATUSES } from "../src/ai-memos.js";
+
+/** AIメモの書き方の決まり。メモを書くツールの説明に必ず入れる。 */
+const MEMO_RULES = [
+  "【書き方の決まり】",
+  "・推測ではなく、データから分かったことを書く（例: 「直近14日で学習記録があるのは10/2と10/5のみ」）。",
+  "・1メモ1トピック。長い分析を1件に詰め込まない。",
+  "・状況が変わって古くなったメモは、新しく書き足す前に updateAiMemo で status を resolved にする。",
+  "・利用者の気持ちや性格の推測は書かない。",
+].join("");
+
+const MEMO_CATEGORY_DESCRIPTION = `メモの種類。${MEMO_CATEGORIES.map((key) => `${key}＝${MEMO_CATEGORY_HINTS[key]}`).join(" / ")}。`;
+
+const MEMO_BODY_DESCRIPTION = `メモの本文（最大${MEMO_LIMITS.bodyLength}文字）。データから分かったことだけを、1トピックで書く。`;
 
 const TIMEZONE_PROPERTY = {
   type: "integer",
@@ -237,7 +251,7 @@ export function createTools() {
     defineTool({
       name: "getAppInfo",
       title: "study-todo の基本情報",
-      description: "study-todo の構成・問題数・章と単元の一覧（教科書の掲載順、単元ごとの開始ページと問題数つき）・問題の種類と件数・難易度の意味・評価の5段階・今日の日付・同期している端末・データ形式の版を返す。最初にこれを呼ぶと、他のツールへ渡せる値（教科名・章名・単元名・種類・評価の値）が分かる。",
+      description: "study-todo の構成・問題数・章と単元の一覧（教科書の掲載順、単元ごとの開始ページと問題数つき）・問題の種類と件数・難易度の意味・評価の5段階・今日の日付・同期している端末・データ形式の版を返す。最初にこれを呼ぶと、他のツールへ渡せる値（教科名・章名・単元名・種類・評価の値）が分かる。AIメモ（getAiMemos / addAiMemo）で前のAIの気づきを引き継げるので、予定を組み直したら気づきを1件残すこと。",
       scope: "read",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: { properties: { timezoneOffsetMinutes: TIMEZONE_PROPERTY } },
@@ -501,6 +515,8 @@ export function createTools() {
         "通信が切れて同じ要求を送り直すときは、同じ operationId を使えば二重に適用されない。",
         "保存の前に、日ごとの時間・重複・期限・目標や学習可能時間の版も確かめる（validatePlanChanges と同じ確認）。",
         "学習記録とチャレンジ結果はこの操作では一切変わらない。",
+        "memo（{ category, body }）を添えると、予定の変更と同じ操作の中でAIメモを1件作り、この変更の changeId を relatedChangeId に入れる。",
+        "予定の変更が通らなかったときは、メモも作られない。",
       ].join(""),
       scope: "write",
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -523,6 +539,16 @@ export function createTools() {
             type: "string",
             maxLength: CHANGE_LIMITS.reasonLength,
             description: "なぜこの変更をするか（例: 今日は30分しか時間が取れないため、2件を明日へ移した）。履歴に残り、利用者が画面で確認できる。",
+          },
+          memo: {
+            type: "object",
+            additionalProperties: false,
+            required: ["category", "body"],
+            description: "この変更で気づいたことを、AIメモとして同じ操作で残す。changeId が relatedChangeId に自動で入る。" + MEMO_RULES,
+            properties: {
+              category: { type: "string", enum: [...MEMO_CATEGORIES], description: MEMO_CATEGORY_DESCRIPTION },
+              body: { type: "string", minLength: 1, maxLength: MEMO_LIMITS.bodyLength, description: MEMO_BODY_DESCRIPTION },
+            },
           },
           expectedContext: EXPECTED_CONTEXT_SCHEMA,
           timezoneOffsetMinutes: TIMEZONE_PROPERTY,
@@ -1173,13 +1199,128 @@ export function createTools() {
     }),
 
     defineTool({
+      name: "getAiMemos",
+      title: "AIメモを読む",
+      description: [
+        "AIが予定を組み直すときに残した気づき（学習の傾向・判断の理由・次回への申し送り・利用者への確認事項）を読む。",
+        "pinned のメモが先頭、残りは更新の新しい順。status を省くと有効（active）なものだけを返す。",
+        "返った memo の revision は、updateAiMemo / deleteAiMemo の expectedRevision に渡す。",
+        "予定を組む前に読むのは getPlanningContext の memos でもよい（重要なものだけが入っている）。",
+      ].join(""),
+      scope: "read",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          status: { type: "string", enum: [...MEMO_STATUSES], description: "状態で絞る。既定は active。" },
+          category: { type: "string", enum: [...MEMO_CATEGORIES], description: MEMO_CATEGORY_DESCRIPTION },
+          questionId: { type: "string", maxLength: MEMO_LIMITS.idLength, description: "この問題IDを含むメモだけに絞る。" },
+          goalId: { type: "string", maxLength: MEMO_LIMITS.idLength, description: "この目標のメモだけに絞る。" },
+          limit: { type: "integer", minimum: 1, maximum: MEMO_LIMITS.listMax, description: `返す件数（既定 ${MEMO_LIMITS.listDefault}、最大 ${MEMO_LIMITS.listMax}）。` },
+        },
+      },
+      run: (args, { service }) => service.getAiMemos(args),
+    }),
+
+    defineTool({
+      name: "addAiMemo",
+      title: "AIメモを残す",
+      description: [
+        "予定を組み直して気づいたこと（学習の傾向・判断の理由・次のAIへの申し送り・利用者への確認事項）を、AIメモとして1件残す。",
+        "次に呼ばれたAIが getPlanningContext / getAiMemos で読み、利用者も study-todo の画面で読める・消せる。",
+        "予定の変更と同時に残すなら、applyTaskChanges の memo のほうが changeId が自動で紐づく。",
+        "operationId が同じ要求を送り直しても、メモは1件のまま（内容が違うと断られる）。",
+        "存在しない questionIds / goalId は、何も保存せずに断る。",
+        MEMO_RULES,
+      ].join(""),
+      scope: "write",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          operationId: {
+            type: "string",
+            maxLength: CHANGE_LIMITS.operationIdLength,
+            description: "このメモを表す、自分で決める文字列。送り直すときは同じ値にする（二重にならない）。",
+          },
+          category: { type: "string", enum: [...MEMO_CATEGORIES], description: MEMO_CATEGORY_DESCRIPTION },
+          body: { type: "string", minLength: 1, maxLength: MEMO_LIMITS.bodyLength, description: MEMO_BODY_DESCRIPTION },
+          questionIds: {
+            type: "array",
+            items: { type: "string", maxLength: MEMO_LIMITS.idLength },
+            maxItems: MEMO_LIMITS.questionIds,
+            description: "関連する問題ID（listQuestions が返す id）。問題の詳細画面にこのメモが出る。",
+          },
+          goalId: { type: "string", maxLength: MEMO_LIMITS.idLength, description: "関連する目標ID。" },
+          relatedChangeId: { type: "string", maxLength: MEMO_LIMITS.idLength, description: "関連する予定変更の changeId（applyTaskChanges の結果）。" },
+          pinned: { type: "boolean", description: "常に先頭に出す重要メモにする。既定は false。多用しないこと。" },
+        },
+        required: ["operationId", "category", "body"],
+      },
+      run: (args, { service, actor }) => service.addAiMemo(args, actor),
+    }),
+
+    defineTool({
+      name: "updateAiMemo",
+      title: "AIメモを更新",
+      description: [
+        "AIメモの本文・種類・状態・pinned・関連する問題IDを書き換える（変えたい項目だけ patch に入れる）。",
+        "状況が変わって古くなったメモは、status を resolved にする（消さずに残る）。",
+        "expectedRevision に、読んだときの revision を渡す。食い違っていたら何も変えずに revision_conflict を返し、今のメモを添える。",
+        MEMO_RULES,
+      ].join(""),
+      scope: "write",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          id: { type: "string", maxLength: MEMO_LIMITS.idLength, description: "メモのID（memo_ で始まる）。" },
+          expectedRevision: { type: "integer", minimum: 1, description: "読んだときのメモの revision。" },
+          patch: {
+            type: "object",
+            additionalProperties: false,
+            minProperties: 1,
+            description: "変えたい項目だけ。",
+            properties: {
+              body: { type: "string", minLength: 1, maxLength: MEMO_LIMITS.bodyLength },
+              category: { type: "string", enum: [...MEMO_CATEGORIES] },
+              status: { type: "string", enum: [...MEMO_STATUSES], description: "active＝有効 / resolved＝解決済み / archived＝保管。" },
+              pinned: { type: "boolean" },
+              questionIds: { type: "array", items: { type: "string", maxLength: MEMO_LIMITS.idLength }, maxItems: MEMO_LIMITS.questionIds, description: "関連する問題IDの全体（置き換え）。空配列で外す。" },
+            },
+          },
+        },
+        required: ["id", "expectedRevision", "patch"],
+      },
+      run: (args, { service, actor }) => service.updateAiMemo(args, actor),
+    }),
+
+    defineTool({
+      name: "deleteAiMemo",
+      title: "AIメモを削除",
+      description: [
+        "AIメモを1件消す（元に戻せない）。ほかの端末からも消える。",
+        "古くなっただけなら消さずに updateAiMemo で resolved にする。",
+        "expectedRevision が今と違うときは、何も消さずに revision_conflict を返す。",
+      ].join(""),
+      scope: "write",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        properties: {
+          id: { type: "string", maxLength: MEMO_LIMITS.idLength, description: "メモのID（memo_ で始まる）。" },
+          expectedRevision: { type: "integer", minimum: 1, description: "読んだときのメモの revision。" },
+        },
+        required: ["id", "expectedRevision"],
+      },
+      run: (args, { service, actor }) => service.deleteAiMemo(args, actor),
+    }),
+
+    defineTool({
       name: "getPlanningContext",
       title: "計画に必要な情報をまとめて取得",
       description: [
         "予定を組む・組み直すときに、まずこれを呼ぶ。指定した期間について、次をまとめて返す。",
         "日本時間の今／最終同期時刻／目標と残量／日ごとの予定と使える時間／未実施の予定と見積もり／",
         "まだ予定に入っていない分／過ぎた日に残っている分／繰り越しの履歴／保護されている予定／",
-        "反映のときに使う版情報（expectedRevisions と expectedContext）。",
+        "反映のときに使う版情報（expectedRevisions と expectedContext）／",
+        "前のAIや利用者が残したAIメモ（memos: 有効な pinned と、直近30日の handoff / trend。最大10件）。",
         "全問題・全履歴は返さない。期間と目標で絞った分だけで、省略があるときは *Truncated で知らせる。",
       ].join(""),
       scope: "read",
@@ -1219,6 +1360,16 @@ export function createTools() {
             items: CHANGE_SCHEMA,
           },
           reason: { type: "string", maxLength: CHANGE_LIMITS.reasonLength, description: "変更の理由。" },
+          memo: {
+            type: "object",
+            additionalProperties: false,
+            required: ["category", "body"],
+            description: "applyTaskChanges に添える予定の memo。ここでは形だけを確かめ、保存はしない。",
+            properties: {
+              category: { type: "string", enum: [...MEMO_CATEGORIES] },
+              body: { type: "string", minLength: 1, maxLength: MEMO_LIMITS.bodyLength },
+            },
+          },
           expectedContext: EXPECTED_CONTEXT_SCHEMA,
           timezoneOffsetMinutes: TIMEZONE_PROPERTY,
         },
@@ -1308,6 +1459,17 @@ export const SERVER_INSTRUCTIONS = `study-todo は、青チャート（数学の
 
   数えられること（実績・残量・見積もり・時間の過不足）はサーバーが出します。推測しないでください。
   何を優先するか、どう配るか、なぜそうしたかの説明が、あなたの受け持ちです。
+- AIメモ（getAiMemos / addAiMemo / updateAiMemo / deleteAiMemo）は、AIどうしの申し送り帳です。
+  getPlanningContext の memos に、有効な pinned と直近30日の handoff / trend が入ってくるので、
+  予定を組む前に必ず読んで、前のAIの判断を引き継いでください。
+  予定を組み直したら、気づきを1件残します（applyTaskChanges の memo に { category, body } を添えると、
+  同じ操作で changeId つきのメモになります）。種類は trend＝学習傾向 / decision＝予定変更の判断理由 /
+  handoff＝次回AIへの申し送り / question＝利用者への確認事項 です。書き方の決まり:
+  ・推測ではなく、データから分かったことを書く（例: 「直近14日で学習記録があるのは10/2と10/5のみ」）
+  ・1メモ1トピック。長い分析を1件に詰め込まない
+  ・状況が変わって古くなったメモは、新しく書き足す前に updateAiMemo で resolved にする
+  ・利用者の気持ちや性格の推測は書かない
+  更新・削除は expectedRevision（読んだときの revision）が必要で、食い違えば何も変わりません。
 - 時間が足りないときは、無理に詰め込まないでください。置けた分と置けなかった分（unplaced）、
   足りない時間を伝え、次のどれにするかを利用者に相談します。
   期限を延ばす・対象を減らす・達成条件を下げる・学習可能時間を増やす、のいずれも

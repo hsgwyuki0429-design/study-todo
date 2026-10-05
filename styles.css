@@ -1029,3 +1029,21 @@ button:active { filter: brightness(.94); }
   .land-eval .eval-btn .lbl { font-size: 10px; line-height: 1.2; }
   #screen-home[data-landscape='eval'] .land-timer { font-size: min(26vw, 24vh); }
 }
+
+/* AIメモ */
+.memo-intro { padding: 12px 16px 4px; }
+.memo-choices { padding: 8px 16px 0; }
+.memo-list { padding: 8px 0; }
+.memo { padding: 12px 16px; border-bottom: 1px solid var(--line); display: grid; gap: 6px; }
+.memo-done .memo-body { color: var(--fg-sub); }
+.memo-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--fg-sub); }
+.memo-category { padding: 1px 8px; border-radius: 999px; background: var(--bg-sub); color: var(--fg); }
+.memo-pin { padding: 1px 8px; border-radius: 999px; background: var(--warning-bg); color: var(--warning); }
+.memo-ai { display: inline-flex; align-items: center; color: var(--violet); }
+.memo-body, .memo-mini-body { font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.memo-meta { font-size: 12px; color: var(--fg-sub); overflow-wrap: anywhere; }
+.memo-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.memo-mini { margin: 8px 16px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-sub); display: grid; gap: 6px; }
+.memo-mini-title { font-size: 12px; font-weight: 600; color: var(--violet); }
+.memo-mini-body { font-size: 13px; }
+.memo-mini-item { display: grid; gap: 2px; }

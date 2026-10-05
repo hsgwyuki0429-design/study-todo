@@ -9,6 +9,7 @@ import { state, q, qLabel, render, refreshToday } from './state.js';
 import { el, fmtMS, fmtTime, fmtDate, row, emptyState } from './ui.js';
 import { attemptDetailCard, attemptSquare, squareRow } from './squares.js';
 import { syncInBackground } from './cloud-sync.js';
+import { renderQuestionMemos } from './memos.js';
 
 const CHEVRON = '›';
 
@@ -44,6 +45,8 @@ async function tocView(screen) {
     const question = q(toc.questionId);
     list.append(backRow(toc.section, () => go({ questionId: null, attemptId: null })));
     screen.append(el('div', 'panel-head', question?.label ?? toc.questionId));
+    // この問題について、AIが残したメモ（有効なものだけ）。
+    await renderQuestionMemos(list, toc.questionId);
 
     if (!attempts.length) {
       list.append(emptyState('まだ解いていません'));

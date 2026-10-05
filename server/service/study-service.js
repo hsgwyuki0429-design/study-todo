@@ -9,6 +9,7 @@
 import {
   fail,
   readArray,
+  readBoolean,
   readEnum,
   readInteger,
   readString,
@@ -27,6 +28,12 @@ import {
   protectionOf,
 } from "./task-changes.js";
 import { StorageCapabilityError } from "../storage/driver.js";
+import {
+  MEMO_CATEGORIES,
+  MEMO_LIMITS,
+  MEMO_STATUSES,
+  isContextMemo,
+} from "../../src/ai-memos.js";
 import { MOVE_REASONS, itemsOf, splitPlanItems } from "../../src/plan-items.js";
 import {
   EVALUATION_VALUES,
@@ -64,7 +71,7 @@ import {
   relationsForQuestion,
 } from "./question-relations.js";
 
-export const DATA_VERSION = "1.5.0";
+export const DATA_VERSION = "1.6.0";
 
 export const SERVICE_LIMITS = Object.freeze({
   listLimitDefault: 50,
@@ -367,8 +374,39 @@ export function createStudyService({ sync, now = () => Date.now() }) {
     return new Set(records.filter((record) => record.planItemId).map((record) => record.planItemId));
   }
 
+  /**
+   * applyTaskChanges に添える memo（{ category, body }）を確かめる。
+   * 予定を変える前に確かめるので、形が悪ければ何も変えずに断る。
+   */
+  function readMemoAttachment(raw) {
+    if (raw === undefined || raw === null) return null;
+    if (typeof raw !== "object" || Array.isArray(raw)) fail("memo は { category, body } の形で渡してください。", "memo");
+    rejectUnknownKeys(raw, ["category", "body"], "memo");
+    return {
+      category: readEnum(raw.category, "memo.category", [...MEMO_CATEGORIES], { required: true }),
+      body: readString(raw.body, "memo.body", { required: true, max: MEMO_LIMITS.bodyLength }),
+    };
+  }
+
+  /** メモに付ける問題IDを確かめる。マスタに無いIDがあれば、その一覧を返す（保存はしない）。 */
+  async function readMemoQuestionIds(value, field) {
+    if (value === undefined || value === null) return { ids: null, unknown: [] };
+    const ids = [...new Set(readArray(value, field, { max: MEMO_LIMITS.questionIds })
+      .map((id, index) => readString(id, `${field}[${index}]`, { required: true, max: MEMO_LIMITS.idLength })))];
+    const questions = await questionMap();
+    return { ids, unknown: ids.filter((id) => !questions.has(id)) };
+  }
+
+  const unknownQuestionResult = (unknown) => ({
+    ok: false,
+    error: "unknown_question",
+    unknownQuestionIds: unknown,
+    message: `問題マスタに無いIDがあります（${unknown.join(", ")}）。メモは保存していません。`,
+    nextAction: "listQuestions / searchQuestions で問題IDを確かめてください。",
+  });
+
   /** 保存先が保証できないときは、黙って書かずに理由を返す。 */
-  async function runChanges({ request, actor, toolName, knownQuestionIds, actorKind = "ai" }) {
+  async function runChanges({ request, actor, toolName, knownQuestionIds, actorKind = "ai", memo = null }) {
     const actorName = actor?.clientName ?? actor?.tokenLabel ?? "AI";
     try {
       return await sync.applyTaskChanges({
@@ -379,6 +417,7 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         tool: toolName,
         knownQuestionIds,
         doneItemIds: await doneItemIds(),
+        memo,
       });
     } catch (error) {
       if (error instanceof StorageCapabilityError) {
@@ -837,6 +876,10 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         needsReviewCount: questions.filter((question) => question.needsReview === true).length,
         needsReviewNote: "needsReview が true の問題は、難易度など一部の項目が未確認。番号・章・単元・掲載ページは確認済みなので、予定づくりには使える。",
         studyRecords: records.length,
+        aiMemos: {
+          count: (await sync.readMemos()).filter((memo) => memo.status === "active").length,
+          note: "AIメモ（getAiMemos / addAiMemo / updateAiMemo / deleteAiMemo）。予定を組み直したら、気づきを1件残してください。",
+        },
         devices: status.devices,
         lastSyncedAt: status.lastSyncedAt,
         evaluations: EVALUATIONS.map((value) => ({ value, label: EVALUATION_LABELS[value] })),
@@ -1564,6 +1607,130 @@ export function createStudyService({ sync, now = () => Date.now() }) {
      * 計画を組むために必要なものを、期間を絞ってまとめて返す。
      * これ1回で「今どうなっているか」が分かるようにする。
      */
+    /* ---------------------------------------------------------------- */
+    /* AIメモ                                                            */
+    /* ---------------------------------------------------------------- */
+
+    /** メモの一覧。pinned が先頭、残りは更新の新しい順。 */
+    async getAiMemos(args = {}) {
+      const status = readEnum(args.status, "status", [...MEMO_STATUSES], { fallback: "active" });
+      const category = readEnum(args.category, "category", [...MEMO_CATEGORIES]);
+      const questionId = readString(args.questionId, "questionId", { max: MEMO_LIMITS.idLength });
+      const goalId = readString(args.goalId, "goalId", { max: MEMO_LIMITS.idLength });
+      const limit = readInteger(args.limit, "limit", {
+        min: 1, max: MEMO_LIMITS.listMax, fallback: MEMO_LIMITS.listDefault,
+      });
+      const matched = (await sync.readMemos()).filter((memo) => (
+        memo.status === status
+        && (!category || memo.category === category)
+        && (!questionId || (memo.questionIds ?? []).includes(questionId))
+        && (!goalId || memo.goalId === goalId)
+      ));
+      return {
+        ok: true,
+        memos: matched.slice(0, limit),
+        total: matched.length,
+        truncated: matched.length > limit,
+        filter: { status, category, questionId, goalId, limit },
+        note: "pinned が先頭、残りは更新の新しい順。更新・削除には、各メモの revision を expectedRevision に渡してください。",
+      };
+    },
+
+    /** メモを1件足す。同じ operationId の送り直しは、1件のまま。 */
+    async addAiMemo(args = {}, actor = {}) {
+      const operationId = readString(args.operationId, "operationId", {
+        required: true, max: CHANGE_LIMITS.operationIdLength,
+      });
+      const category = readEnum(args.category, "category", [...MEMO_CATEGORIES], { required: true });
+      const body = readString(args.body, "body", { required: true, max: MEMO_LIMITS.bodyLength });
+      const questionIds = await readMemoQuestionIds(args.questionIds, "questionIds");
+      if (questionIds.unknown.length) return unknownQuestionResult(questionIds.unknown);
+      const goalId = readString(args.goalId, "goalId", { max: MEMO_LIMITS.idLength });
+      if (goalId && !(await sync.readGoals()).some((goal) => goal.id === goalId)) {
+        return {
+          ok: false,
+          error: "unknown_goal",
+          goalId,
+          message: `目標 ${goalId} は見つかりません。メモは保存していません。`,
+          nextAction: "getGoals で目標IDを確かめてください。",
+        };
+      }
+      const relatedChangeId = readString(args.relatedChangeId, "relatedChangeId", { max: MEMO_LIMITS.idLength });
+      const pinned = readBoolean(args.pinned, "pinned", { fallback: false });
+
+      const input = {
+        category,
+        body,
+        pinned,
+        status: "active",
+        ...(questionIds.ids?.length ? { questionIds: questionIds.ids } : {}),
+        ...(goalId ? { goalId } : {}),
+        ...(relatedChangeId ? { relatedChangeId } : {}),
+      };
+      const actorName = actor?.clientName ?? actor?.tokenLabel ?? "AI";
+      const result = await sync.addMemo({
+        input,
+        author: { kind: "ai", name: actorName },
+        operationId,
+        fingerprint: JSON.stringify({ ...input, questionIds: [...(input.questionIds ?? [])].sort() }),
+      });
+      if (result.ok && !result.replayed) {
+        await sync.appendLog({
+          clientName: actorName,
+          tool: "addAiMemo",
+          summary: `AIメモを追加（${category}）`,
+        });
+      }
+      return result;
+    },
+
+    /** メモを書き換える。revision が食い違えば、何も変えずに競合を返す。 */
+    async updateAiMemo(args = {}, actor = {}) {
+      const id = readString(args.id, "id", { required: true, max: MEMO_LIMITS.idLength });
+      const expectedRevision = readInteger(args.expectedRevision, "expectedRevision", { required: true, min: 1 });
+      const raw = args.patch;
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        fail("patch は { body, category, status, pinned, questionIds } のうち変えたい項目だけを渡してください。", "patch");
+      }
+      rejectUnknownKeys(raw, ["body", "category", "status", "pinned", "questionIds"], "patch");
+      const patch = {};
+      if (raw.body !== undefined) patch.body = readString(raw.body, "patch.body", { required: true, max: MEMO_LIMITS.bodyLength });
+      if (raw.category !== undefined) patch.category = readEnum(raw.category, "patch.category", [...MEMO_CATEGORIES], { required: true });
+      if (raw.status !== undefined) patch.status = readEnum(raw.status, "patch.status", [...MEMO_STATUSES], { required: true });
+      if (raw.pinned !== undefined) patch.pinned = readBoolean(raw.pinned, "patch.pinned");
+      if (raw.questionIds !== undefined) {
+        const questionIds = await readMemoQuestionIds(raw.questionIds, "patch.questionIds");
+        if (questionIds.unknown.length) return unknownQuestionResult(questionIds.unknown);
+        patch.questionIds = questionIds.ids ?? [];
+      }
+      if (!Object.keys(patch).length) fail("patch に変えたい項目がありません。", "patch");
+
+      const result = await sync.updateMemo({ id, expectedRevision, patch });
+      if (result.ok) {
+        await sync.appendLog({
+          clientName: actor?.clientName ?? actor?.tokenLabel ?? "AI",
+          tool: "updateAiMemo",
+          summary: `AIメモを更新（${Object.keys(patch).join("・")}）`,
+        });
+      }
+      return result;
+    },
+
+    /** メモを消す。revision が食い違えば、何も消さずに競合を返す。 */
+    async deleteAiMemo(args = {}, actor = {}) {
+      const id = readString(args.id, "id", { required: true, max: MEMO_LIMITS.idLength });
+      const expectedRevision = readInteger(args.expectedRevision, "expectedRevision", { required: true, min: 1 });
+      const result = await sync.deleteMemo({ id, expectedRevision });
+      if (result.ok) {
+        await sync.appendLog({
+          clientName: actor?.clientName ?? actor?.tokenLabel ?? "AI",
+          tool: "deleteAiMemo",
+          summary: "AIメモを削除",
+        });
+      }
+      return result;
+    },
+
     async getPlanningContext(args = {}) {
       const todayKey = today(args);
       const from = args.from ? readDateArg(args.from, "from", args) : todayKey;
@@ -1625,6 +1792,8 @@ export function createStudyService({ sync, now = () => Date.now() }) {
       }
 
       const moves = await sync.readMoves({ limit: 30, from: shiftDateKey(todayKey, -30), to });
+      // 予定を組む前に必ず目に入れるためのメモ（有効なもののうち、pinned と、直近の handoff / trend）。
+      const contextMemos = (await sync.readMemos()).filter((memo) => isContextMemo(memo, now()));
       const unconfigured = days.filter((day) => day.capacity.available === null).map((day) => day.date);
 
       return {
@@ -1643,6 +1812,11 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         overdueTruncated: overdue.length > 200,
         moves: moves.moves,
         movesTotal: moves.total,
+        memos: contextMemos.slice(0, MEMO_LIMITS.contextMax),
+        memosTruncated: contextMemos.length > MEMO_LIMITS.contextMax,
+        memosNote: "前のAIや利用者が残したメモ（有効な pinned と、直近30日の handoff / trend）。"
+          + "判断の前に読み、古くなったものは updateAiMemo で resolved にしてから、新しい気づきを addAiMemo で残してください。"
+          + " 全件は getAiMemos で読めます。",
         availability: bundle.availability,
         unconfiguredDates: unconfigured,
         storage: sync.storageCapabilities(),
@@ -1679,12 +1853,14 @@ export function createStudyService({ sync, now = () => Date.now() }) {
      * 全部成功か、全部未反映かのどちらかにしかならない。
      */
     async applyTaskChanges(args = {}, actor = {}) {
+      // メモの形は、予定に触れる前に確かめる（悪ければ、予定もメモも変えない）。
+      const memo = readMemoAttachment(args.memo);
       // 同じ operationId の送り直しは、確かめる前に前回の結果を返す。
       // ここで確かめてしまうと「すでに足した分」を二重の予定と見なしてしまう。
       const replay = await sync.findChangeByOperation(args.operationId);
       if (replay) {
         const request = parseChangeRequest(args);
-        if (replay.fingerprint !== fingerprintOf(request)) {
+        if (replay.fingerprint !== fingerprintOf(request, memo)) {
           return {
             ok: false,
             error: "operation_conflict",
@@ -1707,6 +1883,7 @@ export function createStudyService({ sync, now = () => Date.now() }) {
         actor,
         toolName: "applyTaskChanges",
         knownQuestionIds: new Set(questions.keys()),
+        memo,
       });
       if (!result.ok) return result;
       return { ...result, capacity: checked.days, warnings: checked.warnings, unplaced: checked.unplaced };
@@ -2207,6 +2384,8 @@ export function createStudyService({ sync, now = () => Date.now() }) {
 
     /** 配分案を、保存する前に確かめる。実際には何も変えない。 */
     async validatePlanChanges(args = {}, actor = {}) {
+      // memo を添えた要求も、形だけ確かめる（保存はしない）。
+      readMemoAttachment(args.memo);
       return validatePlan(args, actor, { dryRun: true });
     },
 

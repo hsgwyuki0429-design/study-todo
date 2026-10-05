@@ -197,7 +197,8 @@ OAuth 2.1 + PKCE（S256）に対応しているので、Bearer を直接設定�
 | `getStudyAvailability` | 1日に使える学習時間（曜日別・日付ごと・今日の残り） |
 | `getQuestionEstimates` | 問題ごとの所要時間の見積もりと、その根拠 |
 | `getQuestionRelations` | 問題どうしの関連（前提・同系統・演習）。向き・種類・出どころで絞れる |
-| `getPlanningContext` | **計画を組むときの入口**。期間ぶんの状態をまとめて返す |
+| `getAiMemos` | AIメモ（前のAIの気づき・申し送り）。pinned が先頭、残りは更新の新しい順 |
+| `getPlanningContext` | **計画を組むときの入口**。期間ぶんの状態をまとめて返す（AIメモ `memos` つき） |
 | `validatePlanChanges` | 配分案を保存せずに確かめる |
 | `getGoals` | 長期の目標 |
 | `getRecentAiChanges` | AIが行った変更の記録 |
@@ -216,6 +217,9 @@ OAuth 2.1 + PKCE（S256）に対応しているので、Bearer を直接設定�
 | `saveQuestionEstimates` | 教材をもとにした**仮の**見積もりを保存する（実績にはならない） |
 | `saveQuestionRelations` | 問題どうしの関連をまとめて登録する（同じ from/to/type は上書き） |
 | `deleteQuestionRelations` | 登録した関連を消す（AIの推測が違っていたときに直す） |
+| `addAiMemo` | AIメモを1件残す（`operationId` で二重送信を防ぐ） |
+| `updateAiMemo` | AIメモを書き換える（`expectedRevision` が食い違えば何も変えない） |
+| `deleteAiMemo` | AIメモを消す（`expectedRevision` が食い違えば何も消さない） |
 | `addGoal` | 長期の目標を足す |
 | `updateGoal` | 長期の目標を書き換える |
 
@@ -496,6 +500,52 @@ AIからは、まとめて消す操作は一切できません（1件ずつの�
 1回に登録・削除できるのは100件まで、`getQuestionRelations` に渡せる問題IDは200件までです。
 問題マスタに無いIDが1件でも混ざっていると、`unknown_question` を返して**1件も保存しません**。
 関連は端末（PWA）では使わないため、同期では配っていません。
+
+### AIメモ
+
+AIが予定を組み直したときに気づいたこと（学習の傾向・判断の理由・次回への申し送り）を残し、
+次に呼ばれたAIが読んで判断を引き継ぐための覚え書きです。利用者も study-todo の
+**設定 → AIメモ** で読めて、「解決済みにする」「削除」ができます。
+問題の詳細（記録タブ）には、その問題IDを含む有効なメモが小さく出ます。
+
+| 項目 | 内容 |
+|---|---|
+| `id` | `memo_` + ランダム |
+| `category` | `trend`（学習傾向の観察）/ `decision`（予定変更の判断理由）/ `handoff`（次回AIへの申し送り）/ `question`（利用者への確認事項）/ `other` |
+| `body` | 本文（最大1000文字） |
+| `questionIds` / `goalId` / `relatedChangeId` | 関連する問題（最大50）・目標・予定変更（`applyTaskChanges` の `changeId`） |
+| `pinned` | 常に先頭に出す重要メモ（既定 false） |
+| `status` | `active`（既定）/ `resolved` / `archived` |
+| `author` | `{ kind: "ai" \| "user", name }` |
+| `revision` | 楽観ロック用の版。書き換えるたびに1つ上がる |
+
+- **読む**: `getAiMemos`（`status` 既定 active、`category` / `questionId` / `goalId` / `limit`）。
+  予定を組む前には `getPlanningContext` の `memos` にも入ります
+  （有効な pinned と、直近30日の handoff / trend。最大10件、あふれたら `memosTruncated`）。
+- **残す**: `addAiMemo`。同じ `operationId` で送り直しても1件のままです（内容が違うと
+  `operation_conflict`）。存在しない問題ID・目標IDは `unknown_question` / `unknown_goal` で
+  **何も保存せず**に断ります。`applyTaskChanges` に `memo: { category, body }` を添えると、
+  予定の変更と**同じ操作**でメモが作られ、`changeId` が `relatedChangeId` に入ります。
+  予定の変更が通らなかったときは、メモも作られません。
+- **直す・消す**: `updateAiMemo` / `deleteAiMemo` は読んだときの `revision` を
+  `expectedRevision` に渡します。食い違えば何も変えずに `revision_conflict`
+  （今のメモつき）を返します。
+- **同期**: メモは他の端末へも既存の同期（`/api/sync/push`・`pull`）で配られます。
+  端末で解決済みにした・消した分はクラウドへ戻り、消したメモは墓標（IDだけ）が残るので復活しません。
+  同じメモは `revision` の大きいほう（同じなら `updatedAt` の新しいほう）が残ります。
+- **「学習データをすべて削除」** はAIメモも消します。
+- 保存の上限は1000件です（超えたら `memo_limit`。古いものは `deleteAiMemo` で整理）。
+
+書き方の決まり（ツールの説明にも入っています）:
+
+1. 推測ではなく、データから分かったことを書く（例: 「直近14日で学習記録があるのは10/2と10/5のみ」）。
+2. 1メモ1トピック。長い分析を1件に詰め込まない。
+3. 状況が変わって古くなったメモは、新しく書き足す前に `resolved` にする。
+4. 利用者の気持ちや性格の推測は書かない。
+
+データ形式の版（`dataVersion`）は `1.6.0` です。IndexedDB は v4 で `memos` ストアを
+**足すだけ**で、既存のストア・データには触れません。サーバー側も新しい保存領域
+（`studytodo:memos`）を足すだけなので、移行で既存データが壊れることはありません。
 
 ### 入りきらないとき
 
