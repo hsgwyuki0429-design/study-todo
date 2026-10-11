@@ -490,21 +490,27 @@ export function pipSnapshot() {
     const limit = s.challengeTimeLimitSeconds ?? 0;
     const e = challengeElapsed();
     const title = currentChallengeTask()?.title ?? 'チャレンジ';
+    // seconds は iPhone の小窓（数字が進むだけの動画）の再生位置。動画は戻せないので、
+    // カウントダウン表示でも経過時間を出す。
     return {
       main: fmtMS(s.challengeCountUp ? e : Math.max(0, limit - e)),
       sub: `${title} ・ ${s.challengeCountUp ? '経過' : '残り'}`,
       tone: 'danger',
+      seconds: e,
+      paused: s.challengeFinishedElapsed != null,
     };
   }
   if (s.mode === 'challenge_review') {
     const qid = s.reviewQueue[s.reviewIndex];
-    return { main: fmtMS(s.questionElapsed[qid] || 0), sub: `記録 ${s.reviewIndex + 1}/${s.reviewQueue.length}` };
+    const seconds = s.questionElapsed[qid] || 0;
+    return { main: fmtMS(seconds), sub: `記録 ${s.reviewIndex + 1}/${s.reviewQueue.length}`, seconds, paused: true };
   }
-  const main = fmtMS(dailyElapsed());
-  if (s.mode === 'idle') return { main, sub: '今日の学習時間', paused: true };
+  const seconds = dailyElapsed();
+  const main = fmtMS(seconds);
+  if (s.mode === 'idle') return { main, sub: '今日の学習時間', seconds, paused: true };
   const qid = s.currentQuestionId;
-  if (paused) return { main, sub: qid ? `一時停止中 ・ ${qLabel(qid)}` : '一時停止中', paused: true };
-  return { main, sub: qid ? `${qLabel(qid)} ${fmtMS(elapsedOf(qid))}` : '今日の学習時間' };
+  if (paused) return { main, sub: qid ? `一時停止中 ・ ${qLabel(qid)}` : '一時停止中', seconds, paused: true };
+  return { main, sub: qid ? `${qLabel(qid)} ${fmtMS(elapsedOf(qid))}` : '今日の学習時間', seconds, paused: false };
 }
 
 /** タイマーを小窓で出すボタン。小窓を使えない端末では出さない。 */
@@ -521,7 +527,14 @@ function pipButton() {
   button.setAttribute('aria-pressed', String(active));
   button.onclick = async () => {
     const result = await togglePip();
-    if (!result.ok) {
+    if (result.ok) {
+      // 何もしない
+    } else if (result.reason === 'standalone') {
+      // iPhone のホーム画面に追加したアプリでは、iOS が小窓を許していない。
+      alert('ホーム画面に追加したアプリでは、iPhone の制限で小窓が使えません。'
+        + '\n\nSafari でこのページを開いて、同じボタンを押すと小窓が出ます。'
+        + 'Safari 側の記録は、設定 → AI連携 / 同期 で同期コードを入れるとこのアプリとつながります。');
+    } else {
       alert(`小窓を開けませんでした${result.message ? `（${result.message}）` : ''}。`
         + ' もう一度押すか、ブラウザ（Safari / Chrome）を最新にしてください。');
     }

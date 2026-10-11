@@ -1,6 +1,6 @@
 // オフラインでも起動できるよう、アプリシェルをキャッシュする。
 // 学習データは IndexedDB にあるため、Service Worker はデータを扱わない。
-const CACHE = 'aochart-v53';
+const CACHE = 'aochart-v54';
 const SHELL = [
   './',
   './index.html',
@@ -65,6 +65,9 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   // 別のオリジン（同期サーバー）やAPIには、Service Worker は関与しない。
   if (url.origin !== self.location.origin || isApiRequest(url)) return;
+  // 動画（小窓のタイマー）は、ブラウザが範囲を指定して少しずつ読む。
+  // ここで横取りすると範囲の指定が落ち、Safari では再生できなくなるので関与しない。
+  if (url.pathname.includes('/media/')) return;
 
   // 画面そのものの読み込みかどうか。オフラインのときに index.html を代わりに返せるのは、
   // これだけである。JS や JSON の代わりに HTML を返すと、

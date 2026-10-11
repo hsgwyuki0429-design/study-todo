@@ -71,3 +71,84 @@ test("小窓に描く数字は、桁が増えても枠に収まる", options, as
   for (const width of widths) assert.ok(width <= 440, `数字がはみ出している（幅 ${width}）`);
   await context.close();
 });
+
+/**
+ * iPhone の Safari のふるまいを Chromium で再現する。
+ *   ・標準の小窓（requestPictureInPicture）は無く、webkitSetPresentationMode だけがある
+ *   ・その場で描いた映像（srcObject）は小窓にできない
+ * standalone を true にすると、ホーム画面のアプリとして開いた状態（小窓が断られる）にする。
+ */
+function imitateIphone({ standalone = false } = {}) {
+  return ({ standalone }) => {
+    Object.defineProperty(Document.prototype, "pictureInPictureEnabled", { configurable: true, get: () => false });
+    Object.defineProperty(navigator, "standalone", { configurable: true, get: () => standalone });
+    const proto = HTMLVideoElement.prototype;
+    proto.webkitSupportsPresentationMode = function () { return !this.srcObject; };
+    Object.defineProperty(proto, "webkitPresentationMode", {
+      configurable: true,
+      get() { return this.__mode ?? "inline"; },
+    });
+    proto.webkitSetPresentationMode = function (mode) {
+      if (standalone && mode === "picture-in-picture") {
+        throw new DOMException("The video element does not support the Picture-in-Picture mode.", "NotSupportedError");
+      }
+      this.__mode = mode;
+      this.dispatchEvent(new Event("webkitpresentationmodechanged"));
+    };
+  };
+}
+
+async function openImitatingIphone(options) {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await context.addInitScript(imitateIphone(options), options);
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(String(error)));
+  const alerts = [];
+  page.on("dialog", (dialog) => { alerts.push(dialog.message()); dialog.accept(); });
+  await page.goto(`${server.origin}/index.html`);
+  await page.waitForFunction(() => document.querySelectorAll(".tabbar button").length > 0);
+  return { context, page, errors, alerts };
+}
+
+test("iPhone の Safari では、前もって作ったタイマーの動画を小窓にする", options, async () => {
+  const { context, page, errors, alerts } = await openImitatingIphone({ standalone: false });
+  await page.waitForFunction(() => document.querySelectorAll("video.pip-source").length === 2);
+
+  await page.locator(".pip-btn").click();
+  await page.waitForFunction(() => document.querySelector(".pip-btn")?.getAttribute("aria-pressed") === "true");
+  const chosen = await page.evaluate(() => [...document.querySelectorAll("video.pip-source")]
+    .filter((video) => video.webkitPresentationMode === "picture-in-picture")
+    .map((video) => ({ src: video.getAttribute("src"), stream: Boolean(video.srcObject) })));
+  assert.deepEqual(chosen, [{ src: "./media/timer.mp4", stream: false }]);
+  assert.deepEqual(alerts, []);
+
+  await page.locator(".pip-btn").click();
+  await page.waitForFunction(() => document.querySelector(".pip-btn")?.getAttribute("aria-pressed") === "false");
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test("iPhone のホーム画面のアプリでは、Safari で開けば使えることを案内する", options, async () => {
+  const { context, page, errors, alerts } = await openImitatingIphone({ standalone: true });
+  await page.locator(".pip-btn").click();
+  await page.waitForFunction(() => document.querySelector(".pip-btn")?.getAttribute("aria-pressed") === "false");
+  await page.waitForTimeout(200);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /ホーム画面に追加したアプリ/);
+  assert.match(alerts[0], /Safari/);
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test("タイマーの動画は、先頭だけ読めば再生を始められる形になっている", options, async () => {
+  // faststart で作っているので、再生に要る情報（moov）が先頭にある。
+  // 後ろにあると、iPhone は小窓を開く前に動画をまるごと読もうとする。
+  const response = await fetch(`${server.origin}/media/timer.mp4`);
+  const head = Buffer.from(await response.arrayBuffer()).subarray(0, 64 * 1024);
+  assert.equal(head.subarray(4, 8).toString(), "ftyp");
+  const moov = head.indexOf("moov");
+  const mdat = head.indexOf("mdat");
+  assert.ok(moov > 0, "先頭 64KB に moov が無い");
+  assert.ok(mdat === -1 || moov < mdat, "moov が mdat より後ろにある");
+});
