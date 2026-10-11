@@ -9,6 +9,7 @@ import { itemsOf, splitPlanItems } from './plan-items.js';
 import { state, q, qLabel, render, loadTasks, refreshToday } from './state.js';
 import { $, el, fmtMS, row, segmented, swipeable, emptyState } from './ui.js';
 import { reportActivity, syncInBackground } from './cloud-sync.js';
+import { pipActive, pipSupported, togglePip } from './pip-timer.js';
 
 const persist = () => api.setSessionState(state.session);
 
@@ -478,8 +479,60 @@ async function markCompletedTasks() {
  * 右上のボタン置き場。時刻そのものはもう出さない（真ん中の合計と重複するため）。
  * 「ホーム」の見出しと同じ行に置くため、renderHome() 側で view-head へ差し込む。
  */
+/**
+ * 小窓（ピクチャー・イン・ピクチャー）に出す内容。
+ * ほかのアプリを開いていても見えるよう、画面のタイマーと同じ数字を出す。
+ */
+export function pipSnapshot() {
+  const s = state.session;
+  const paused = isPaused();
+  if (s.mode === 'challenge') {
+    const limit = s.challengeTimeLimitSeconds ?? 0;
+    const e = challengeElapsed();
+    const title = currentChallengeTask()?.title ?? 'チャレンジ';
+    return {
+      main: fmtMS(s.challengeCountUp ? e : Math.max(0, limit - e)),
+      sub: `${title} ・ ${s.challengeCountUp ? '経過' : '残り'}`,
+      tone: 'danger',
+    };
+  }
+  if (s.mode === 'challenge_review') {
+    const qid = s.reviewQueue[s.reviewIndex];
+    return { main: fmtMS(s.questionElapsed[qid] || 0), sub: `記録 ${s.reviewIndex + 1}/${s.reviewQueue.length}` };
+  }
+  const main = fmtMS(dailyElapsed());
+  if (s.mode === 'idle') return { main, sub: '今日の学習時間', paused: true };
+  const qid = s.currentQuestionId;
+  if (paused) return { main, sub: qid ? `一時停止中 ・ ${qLabel(qid)}` : '一時停止中', paused: true };
+  return { main, sub: qid ? `${qLabel(qid)} ${fmtMS(elapsedOf(qid))}` : '今日の学習時間' };
+}
+
+/** タイマーを小窓で出すボタン。小窓を使えない端末では出さない。 */
+function pipButton() {
+  const button = el('button', 'finish-btn pip-btn');
+  const active = pipActive();
+  // 大きな四角の右下に小さな四角（小窓）が重なった図形。
+  button.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" focusable="false" aria-hidden="true">'
+    + '<path d="M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6h-2V5H5v14h6v2H5a2 2 0 0 1-2-2z"/>'
+    + '<rect x="13" y="13" width="9" height="8" rx="1.5"/></svg>';
+  const label = active ? '小窓を閉じる' : 'タイマーを小窓で表示（ほかのアプリの上に出す）';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  button.setAttribute('aria-pressed', String(active));
+  button.onclick = async () => {
+    const result = await togglePip();
+    if (!result.ok) {
+      alert(`小窓を開けませんでした${result.message ? `（${result.message}）` : ''}。`
+        + ' もう一度押すか、ブラウザ（Safari / Chrome）を最新にしてください。');
+    }
+    render();
+  };
+  return button;
+}
+
 function timerHeadRight(s) {
   const right = el('div', 'view-head-right');
+  if (pipSupported()) right.append(pipButton());
   if (s.mode === 'record_input') {
     // 間違って採点・暗記に進んでしまったときのために、解答中へ戻すボタンを置く。
     const back = el('button', 'finish-btn', '戻る');

@@ -5,7 +5,8 @@ import * as api from './api.js';
 import { seedIfEmpty } from './seed.js';
 import { state, setRenderer, render, refreshToday, loadTasks } from './state.js';
 import { $ } from './ui.js';
-import { heartbeatActivity, renderHome, tickHome } from './home.js';
+import { heartbeatActivity, pipSnapshot, renderHome, tickHome } from './home.js';
+import { onPipChange, preparePip } from './pip-timer.js';
 import { renderRecords } from './records.js';
 import { renderSchedule } from './schedule.js';
 import { renderSettings, applyTheme } from './settings.js';
@@ -191,6 +192,13 @@ async function boot() {
   render();
 
   setInterval(tickHome, 250);
+  // タイマーの小窓。タップしてから用意すると間に合わないので、先に用意しておく。
+  try {
+    preparePip(pipSnapshot);
+    onPipChange(() => render());
+  } catch (err) {
+    console.warn('小窓を用意できませんでした:', err.message);
+  }
   // 学習中であることを、ときどきクラウドへ送り直す（AIに動かされないため）。
   // 送れなくても学習は止まらない。
   setInterval(heartbeatActivity, 60 * 1000);
