@@ -1047,3 +1047,8 @@ button:active { filter: brightness(.94); }
 .memo-mini-title { font-size: 12px; font-weight: 600; color: var(--violet); }
 .memo-mini-body { font-size: 13px; }
 .memo-mini-item { display: grid; gap: 2px; }
+
+/* タイマーの小窓（ピクチャー・イン・ピクチャー）の元になる動画。
+   Safari は文書の中にある動画でないと小窓にできないので、見えない大きさで置く。 */
+.pip-source { position: fixed; left: 0; bottom: 0; width: 2px; height: 2px; opacity: 0.01; pointer-events: none; z-index: -1; }
+.pip-btn[aria-pressed='true'] { color: var(--accent); }
