@@ -1085,7 +1085,7 @@ button:active { filter: brightness(.94); }
 .day-stack { display: flex; flex-direction: column-reverse; gap: 2px; }
 .day-stack .sq, .day-stack .sq-plan { border-radius: 4px; box-shadow: none; }
 .day-stack .sq-plan { box-shadow: inset 0 0 0 1px var(--line-strong); background: none; }
-.week-page .day-col { width: auto; text-align: center; }
+.week-page .day-col { width: auto; text-align: center; flex: none; height: 5.2em; }
 .week-page .day-label { flex-direction: column; align-items: center; gap: 0; }
 .week-page .day-date { font-size: 13px; }
 .week-page .day-weekday { font-size: 12px; }

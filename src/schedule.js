@@ -25,7 +25,7 @@ const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
 const MONTHS = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'];
 
 /** 最初に出す週の数（今日の前後）と、端に近づいたときに足す週の数。nearEdge は画面何枚ぶん手前で足すか。 */
-const WINDOW = Object.freeze({ before: 8, after: 8, step: 4, nearEdge: 1.5 });
+const WINDOW = Object.freeze({ before: 26, after: 26, step: 13, nearEdge: 3 });
 
 const shortDate = (dateKey) => `${Number(dateKey.slice(5, 7))}/${Number(dateKey.slice(8, 10))}`;
 const weekdayOf = (dateKey) => new Date(Date.parse(`${dateKey}T00:00:00Z`)).getUTCDay();
@@ -153,6 +153,7 @@ async function buildRows(from, to, { today, questionType, planner }) {
 
 let context = null;     // いま描いてある範囲と、行を作るための道具
 let extending = false;
+let settleTimer = null;
 
 const listEl = () => screenEl()?.querySelector('.day-list');
 
@@ -168,9 +169,12 @@ async function extend(direction) {
     const nodes = await buildRows(from, to, context);
     if (direction < 0) {
       const before = list.scrollWidth;
+      // 左へ足すと見えている位置がずれるので、足したぶんだけ戻す。
+      // スナップが効いたままだと戻した位置が別の週へ飛ぶので、その間だけ切る。
+      list.style.scrollSnapType = 'none';
       list.prepend(...nodes);
-      // 左へ足したぶんだけ、見えている位置がずれないように戻す。
       list.scrollLeft += list.scrollWidth - before;
+      requestAnimationFrame(() => { list.style.scrollSnapType = ''; });
       context.from = from;
     } else {
       list.append(...nodes);
@@ -187,9 +191,14 @@ function onScroll(event) {
   const list = event.currentTarget;
   if (state.tab !== 'schedule' || state.schedule.selectedDate) return;
   state.schedule.scrollTop = list.scrollLeft;
-  const edge = list.clientWidth * WINDOW.nearEdge;
-  if (list.scrollLeft < edge) extend(-1);
-  else if (list.scrollWidth - list.scrollLeft - list.clientWidth < edge) extend(1);
+  // 指を動かしている最中・慣性で動いている最中は足さない。止まってから判断する。
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => {
+    if (!list.isConnected) return;
+    const edge = list.clientWidth * WINDOW.nearEdge;
+    if (list.scrollLeft < edge) extend(-1);
+    else if (list.scrollWidth - list.scrollLeft - list.clientWidth < edge) extend(1);
+  }, 200);
 }
 
 /** 今日を含む週のページを表示する。 */
