@@ -1052,3 +1052,32 @@ button:active { filter: brightness(.94); }
    Safari は文書の中にある動画でないと小窓にできないので、見えない大きさで置く。 */
 .pip-source { position: fixed; left: 0; bottom: 0; width: 2px; height: 2px; opacity: 0.01; pointer-events: none; z-index: -1; }
 .pip-btn[aria-pressed='true'] { color: var(--accent); }
+
+/* ---------- スケジュールは横スワイプ ---------- */
+/* 日付が左右にずっと続く。左へ行けば過去、右へ行けば先の予定。 */
+#screen-schedule:has(> .day-list) { overflow-x: auto; overflow-y: auto; }
+#screen-schedule > .view-head { position: sticky; left: 0; top: 0; }
+.day-list { flex-direction: row; align-items: flex-start; width: max-content; padding: 0 var(--page-gutter) 18px; gap: 6px; background: none; }
+.month-heading {
+  position: sticky; left: var(--page-gutter); top: auto; align-self: flex-start;
+  flex: none; white-space: nowrap; padding: 6px 8px; border-radius: 8px;
+}
+.day-list .month-heading + .day-row { border-radius: 9px; }
+.day-row {
+  flex: none; width: 132px; flex-direction: column; gap: 6px; border-radius: 9px;
+  border-bottom: 0; scroll-snap-align: start;
+}
+.day-row .day-col { width: auto; }
+.day-row .day-bars { width: 100%; flex: none; }
+
+/* やること一覧の問題名に付ける、数Ⅰ／数A の印。 */
+.subject-badge {
+  display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: 6px;
+  font-size: 12px; font-weight: 600; vertical-align: 2px;
+  color: var(--accent); background: var(--accent-bg);
+}
+.subject-badge.sub-a { color: var(--danger); background: var(--bg-sub); }
+
+/* 記録タブの例題一覧に出す、取り組み履歴のマス。 */
+.row-history { flex: none; max-width: 45%; }
+.row-history .sq-row { justify-content: flex-end; }

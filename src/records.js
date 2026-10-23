@@ -113,11 +113,30 @@ async function tocView(screen) {
       .filter((x) => x.chapter === toc.chapter && x.section === toc.section)
       .sort((a, b) => a.number - b.number);
     const latest = await api.getLatestEvaluations();
+    // 例題ごとの取り組み履歴（1回＝1マス、古い順）。一覧のまま回数と出来が分かる。
+    const history = new Map();
+    for (const record of (await api.listRecords())
+      .sort((a, b) => String(recordDateOf(a)).localeCompare(String(recordDateOf(b)))
+        || String(a.timestamp).localeCompare(String(b.timestamp)))) {
+      if (!history.has(record.questionId)) history.set(record.questionId, []);
+      history.get(record.questionId).push(record);
+    }
     list.append(backRow(toc.chapter, () => go({ section: null })));
     for (const item of qs) {
+      const attempts = history.get(item.id) ?? [];
+      const right = [];
+      if (attempts.length) {
+        const wrap = el('div', 'row-history');
+        wrap.append(squareRow(attempts.map((record) => attemptSquare(record, {
+          label: `${fmtDate(recordDateOf(record))} ${item.label}`,
+        }))));
+        right.push(wrap);
+      }
+      right.push(el('span', 'row-chevron', CHEVRON));
       const node = row({
         title: item.label,
-        right: el('span', 'row-chevron', CHEVRON),
+        sub: attempts.length ? `${attempts.length}回` : null,
+        right,
         onClick: () => go({ questionId: item.id }),
       });
       node.prepend(latest[item.id] ? evalMark(latest[item.id]) : el('span', 'eval-mark', '・'));

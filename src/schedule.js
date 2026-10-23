@@ -1,6 +1,6 @@
 // スケジュールタブ。
 //
-// 日付がずっと続く1本の並びで、上へスクロールすれば過去、下へ行けば先の予定が出てくる。
+// 日付がずっと続く横1列の並びで、左へスワイプすれば過去、右へ行けば先の予定が出てくる。
 // タブを押したときは、今日がちょうど画面の真ん中に来るようにする。
 //
 // 1日は「例題」と「エクササイズ」の2段で、中身は正方形のマスだけで表す。
@@ -75,7 +75,7 @@ function dayRow(dateKey, { planner, tasks, records, today, questionType }) {
   if (weekday === 1) node.classList.add('week-start');
   node.onclick = () => {
     const screen = screenEl();
-    state.schedule.scrollTop = screen ? screen.scrollTop : 0;
+    state.schedule.scrollTop = screen ? screen.scrollLeft : 0;
     state.schedule.selectedDate = dateKey;
     render();
   };
@@ -153,10 +153,10 @@ async function extend(direction) {
     const to = direction < 0 ? shiftDateKey(context.from, -1) : shiftDateKey(context.to, WINDOW.step);
     const nodes = await buildRows(from, to, context);
     if (direction < 0) {
-      const before = list.scrollHeight;
+      const before = list.scrollWidth;
       list.prepend(...nodes);
-      // 上へ足したぶんだけ、見えている位置がずれないように戻す。
-      screen.scrollTop += list.scrollHeight - before;
+      // 左へ足したぶんだけ、見えている位置がずれないように戻す。
+      screen.scrollLeft += list.scrollWidth - before;
       context.from = from;
     } else {
       list.append(...nodes);
@@ -172,9 +172,9 @@ async function extend(direction) {
 function onScroll(event) {
   const screen = event.currentTarget;
   if (state.tab !== 'schedule' || state.schedule.selectedDate) return;
-  state.schedule.scrollTop = screen.scrollTop;
-  if (screen.scrollTop < WINDOW.nearEdge) extend(-1);
-  else if (screen.scrollHeight - screen.scrollTop - screen.clientHeight < WINDOW.nearEdge) extend(1);
+  state.schedule.scrollTop = screen.scrollLeft;
+  if (screen.scrollLeft < WINDOW.nearEdge) extend(-1);
+  else if (screen.scrollWidth - screen.scrollLeft - screen.clientWidth < WINDOW.nearEdge) extend(1);
 }
 
 function bindScroll() {
@@ -189,8 +189,8 @@ function centerToday() {
   const screen = screenEl();
   const row = screen?.querySelector('.day-row.is-today');
   if (!screen || !row) return false;
-  screen.scrollTop = Math.max(0, row.offsetTop - (screen.clientHeight - row.offsetHeight) / 2);
-  state.schedule.scrollTop = screen.scrollTop;
+  screen.scrollLeft = Math.max(0, row.offsetLeft - (screen.clientWidth - row.offsetWidth) / 2);
+  state.schedule.scrollTop = screen.scrollLeft;
   return true;
 }
 
@@ -252,7 +252,7 @@ export async function renderSchedule(holder) {
     if (!screen) return;
     if (centering) centerToday();
     else if (state.schedule.restoreScroll != null) {
-      screen.scrollTop = state.schedule.restoreScroll;
+      screen.scrollLeft = state.schedule.restoreScroll;
       state.schedule.restoreScroll = null;
     }
   });
