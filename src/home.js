@@ -395,16 +395,7 @@ async function saveEvaluation(evaluation) {
   }
   state.session = next;
   await refreshAfterRecord();
-  // The next pending example starts only after the evaluation is durable.
-  if (!endingSession && state.session.active) {
-    const first = flattenTasks().find(item => item.type === 'question');
-    if (first) {
-      startQuestion(first.questionId);
-      state.session.currentPlanItemId = first.item?.itemId ?? null;
-      state.session.currentPlanTaskId = first.task?.id ?? null;
-      await persist(); render();
-    }
-  }
+  // 採点のあとは自動でタイマーを始めない。次の問題は自分でタップして始める。
 }
 
 async function recordChallengeEvaluation(evaluation) {
@@ -770,6 +761,18 @@ function appendDoneRecords(list) {
   }
 }
 
+/** 「数Ⅰ」「数A」の印つきの問題名。 */
+function subjectTitle(questionId) {
+  const subject = q(questionId)?.subject;
+  const frag = document.createDocumentFragment();
+  if (subject) {
+    const isA = subject.endsWith('A');
+    frag.append(el('span', `subject-badge${isA ? ' sub-a' : ''}`, isA ? '数A' : '数Ⅰ'));
+  }
+  frag.append(qLabel(questionId));
+  return frag;
+}
+
 function taskListPanel(panel) {
   const tabs = [['todo', 'やること'], ['done', 'やったこと ' + state.today.records.length]];
   const selectTab = (value) => { state.idleTab = value; render(); };
@@ -799,7 +802,7 @@ function taskListPanel(panel) {
     // いま解いている行は色が変わる。もう一度押すと採点へ進むので、その案内だけ残す。
     list.append(
       row({
-        title: qLabel(qid),
+        title: subjectTitle(qid),
         sub: current ? 'もう一度タップすると採点・暗記へ' : null,
         right: stateCells(qid),
         onClick: () => tapTaskQuestion(qid, item.item, item.task),
@@ -971,7 +974,7 @@ function landDrawer(screen) {
       const qid = item.questionId;
       const current = s.currentQuestionId === qid;
       list.append(row({
-        title: qLabel(qid),
+        title: subjectTitle(qid),
         sub: current ? '解いている例題' : null,
         right: stateCells(qid),
         onClick: () => { drawerOpen = false; tapTaskQuestion(qid, item.item, item.task); },

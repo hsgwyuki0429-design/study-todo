@@ -36,7 +36,11 @@ export const fmtDate = (key) => key.replace(/-/g, '/');
 export function row({ title, sub, right, onClick, classes = [] }) {
   const node = el(onClick ? 'button' : 'div', ['row', ...classes].join(' '));
   const main = el('div', 'row-main');
-  if (title != null) main.append(el('div', 'row-title', title));
+  if (title != null) {
+    const t = el('div', 'row-title');
+    t.append(title);
+    main.append(t);
+  }
   if (sub != null) main.append(el('div', 'row-sub', sub));
   node.append(main);
   if (right) node.append(...(Array.isArray(right) ? right : [right]));

@@ -55,7 +55,7 @@ async function resetTimer() { await page.getByRole('button', { name: 'この例�
 async function finish() { await page.evaluate(async () => (await import('./src/home.js')).endSession()); }
 const total = () => page.evaluate(async () => (await import('./src/home.js')).dailyElapsed());
 
-test('solve → review with pauses → result → next example, with measured fields synced to MCP', options, async () => {
+test('solve → review with pauses → result (no auto-start), with measured fields synced to MCP', options, async () => {
   const token = await enableAiLink(server.app);
   const device = await joinDevice(server.app);
   await page.evaluate(async ({ origin, device }) => (await import('./src/cloud-sync.js')).saveCloudConfig({
@@ -74,7 +74,7 @@ test('solve → review with pauses → result → next example, with measured fi
   await page.clock.fastForward(120000);
   await start();
   await page.clock.fastForward(10000); await evaluate();
-  await until(async () => (await session()).currentQuestionId === ids[1]);
+  await until(async () => (await records()).length === 1 && (await session()).currentQuestionId == null);
   const [record] = await records();
   assert.equal(record.solveSeconds, 70); assert.equal(record.reviewSeconds, 30); assert.equal(record.durationSeconds, 100);
   assert.equal(await total(), 100);
@@ -110,13 +110,13 @@ test('end during review, wait hours and reload offline: resume same draft and da
   assert.equal(await total(), 105);
 });
 
-test('home undo cancels one result and time, reopens task, preserves the next running example', options, async () => {
+test('home undo cancels one result and time, reopens task, does not start the next example', options, async () => {
   await start(); await page.clock.fastForward(20000); await review(); await page.clock.fastForward(10000); await evaluate();
-  await until(async () => (await session()).currentQuestionId === ids[1]);
+  await until(async () => (await records()).length === 1 && (await session()).currentQuestionId == null);
   await page.getByRole('button', { name: 'やったこと 1', exact: true }).click();
   await page.getByRole('button', { name: /を未着手に戻す/ }).click();
   await until(async () => (await records()).length === 0);
-  assert.equal((await session()).currentQuestionId, ids[1]);
+  assert.equal((await session()).currentQuestionId, null);
   assert.equal(await total(), 0);
   const tasks = await page.evaluate(async () => (await import('./src/api.js')).getTodayTasks());
   assert.equal(tasks[0].completed, false);
@@ -182,7 +182,7 @@ test('reset button zeroes the paused example, then clears its selection on the n
 test('double evaluation tap and competing draft commits save one result; failed undo is atomic', options, async () => {
   await start(); await page.clock.fastForward(10000); await review();
   await page.evaluate(() => { const button = document.querySelector('.eval-btn'); button.click(); button.click(); });
-  await until(async () => (await session()).currentQuestionId === ids[1]);
+  await until(async () => (await records()).length === 1 && (await session()).currentQuestionId == null);
   assert.equal((await records()).length, 1);
   await page.evaluate(async () => {
     const api = await import('./src/api.js');
@@ -193,7 +193,7 @@ test('double evaluation tap and competing draft commits save one result; failed 
     if (!(await idb.get(STORES.records, record.id))) throw new Error('failed undo deleted record');
     if (JSON.stringify(before) !== JSON.stringify(await api.listOutbox())) throw new Error('failed undo changed outbox');
   });
-  await review();
+  await page.locator('#screen-home .row').first().click(); await review();
   const result = await page.evaluate(async () => {
     const api = await import('./src/api.js');
     const expected = await api.getSessionState();
