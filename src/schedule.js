@@ -1,7 +1,7 @@
 // スケジュールタブ。
 //
-// 日付がずっと続く横1列の並びで、左へスワイプすれば過去、右へ行けば先の予定が出てくる。
-// タブを押したときは、今日がちょうど画面の真ん中に来るようにする。
+// 1週間（月〜日）を1ページにして、左右のスワイプで週を送る。左が過去、右が先の予定。
+// ページの中は7日を横に並べ、マスは上へ積み上げ、日付は下に置く。タブを押したときは、今日を含む週を出す。
 //
 // 1日は「例題」と「エクササイズ」の2段で、中身は正方形のマスだけで表す。
 //
@@ -14,18 +14,18 @@
 
 import * as api from './api.js';
 import { todayKey } from './api.js';
-import { ROW_LABELS, buildDay, dateRange } from './day-model.js';
+import { buildDay, dateRange } from './day-model.js';
 import { shiftDateKey } from './datetime.js';
 import { state, q, qLabel, render } from './state.js';
 import { el } from './ui.js';
-import { attemptSquare, helpPanel, plannedSquare, squareRow } from './squares.js';
+import { attemptSquare, helpPanel, plannedSquare } from './squares.js';
 import { renderDayDetail } from './day-detail.js';
 
 const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
 const MONTHS = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'];
 
-/** 最初に出す範囲と、端に近づいたときに足す日数。 */
-const WINDOW = Object.freeze({ before: 45, after: 60, step: 30, nearEdge: 600 });
+/** 最初に出す週の数（今日の前後）と、端に近づいたときに足す週の数。nearEdge は画面何枚ぶん手前で足すか。 */
+const WINDOW = Object.freeze({ before: 8, after: 8, step: 4, nearEdge: 1.5 });
 
 const shortDate = (dateKey) => `${Number(dateKey.slice(5, 7))}/${Number(dateKey.slice(8, 10))}`;
 const weekdayOf = (dateKey) => new Date(Date.parse(`${dateKey}T00:00:00Z`)).getUTCDay();
@@ -74,11 +74,20 @@ function dayRow(dateKey, { planner, tasks, records, today, questionType }) {
   // 週の区切り（月曜）に薄い線を入れて、続きの中でも週が読み取れるようにする。
   if (weekday === 1) node.classList.add('week-start');
   node.onclick = () => {
-    const screen = screenEl();
-    state.schedule.scrollTop = screen ? screen.scrollLeft : 0;
+    const list = listEl();
+    state.schedule.scrollTop = list ? list.scrollLeft : 0;
     state.schedule.selectedDate = dateKey;
     render();
   };
+
+  // 上に予定・実績のマスが積み重なり、いちばん下に日付が横並びで揃う。
+  const stacks = el('div', 'day-stacks');
+  for (const rowKey of ['example', 'exercise']) {
+    const stack = el('div', `day-stack stack-${rowKey}`);
+    stack.append(...squaresFor(day, rowKey));
+    stacks.append(stack);
+  }
+  node.append(stacks);
 
   const column = el('div', 'day-col');
   const label = el('div', 'day-label');
@@ -91,40 +100,43 @@ function dayRow(dateKey, { planner, tasks, records, today, questionType }) {
   }
   node.append(column);
 
-  const bars = el('div', 'day-bars');
-  for (const rowKey of ['example', 'exercise']) {
-    bars.append(squareRow(squaresFor(day, rowKey), { label: ROW_LABELS[rowKey] }));
-  }
-  node.append(bars);
-
   node.setAttribute('aria-label', `${shortDate(dateKey)}（${WEEKDAYS[weekday]}）`
     + ` 例題 実績${day.attempts.example.length}・予定${day.planned.example.length}`
     + ` エクササイズ 実績${day.attempts.exercise.length}・予定${day.planned.exercise.length}`);
   return node;
 }
 
-/** 月が変わるところに入れる見出し。長く続く並びの中で、いまどのあたりかが分かる。 */
-function monthHeading(dateKey) {
+/** 週の見出し（例: 2026年10月 19日〜25日）。 */
+function weekHeading(monday) {
+  const sunday = shiftDateKey(monday, 6);
   const heading = el('div', 'month-heading');
-  heading.textContent = `${dateKey.slice(0, 4)}年 ${MONTHS[Number(dateKey.slice(5, 7)) - 1]}`;
+  const month = MONTHS[Number(monday.slice(5, 7)) - 1];
+  const endText = sunday.slice(5, 7) === monday.slice(5, 7)
+    ? `${Number(sunday.slice(8, 10))}日`
+    : `${MONTHS[Number(sunday.slice(5, 7)) - 1]}${Number(sunday.slice(8, 10))}日`;
+  heading.textContent = `${monday.slice(0, 4)}年${month} ${Number(monday.slice(8, 10))}日〜${endText}`;
   return heading;
 }
 
-/** 期間ぶんの行（月の見出しつき）を組み立てる。 */
+/** その日を含む週の月曜。 */
+const mondayOf = (dateKey) => shiftDateKey(dateKey, -((weekdayOf(dateKey) + 6) % 7));
+
+/** 期間ぶんの週ページを組み立てる。from は月曜、to は日曜にそろえて渡す。 */
 async function buildRows(from, to, { today, questionType, planner }) {
   const [tasksByDate, attemptsByDate] = await Promise.all([
     api.getTasksByDate(from, to),
     api.getAttemptsByDate(from, to),
   ]);
-  const nodes = [];
-  let month = null;
+  const pages = [];
+  let page = null;
   for (const dateKey of dateRange(from, to)) {
-    const nextMonth = dateKey.slice(0, 7);
-    if (nextMonth !== month) {
-      month = nextMonth;
-      nodes.push(monthHeading(dateKey));
+    if (!page || weekdayOf(dateKey) === 1) {
+      page = el('div', 'week-page');
+      page.dataset.week = dateKey;
+      page.append(weekHeading(dateKey));
+      pages.push(page);
     }
-    nodes.push(dayRow(dateKey, {
+    page.append(dayRow(dateKey, {
       planner,
       tasks: tasksByDate[dateKey] ?? [],
       records: attemptsByDate[dateKey] ?? [],
@@ -132,31 +144,33 @@ async function buildRows(from, to, { today, questionType, planner }) {
       questionType,
     }));
   }
-  return nodes;
+  return pages;
 }
 
 /* ------------------------------------------------------------------ */
-/* スクロール（端に近づいたら日を足す）                                */
+/* 横スワイプ（端の週に近づいたら週を足す）                            */
 /* ------------------------------------------------------------------ */
 
 let context = null;     // いま描いてある範囲と、行を作るための道具
 let extending = false;
 
+const listEl = () => screenEl()?.querySelector('.day-list');
+
 async function extend(direction) {
   if (extending || !context) return;
-  const screen = screenEl();
-  const list = screen?.querySelector('.day-list');
+  const list = listEl();
   if (!list) return;
   extending = true;
   try {
-    const from = direction < 0 ? shiftDateKey(context.from, -WINDOW.step) : shiftDateKey(context.to, 1);
-    const to = direction < 0 ? shiftDateKey(context.from, -1) : shiftDateKey(context.to, WINDOW.step);
+    const days = WINDOW.step * 7;
+    const from = direction < 0 ? shiftDateKey(context.from, -days) : shiftDateKey(context.to, 1);
+    const to = direction < 0 ? shiftDateKey(context.from, -1) : shiftDateKey(context.to, days);
     const nodes = await buildRows(from, to, context);
     if (direction < 0) {
       const before = list.scrollWidth;
       list.prepend(...nodes);
       // 左へ足したぶんだけ、見えている位置がずれないように戻す。
-      screen.scrollLeft += list.scrollWidth - before;
+      list.scrollLeft += list.scrollWidth - before;
       context.from = from;
     } else {
       list.append(...nodes);
@@ -170,27 +184,21 @@ async function extend(direction) {
 }
 
 function onScroll(event) {
-  const screen = event.currentTarget;
+  const list = event.currentTarget;
   if (state.tab !== 'schedule' || state.schedule.selectedDate) return;
-  state.schedule.scrollTop = screen.scrollLeft;
-  if (screen.scrollLeft < WINDOW.nearEdge) extend(-1);
-  else if (screen.scrollWidth - screen.scrollLeft - screen.clientWidth < WINDOW.nearEdge) extend(1);
+  state.schedule.scrollTop = list.scrollLeft;
+  const edge = list.clientWidth * WINDOW.nearEdge;
+  if (list.scrollLeft < edge) extend(-1);
+  else if (list.scrollWidth - list.scrollLeft - list.clientWidth < edge) extend(1);
 }
 
-function bindScroll() {
-  const screen = screenEl();
-  if (!screen || screen.dataset.scrollBound) return;
-  screen.addEventListener('scroll', onScroll, { passive: true });
-  screen.dataset.scrollBound = 'yes';
-}
-
-/** 今日の行が画面のまん中に来るようにする。 */
+/** 今日を含む週のページを表示する。 */
 function centerToday() {
-  const screen = screenEl();
-  const row = screen?.querySelector('.day-row.is-today');
-  if (!screen || !row) return false;
-  screen.scrollLeft = Math.max(0, row.offsetLeft - (screen.clientWidth - row.offsetWidth) / 2);
-  state.schedule.scrollTop = screen.scrollLeft;
+  const list = listEl();
+  const page = list?.querySelector('.day-row.is-today')?.closest('.week-page');
+  if (!list || !page) return false;
+  list.scrollLeft = page.offsetLeft;
+  state.schedule.scrollTop = list.scrollLeft;
   return true;
 }
 
@@ -231,8 +239,9 @@ export async function renderSchedule(holder) {
   if (state.schedule.helpOpen) holder.append(helpPanel());
 
   // 出す範囲。初めて開いたときと「今日」を押したときは、今日を中心に取り直す。
-  const from = state.schedule.from ?? shiftDateKey(today, -WINDOW.before);
-  const to = state.schedule.to ?? shiftDateKey(today, WINDOW.after);
+  const thisMonday = mondayOf(today);
+  const from = state.schedule.from ?? shiftDateKey(thisMonday, -WINDOW.before * 7);
+  const to = state.schedule.to ?? shiftDateKey(thisMonday, WINDOW.after * 7 + 6);
   const planner = await api.createDayPlanner();
   context = { from, to, today, planner, questionType: (questionId) => q(questionId)?.type ?? null };
 
@@ -246,13 +255,12 @@ export async function renderSchedule(holder) {
   state.schedule.centerToday = false;
 
   // 画面へ入ったあとでないと位置を決められないので、次の描画の機会に行う。
+  list.addEventListener('scroll', onScroll, { passive: true });
   requestAnimationFrame(() => {
-    bindScroll();
-    const screen = screenEl();
-    if (!screen) return;
+    if (!list.isConnected) return;
     if (centering) centerToday();
     else if (state.schedule.restoreScroll != null) {
-      screen.scrollLeft = state.schedule.restoreScroll;
+      list.scrollLeft = state.schedule.restoreScroll;
       state.schedule.restoreScroll = null;
     }
   });
